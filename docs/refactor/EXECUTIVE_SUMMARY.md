@@ -167,14 +167,48 @@ With a written architecture:
 
 | Metric | Old Pipeline | New Pipeline (in progress) |
 |--------|-------------|---------------------------|
-| Architecture doc | None | 1100 lines, formally grounded |
+| Architecture doc | None | 1284 lines, formally grounded |
 | Separation of concerns | 1 monolithic function | 4 passes with typed interfaces |
 | Type safety | None (same Lean type in/out) | FGL Value/Producer enforce polarity |
 | Coercion correctness | Ad-hoc (from_int sprinkled everywhere) | Bidirectional typing (mechanically determined) |
 | Heap handling | Separate ad-hoc pass | Co-operations in elaboration (Bauer 2018) |
 | Regression detection | Manual review | Automated differential testing |
 | Parallelizability | Blocked by shared mutable state | Independent passes, typed interfaces |
-| Tests passing (V2) | N/A | 18/54 (4 remaining regressions from elaboration gaps) |
+| Elaboration status | N/A | All test files elaborate successfully (0 failures) |
+| Blocking issue | N/A | Core needs type infrastructure (Composite) — pipeline wiring, not elaboration |
+
+### Methodology That Works (established 2026-05-06)
+
+The methodology that finally produced working elaboration:
+
+1. **Architecture is god.** ARCHITECTURE.md answers what/why. IMPLEMENTATION_PLAN.md
+   answers how. Every line of code traces to a specific section.
+
+2. **21-task execution plan** with exact code for each step. No judgment calls.
+   No "figure it out." Each task is a transcription, not a design decision.
+
+3. **Implementation agent + parallel review agent.** Every time. No exceptions.
+   The review agent catches violations the implementation agent introduces.
+
+4. **Agent coordinator catches slacking review agents.** When the review agent says
+   "CONTINUE" but the implementation deviates from the plan, the coordinator overrides
+   and fixes directly (e.g., removing unauthorized Any pass-throughs, removing canUpcast
+   fallbacks in checkProducer, fixing mode-correctness violations in condition handling).
+
+5. **Mode-correctness principle.** No `typesEqual` dispatch in the elaboration walk.
+   All type comparisons flow through `canUpcast`/`canNarrow`. The coercion table
+   decides everything. `typesEqual` is ONLY the reflexivity axiom (A <: A) inside
+   the subsumption function.
+
+6. **Synthesize maximally, coerce at CHECK boundaries.** Constructs whose type is
+   determined by Γ or form synthesize (DRY — coercion logic in one place).
+   Constructs where expected type flows in from context check (args, assign RHS,
+   return, conditions, if-branches).
+
+7. **Architectural discussions drive plan updates.** When mode-correctness questions
+   arise (e.g., "should IfThenElse check or synth?"), the answer is derived from
+   the literature (Dunfield & Krishnaswami, Levy), recorded in the architecture,
+   and the plan is updated before code is changed.
 
 ---
 

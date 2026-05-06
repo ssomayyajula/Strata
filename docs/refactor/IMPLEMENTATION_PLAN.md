@@ -1014,6 +1014,26 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
 **Why:** IMPLEMENTATION_PLAN.md §"Phase 6" — fullElaborate is the entry point.
 Elaborates each proc body, projects back. `currentProcReturnType` from proc.outputs.
 
+### SMOKE TEST RESULTS (2026-05-06, after tasks 1-18)
+
+All test files that exist elaborate successfully:
+- test_arithmetic: OK (1 proc)
+- test_boolean_logic: OK (1 proc)
+- test_break_continue: OK (4 procs)
+- test_augmented_assign: OK (1 proc)
+- test_class_decl: OK (2 procs)
+- test_class_field_any/init/use: OK
+- test_class_methods: OK (5 procs)
+- test_with_void_enter: OK (4 procs)
+- test_try_except: OK (2 procs)
+- test_for_loop: OK (3 procs)
+
+Zero elaboration failures. The Core error (`Undefined type 'Composite'`) is NOT
+an elaboration issue — it's a pipeline wiring issue: the prelude declares
+`from_Composite` on the `Any` datatype, but `Composite` (a heap infrastructure
+type) isn't registered in `program.types`. The old pipeline's heap parameterization
+pass adds these. Our Task 20 will do the same.
+
 ### 19. Heap co-op Phase 1: analysis (collect reads/writes/callees per procedure)
 
 **File:** Elaborate.lean  
