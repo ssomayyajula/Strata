@@ -197,6 +197,66 @@ def typesEqual (a b : HighType) : Bool :=
   | .UserDefined id1, .UserDefined id2 => id1.text == id2.text
   | _, _ => false
 
+/-! ## Tasks 6-8: synthValue + checkValue (ARCHITECTURE.md §"The Bidirectional Recipe")
+
+Per ARCHITECTURE.md §"What SYNTHESIZES":
+- Literals synthesize their literal type
+- Identifier synthesizes Γ(x)
+- FieldSelect synthesizes field type from classFields
+- StaticCall synthesizes FuncSig.returnType
+- New synthesizes UserDefined ClassName
+
+Per ARCHITECTURE.md §"Subsumption (coercion insertion)":
+- checkValue: synth, compare, coerce or error
+- A <: B → upcast (value→value)
+- A ▷ B → narrow (value→producer) — handled later in checkProducer
+-/
+
+mutual
+
+/-- Synthesize a value and its type from a Laurel expression.
+    Per ARCHITECTURE.md §"What SYNTHESIZES" — elimination forms produce known types. -/
+partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × HighType) := do
+  match expr.val with
+  | .LiteralInt n => pure (.litInt n, .TInt)
+  | .LiteralBool b => pure (.litBool b, .TBool)
+  | .LiteralString s => pure (.litString s, .TString)
+  | .Identifier id =>
+    match (← lookupEnv id.text) with
+    | some (.variable ty) => pure (.var id.text, ty)
+    | some (.function sig) => pure (.var id.text, sig.returnType)
+    | _ => pure (.var id.text, .TCore "Any")
+  | .FieldSelect obj field =>
+    let (objVal, objTy) ← synthValue obj
+    match objTy with
+    | .UserDefined className =>
+      let fieldTy ← lookupFieldType className.text field.text
+      pure (.fieldAccess objVal field.text, fieldTy)
+    | _ => pure (.fieldAccess objVal field.text, .TCore "Any")
+  | .StaticCall callee args =>
+    let sig ← lookupFuncSig callee.text
+    let retTy := match sig with
+      | some s => s.returnType
+      | none => .TCore "Any"
+    let argVals ← args.mapM (fun a => do let (v, _) ← synthValue a; pure v)
+    pure (.staticCall callee.text argVals, retTy)
+  | .New classId =>
+    pure (.var classId.text, .UserDefined classId)
+  | _ => pure (.var "_hole", .TCore "Any")
+
+/-- Check an expression against an expected type, inserting coercions as needed.
+    Per ARCHITECTURE.md §"Subsumption (coercion insertion at CHECK boundaries)":
+    synth(e) = A, expected = B, A ≠ B → insert upcast if A <: B. -/
+partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
+  let (val, actual) ← synthValue expr
+  if typesEqual actual expected then return val
+  match canUpcast actual expected with
+  | some coerce => return (coerce val)
+  | none =>
+    throw (ElabError.typeError s!"Cannot coerce {repr actual} to {repr expected}")
+
+end -- mutual
+
 /-! ## Stub: fullElaborate (pass-through)
 
 Pass-through stub so the build doesn't break while tasks 6+ are implemented.
