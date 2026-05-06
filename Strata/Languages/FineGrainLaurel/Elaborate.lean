@@ -16,7 +16,7 @@ Per ARCHITECTURE.md §"Elaboration (Derivation Transformation)":
 - Four functions: synthValue, checkValue, synthProducer, checkProducer
 - Operations (local): coercions, exceptions, ANF, short-circuit
 - Co-operations (global): heap threading via fixpoint propagation
-- Metadata in reader context (reader = comonad, never dropped)
+- Metadata via smart constructors (ARCHITECTURE.md §"Metadata: Smart Constructors")
 - Projection via splitProducer (bind reassociation, Peyton Jones et al. 1996)
 -/
 
@@ -27,9 +27,29 @@ open Strata.Python.Resolution
 
 public section
 
-/-! ## Types -/
+/-! ## Task 1: Smart Constructors (ARCHITECTURE.md §"Metadata: Smart Constructors")
 
-/-- FGL Value (untyped representation for now — DDM generates the real type). -/
+The ONLY way to build AST nodes. Never write `{ val := ..., md := ... }` directly
+except inside these two definitions.
+-/
+
+/-- Smart constructor for Laurel StmtExprMd nodes.
+    Per ARCHITECTURE.md: "You NEVER write `{ val := ..., md := ... }` directly." -/
+def mkLaurel (md : Imperative.MetaData Core.Expression) (e : StmtExpr) : StmtExprMd :=
+  { val := e, md := md }
+
+/-- Smart constructor for HighTypeMd nodes. -/
+def mkHighTypeMd (md : Imperative.MetaData Core.Expression) (ty : HighType) : HighTypeMd :=
+  { val := ty, md := md }
+
+/-! ## Task 2: FGLValue (ARCHITECTURE.md §"Representation Decisions: Separate Value and Producer Types")
+
+Value category — inert terms: literals, variables, pure constructions.
+Illegal states (producer in value position) are unrepresentable.
+-/
+
+/-- FGL Value: inert terms (literals, variables, fields, upcasts).
+    Per ARCHITECTURE.md: "Positive types (values): int, bool, str, Any, Composite, ListAny, DictStrAny" -/
 inductive FGLValue where
   | litInt (n : Int)
   | litBool (b : Bool)
@@ -47,12 +67,18 @@ inductive FGLValue where
   | staticCall (name : String) (args : List FGLValue)
   deriving Inhabited
 
-/-- FGL Producer (effectful terms). -/
+/-! ## Task 3: FGLProducer (ARCHITECTURE.md §"Representation Decisions: Separate Value and Producer Types")
+
+Producer category — effectful terms: calls, let-bindings, control flow.
+The only negative type: ↑A for any positive A (= a producer that yields A).
+-/
+
+/-- FGL Producer: effectful terms (calls, let-bindings, control flow, coercions).
+    Per ARCHITECTURE.md: "A producer in value position *must* be explicitly sequenced via let-binding" -/
 inductive FGLProducer where
   | returnValue (v : FGLValue)
   | call (name : String) (args : List FGLValue)
   | letProd (var : String) (ty : HighType) (prod : FGLProducer) (body : FGLProducer)
-  | letValue (var : String) (ty : HighType) (val : FGLValue) (body : FGLProducer)
   | assign (target : FGLValue) (val : FGLValue) (body : FGLProducer)
   | varDecl (name : String) (ty : HighType) (init : FGLValue) (body : FGLProducer)
   | ifThenElse (cond : FGLValue) (thn : FGLProducer) (els : FGLProducer)
@@ -69,21 +95,19 @@ inductive FGLProducer where
   | unit
   deriving Inhabited
 
-/-! ## Elaboration Monad
+/-! ## Task 4: ElabM Monad + Helpers (IMPLEMENTATION_PLAN.md §"Phase 4" monad)
 
-Per ARCHITECTURE.md §"Metadata: Reader as Comonad":
-Metadata lives in the reader. When elaboration descends into a subnode,
-it updates currentMd. FGL types have no annotation parameter.
+Per ARCHITECTURE.md §"Elaboration":
+  abbrev ElabM := ReaderT TypeEnv (StateT ElabState (Except ElabError))
+Γ in the reader (immutable). Fresh variable counter in the state.
 -/
 
-/-- Elaboration context: Γ + current source metadata. -/
-structure ElabContext where
-  env : TypeEnv
-  currentMd : Imperative.MetaData Core.Expression := #[]
-
-/-- Elaboration state: fresh variable counter. -/
+/-- Elaboration state: fresh variable counter + current procedure return type.
+    `currentProcReturnType` is just another CHECK position — same subsumption
+    mechanism as arg checking and assignment RHS checking (per IMPLEMENTATION_PLAN.md §Task 4). -/
 structure ElabState where
   freshCounter : Nat := 0
+  currentProcReturnType : HighType := .TCore "Any"
 
 /-- Elaboration errors. -/
 inductive ElabError where
@@ -96,9 +120,12 @@ instance : ToString ElabError where
     | .typeError msg => s!"Elaboration type error: {msg}"
     | .unsupported msg => s!"Elaboration unsupported: {msg}"
 
-abbrev ElabM := ReaderT ElabContext (StateT ElabState (Except ElabError))
+/-- The elaboration monad. Γ (TypeEnv) in reader, fresh counter in state.
+    Per ARCHITECTURE.md §"Monad carries context — ReaderT/StateT". -/
+abbrev ElabM := ReaderT TypeEnv (StateT ElabState (Except ElabError))
 
-/-- Generate a fresh variable name. -/
+/-- Generate a fresh variable name. Per ARCHITECTURE.md §"Freshness ensures soundness":
+    Elaboration MUST use freshVar for all intermediate bindings. -/
 def freshVar (pfx : String := "tmp") : ElabM String := do
   let s ← get
   set { s with freshCounter := s.freshCounter + 1 }
@@ -106,35 +133,51 @@ def freshVar (pfx : String := "tmp") : ElabM String := do
 
 /-- Look up a name in Γ. -/
 def lookupEnv (name : String) : ElabM (Option NameInfo) := do
-  pure (← read).env.names[name]?
+  pure (← read).names[name]?
 
 /-- Get a function signature from Γ. -/
 def lookupFuncSig (name : String) : ElabM (Option FuncSig) := do
-  match (← read).env.names[name]? with
+  match (← read).names[name]? with
   | some (.function sig) => pure (some sig)
   | _ => pure none
 
-/-! ## Subtyping and Narrowing (per ARCHITECTURE.md §"Coercion Table")
+/-- Look up the type of a field on a class.
+    Falls back to Any if the class or field is unknown. -/
+def lookupFieldType (className field : String) : ElabM HighType := do
+  let env ← read
+  match env.classFields[className]? with
+  | some fields =>
+      match fields.find? (fun (n, _) => n == field) with
+      | some (_, ty) => pure ty
+      | none => pure (.TCore "Any")
+  | none => pure (.TCore "Any")
 
-Two relations:
-- A <: B (subtyping): value→value, infallible
-- A ▷ B (narrowing): value→producer, fallible
+/-! ## Task 5: Coercion Table (ARCHITECTURE.md §"The coercion table")
+
+Two relations, determined by the types:
+- A <: B (subtyping) → value-level upcast (infallible). `int <: Any` via valFromInt.
+- A ▷ B (narrowing) → producer-level downcast (fallible). `Any ▷ bool` via Any_to_bool.
+The type tells you which. You don't decide.
 -/
 
-/-- Can we upcast A to B? Returns the coercion function name. -/
+/-- Can we upcast actual to expected? Returns the value-level coercion function.
+    Per ARCHITECTURE.md §"Subtyping (value-level, infallible)":
+    Γ ⊢_v e ⇒ A    A <: B  ⊢  Γ ⊢_v upcast(e) ⇐ B -/
 def canUpcast (actual expected : HighType) : Option (FGLValue → FGLValue) :=
   match actual, expected with
-  | .TInt, .TCore "Any" => some FGLValue.fromInt
-  | .TBool, .TCore "Any" => some FGLValue.fromBool
-  | .TString, .TCore "Any" => some FGLValue.fromStr
-  | .TFloat64, .TCore "Any" => some FGLValue.fromFloat
-  | .UserDefined _, .TCore "Any" => some FGLValue.fromComposite
-  | .TCore "ListAny", .TCore "Any" => some FGLValue.fromListAny
-  | .TCore "DictStrAny", .TCore "Any" => some FGLValue.fromDictStrAny
-  | .TVoid, .TCore "Any" => some (fun _ => FGLValue.fromNone)
+  | .TInt, .TCore "Any" => some .fromInt
+  | .TBool, .TCore "Any" => some .fromBool
+  | .TString, .TCore "Any" => some .fromStr
+  | .TFloat64, .TCore "Any" => some .fromFloat
+  | .UserDefined _, .TCore "Any" => some .fromComposite
+  | .TCore "ListAny", .TCore "Any" => some .fromListAny
+  | .TCore "DictStrAny", .TCore "Any" => some .fromDictStrAny
+  | .TVoid, .TCore "Any" => some (fun _ => .fromNone)
   | _, _ => none
 
-/-- Can we narrow A to B? Returns the downcast procedure name. -/
+/-- Can we narrow actual to expected? Returns the downcast procedure name.
+    Per ARCHITECTURE.md §"Narrowing (producer-level, fallible)":
+    Γ ⊢_v e ⇒ A    A ▷ B  ⊢  Γ ⊢_p narrow(e) : B -/
 def canNarrow (actual expected : HighType) : Option String :=
   match actual, expected with
   | .TCore "Any", .TBool => some "Any_to_bool"
@@ -144,334 +187,26 @@ def canNarrow (actual expected : HighType) : Option String :=
   | .TCore "Any", .UserDefined _ => some "Any..as_Composite!"
   | _, _ => none
 
-/-- Are two types equal (no coercion needed)? -/
+/-- Are two types equal (no coercion needed)?
+    Per ARCHITECTURE.md: "If actual = expected → no coercion" -/
 def typesEqual (a b : HighType) : Bool :=
   match a, b with
-  | .TInt, .TInt => true
-  | .TBool, .TBool => true
-  | .TString, .TString => true
-  | .TFloat64, .TFloat64 => true
-  | .TVoid, .TVoid => true
+  | .TInt, .TInt | .TBool, .TBool | .TString, .TString
+  | .TFloat64, .TFloat64 | .TVoid, .TVoid => true
   | .TCore n1, .TCore n2 => n1 == n2
   | .UserDefined id1, .UserDefined id2 => id1.text == id2.text
   | _, _ => false
 
-/-! ## The Four Functions (Bidirectional Walk)
+/-! ## Stub: fullElaborate (pass-through)
 
-Per ARCHITECTURE.md §"The Bidirectional Recipe":
-- synthValue: infer type of a value expression
-- checkValue: check expression against expected type (insert upcast if needed)
-- synthProducer: infer type of a producer expression
-- checkProducer: check expression against expected type (insert downcast if needed)
--/
+Pass-through stub so the build doesn't break while tasks 6+ are implemented.
+Called by PySpecPipeline.lean. -/
 
-/-- Sequence two producers. Replaces .unit continuations with the next producer. -/
-private def sequenceProducers (first second : FGLProducer) : FGLProducer :=
-  match first with
-  | .unit => second
-  | .assign target val .unit => .assign target val second
-  | .varDecl name ty init .unit => .varDecl name ty init second
-  | .assert cond .unit => .assert cond second
-  | .assume cond .unit => .assume cond second
-  | _ => .seq first second
-
-/-- Enter a subnode's metadata context. The reader comonad: extract md from the
-    input node, make it available for projection output. -/
-private def withNodeMd (node : StmtExprMd) (action : ElabM α) : ElabM α :=
-  withReader (fun ctx => { ctx with currentMd := node.md }) action
-
-mutual
-
-/-- Synthesize a value: infer the type from the expression structure or Γ. -/
-partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × HighType) := withNodeMd expr do
-  match expr.val with
-  | .LiteralInt n => pure (.litInt n, .TInt)
-  | .LiteralBool b => pure (.litBool b, .TBool)
-  | .LiteralString s => pure (.litString s, .TString)
-  | .Identifier name =>
-      let info ← lookupEnv name.text
-      let ty := match info with
-        | some (.variable t) => t
-        | some (.function sig) => sig.returnType
-        | _ => .TCore "Any"
-      pure (.var name.text, ty)
-  | .FieldSelect obj field =>
-      let (objVal, _objTy) ← synthValue obj
-      pure (.fieldAccess objVal field.text, .TCore "Any")
-  | .StaticCall name args =>
-      let sig ← lookupFuncSig name.text
-      let argVals ← args.mapM fun arg => do
-        let (v, _) ← synthValue arg
-        pure v
-      let retTy := match sig with
-        | some s => s.returnType
-        | none => .TCore "Any"
-      pure (.staticCall name.text argVals, retTy)
-  | _ =>
-      pure (.var "_hole", .TCore "Any")
-
-/-- Check a value against an expected type. Insert upcast if needed. -/
-partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := withNodeMd expr do
-  let (val, actual) ← synthValue expr
-  if typesEqual actual expected then
-    pure val
-  else
-    match canUpcast actual expected with
-    | some coerce => pure (coerce val)
-    | none => pure val
-
-/-- Synthesize a producer from a statement/expression.
-    Handles calls (effectful), control flow, sequencing. -/
-partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) := do
-  match expr.val with
-  | .StaticCall name args => do
-      let sig ← lookupFuncSig name.text
-      -- Check args against param types
-      let checkedArgs ← match sig with
-        | some s =>
-            let pairs := List.zip args s.params
-            pairs.mapM fun (arg, (_, paramTy)) => checkValue arg paramTy
-        | none =>
-            args.mapM fun arg => do let (v, _) ← synthValue arg; pure v
-      let retTy := match sig with
-        | some s => s.returnType
-        | none => .TCore "Any"
-      -- If callee has error output, emit prodCallWithError
-      let hasError := match sig with
-        | some s => s.hasErrorOutput
-        | none => false
-      if hasError then do
-        let resultVar ← freshVar "result"
-        let errorVar ← freshVar "err"
-        pure (.callWithError name.text checkedArgs resultVar errorVar retTy
-              (.TCore "Error") (.returnValue (.var resultVar)), retTy)
-      else
-        pure (.call name.text checkedArgs, retTy)
-  | .Assign targets value => do
-      match targets with
-      | [target] => do
-          -- Get target type
-          let targetTy ← match target.val with
-            | .Identifier name => do
-                let info ← lookupEnv name.text
-                pure (match info with
-                  | some (.variable t) => t
-                  | _ => .TCore "Any")
-            | _ => pure (.TCore "Any")
-          let (targetVal, _) ← synthValue target
-          -- Check RHS against target type
-          let checkedVal ← checkValue value targetTy
-          pure (.assign targetVal checkedVal .unit, targetTy)
-      | _ => pure (.unit, .TCore "Any")
-  | .LocalVariable name typeMd initOpt => do
-      let ty := typeMd.val
-      let initVal ← match initOpt with
-        | some init => checkValue init ty
-        | none => pure (.var "_uninit")
-      pure (.varDecl name.text ty initVal .unit, ty)
-  | .IfThenElse cond thenBranch elseBranch => do
-      -- Condition must be bool: check with narrowing
-      let condVal ← checkValue cond .TBool
-      let (thenProd, thenTy) ← synthProducer thenBranch
-      let elsProd ← match elseBranch with
-        | some els => do let (p, _) ← synthProducer els; pure p
-        | none => pure .unit
-      pure (.ifThenElse condVal thenProd elsProd, thenTy)
-  | .While cond _invariants _variant body => do
-      let condVal ← checkValue cond .TBool
-      let (bodyProd, _) ← synthProducer body
-      pure (.whileLoop condVal bodyProd .unit, .TVoid)
-  | .Assert cond => do
-      let condVal ← checkValue cond .TBool
-      pure (.assert condVal .unit, .TVoid)
-  | .Assume cond => do
-      let condVal ← checkValue cond .TBool
-      pure (.assume condVal .unit, .TVoid)
-  | .Block stmts _label => do
-      elaborateBlock stmts
-  | .Exit label => do
-      pure (.exit label, .TVoid)
-  | .New classId => do
-      let ty := HighType.UserDefined classId
-      let tmpVar ← freshVar "obj"
-      pure (.newObj classId.text tmpVar ty (.returnValue (.var tmpVar)), ty)
-  | .Return value => do
-      match value with
-      | some v => do
-          let (val, ty) ← synthValue v
-          pure (.returnValue val, ty)
-      | none => pure (.returnValue .fromNone, .TVoid)
-  | _ => do
-      -- Fallback: try as value, wrap in returnValue
-      let (val, ty) ← synthValue expr
-      pure (.returnValue val, ty)
-
-/-- Check a producer against expected type. Insert narrowing if needed. -/
-partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FGLProducer := do
-  let (prod, actual) ← synthProducer expr
-  if typesEqual actual expected then
-    pure prod
-  else
-    match canNarrow actual expected with
-    | some narrowFn => do
-        -- Bind the producer, then narrow the result
-        let tmpVar ← freshVar "narrow"
-        pure (.letProd tmpVar actual prod
-              (.callWithError narrowFn [.var tmpVar] (tmpVar ++ "_ok") (tmpVar ++ "_err")
-                expected (.TCore "Error") (.returnValue (.var (tmpVar ++ "_ok")))))
-    | none =>
-        pure prod
-
-/-- Elaborate a block (list of statements) into a sequenced producer.
-    Per ARCHITECTURE.md: blocks are nested lets (CBV → FGCBV embedding). -/
-partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FGLProducer × HighType) := do
-  match stmts with
-  | [] => pure (.unit, .TVoid)
-  | [last] => synthProducer last
-  | stmt :: rest => do
-      let (stmtProd, _stmtTy) ← synthProducer stmt
-      let (restProd, restTy) ← elaborateBlock rest
-      pure (sequenceProducers stmtProd restProd, restTy)
-
-end -- mutual
-
-/-! ## Projection: FGL → Laurel (per ARCHITECTURE.md §"Projection")
-
-splitProducer implements bind reassociation (let-floating).
-Flattens nested prodLetProd into sequential statements.
--/
-
-/-- Project an FGLValue back to a Laurel StmtExprMd. -/
-partial def projectValue (v : FGLValue) (md : Imperative.MetaData Core.Expression := #[])
-    : StmtExprMd :=
-  let mk e := ({ val := e, md := md } : StmtExprMd)
-  match v with
-  | .litInt n => mk (.LiteralInt n)
-  | .litBool b => mk (.LiteralBool b)
-  | .litString s => mk (.LiteralString s)
-  | .var name => mk (.Identifier (Identifier.mk name none))
-  | .fromInt inner => mk (.StaticCall (Identifier.mk "from_int" none) [projectValue inner md])
-  | .fromStr inner => mk (.StaticCall (Identifier.mk "from_str" none) [projectValue inner md])
-  | .fromBool inner => mk (.StaticCall (Identifier.mk "from_bool" none) [projectValue inner md])
-  | .fromFloat inner => mk (.StaticCall (Identifier.mk "from_float" none) [projectValue inner md])
-  | .fromComposite inner => mk (.StaticCall (Identifier.mk "from_Composite" none) [projectValue inner md])
-  | .fromListAny inner => mk (.StaticCall (Identifier.mk "from_ListAny" none) [projectValue inner md])
-  | .fromDictStrAny inner => mk (.StaticCall (Identifier.mk "from_DictStrAny" none) [projectValue inner md])
-  | .fromNone => mk (.StaticCall (Identifier.mk "from_None" none) [])
-  | .fieldAccess obj field => mk (.FieldSelect (projectValue obj md) (Identifier.mk field none))
-  | .staticCall name args => mk (.StaticCall (Identifier.mk name none) (args.map (projectValue · md)))
-
-mutual
-
-/-- Split a producer into (prefix statements, terminal expression).
-    This is the core of projection — bind reassociation / let-floating. -/
-partial def splitProducer (prod : FGLProducer)
-    (md : Imperative.MetaData Core.Expression := #[])
-    : (List StmtExprMd) × StmtExprMd :=
-  let mk e := ({ val := e, md := md } : StmtExprMd)
-  match prod with
-  | .returnValue v => ([], projectValue v md)
-  | .call name args => ([], mk (.StaticCall (Identifier.mk name none) (args.map (projectValue · md))))
-  | .letProd var ty inner body =>
-      let (innerStmts, innerExpr) := splitProducer inner md
-      let varDecl := mk (.LocalVariable (Identifier.mk var none) ({ val := ty, md := md } : HighTypeMd) (some innerExpr))
-      let (bodyStmts, bodyExpr) := splitProducer body md
-      (innerStmts ++ [varDecl] ++ bodyStmts, bodyExpr)
-  | .letValue var ty val body =>
-      let varDecl := mk (.LocalVariable (Identifier.mk var none) ({ val := ty, md := md } : HighTypeMd)
-                          (some (projectValue val md)))
-      let (bodyStmts, bodyExpr) := splitProducer body md
-      ([varDecl] ++ bodyStmts, bodyExpr)
-  | .assign target val body =>
-      let assignStmt := mk (.Assign [projectValue target md] (projectValue val md))
-      let (bodyStmts, bodyExpr) := splitProducer body md
-      ([assignStmt] ++ bodyStmts, bodyExpr)
-  | .varDecl name ty init body =>
-      let decl := mk (.LocalVariable (Identifier.mk name none) ({ val := ty, md := md } : HighTypeMd)
-                       (some (projectValue init md)))
-      let (bodyStmts, bodyExpr) := splitProducer body md
-      ([decl] ++ bodyStmts, bodyExpr)
-  | .ifThenElse cond thn els =>
-      let thnBlock := projectProducer thn md
-      let elsBlock := projectProducer els md
-      ([], mk (.IfThenElse (projectValue cond md) thnBlock (some elsBlock)))
-  | .whileLoop cond body afterProd =>
-      let bodyBlock := projectProducer body md
-      let whileStmt := mk (.While (projectValue cond md) [] none bodyBlock)
-      let (afterStmts, afterExpr) := splitProducer afterProd md
-      ([whileStmt] ++ afterStmts, afterExpr)
-  | .assert cond body =>
-      let assertStmt := mk (.Assert (projectValue cond md))
-      let (bodyStmts, bodyExpr) := splitProducer body md
-      ([assertStmt] ++ bodyStmts, bodyExpr)
-  | .assume cond body =>
-      let assumeStmt := mk (.Assume (projectValue cond md))
-      let (bodyStmts, bodyExpr) := splitProducer body md
-      ([assumeStmt] ++ bodyStmts, bodyExpr)
-  | .callWithError callee args resultVar errorVar resultTy errorTy body =>
-      let callExpr := mk (.StaticCall (Identifier.mk callee none) (args.map (projectValue · md)))
-      let resultDecl := mk (.LocalVariable (Identifier.mk resultVar none)
-        ({ val := resultTy, md := md } : HighTypeMd) (some callExpr))
-      let errorDecl := mk (.LocalVariable (Identifier.mk errorVar none)
-        ({ val := errorTy, md := md } : HighTypeMd) (some (mk (.StaticCall (Identifier.mk "NoError" none) []))))
-      let (bodyStmts, bodyExpr) := splitProducer body md
-      ([resultDecl, errorDecl] ++ bodyStmts, bodyExpr)
-  | .exit label => ([mk (.Exit label)], mk (.LiteralBool true))
-  | .labeledBlock label body =>
-      let bodyBlock := projectProducer body md
-      ([mk (.Block [bodyBlock] (some label))], mk (.LiteralBool true))
-  | .newObj className resultVar ty body =>
-      let classId := Identifier.mk className none
-      let newExpr := mk (.New classId)
-      let decl := mk (.LocalVariable (Identifier.mk resultVar none) ({ val := ty, md := md } : HighTypeMd) (some newExpr))
-      let (bodyStmts, bodyExpr) := splitProducer body md
-      ([decl] ++ bodyStmts, bodyExpr)
-  | .seq first second =>
-      let (firstStmts, _) := splitProducer first md
-      let (secondStmts, secondExpr) := splitProducer second md
-      (firstStmts ++ secondStmts, secondExpr)
-  | .unit => ([], mk (.LiteralBool true))
-
-/-- Project a producer to a Laurel block (all statements, wrapped). -/
-partial def projectProducer (prod : FGLProducer)
-    (md : Imperative.MetaData Core.Expression := #[]) : StmtExprMd :=
-  let (stmts, terminal) := splitProducer prod md
-  let allStmts := if stmts.isEmpty then [terminal] else stmts ++ [terminal]
-  { val := .Block allStmts none, md := md }
-
-end -- mutual (splitProducer / projectProducer)
-
-/-! ## Top-Level Elaboration
-
-Elaborates each procedure body, then projects back to Laurel.
--/
-
-/-- Elaborate a single procedure body. -/
-def elaborateProcedure (env : TypeEnv) (proc : Laurel.Procedure) : Except ElabError Laurel.Procedure := do
-  match proc.body with
-  | .Transparent bodyExpr =>
-    let ctx : ElabContext := { env := env, currentMd := bodyExpr.md }
-    let initState : ElabState := { freshCounter := 0 }
-    let ((fglProd, _ty), _finalState) ← (synthProducer bodyExpr).run ctx |>.run initState
-    let projectedBody := projectProducer fglProd bodyExpr.md
-    pure { proc with body := .Transparent projectedBody }
-  | _ => pure proc
-
-/-- Elaborate all procedures in a program. -/
-def elaborateProgram (env : TypeEnv) (program : Laurel.Program)
-    : Except ElabError Laurel.Program := do
-  let mut procs : List Laurel.Procedure := []
-  for proc in program.staticProcedures do
-    let elaborated ← elaborateProcedure env proc
-    procs := procs ++ [elaborated]
-  pure { program with staticProcedures := procs }
-
-/-- Entry point: fullElaborate (called by PySpecPipeline). -/
-def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program)
-    : Except String Laurel.Program :=
-  match elaborateProgram typeEnv program with
-  | .ok prog => .ok prog
-  | .error e => .error (toString e)
+/-- Entry point: fullElaborate (called by PySpecPipeline).
+    Currently a pass-through stub — returns the input program unchanged. -/
+def fullElaborate (_typeEnv : Strata.Python.Resolution.TypeEnv)
+    (program : Strata.Laurel.Program) : Except String Strata.Laurel.Program :=
+  pure program
 
 end -- public section
 
