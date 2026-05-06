@@ -775,79 +775,90 @@ partial def projectValue : FValue → StmtExprMd
   | .valFromNone _ =>
     mkMd (.StaticCall (mkId "from_None") [])
 
-/-- Project an FGL Producer back to Laurel StmtExprMd. -/
-partial def projectProducer : FProducer → StmtExprMd
+/-- Project an FGL Producer back to Laurel StmtExprMd.
+    This uses `projectProducerFlat` to collect all statements from nested
+    prodLetProd/prodVarDecl/prodAssign chains into a FLAT list, avoiding the
+    nested Block problem that Core's translator cannot handle ("local variables
+    in functions are not YET supported (should have been lifted)"). -/
+partial def projectProducer (prod : FProducer) : StmtExprMd :=
+  match prod with
   | .prodReturnValue _ val => projectValue val
   | .prodCall _ callee args =>
-    -- Recognize $Hole sentinel: project back to a proper Hole node
     if callee.val == "$Hole" then
       mkMd (.Hole (deterministic := false))
     else
       mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))
-  | .prodLetProd _ var ty prod body =>
-    let prodExpr := projectProducer prod
-    let bodyExpr := projectProducer body
-    let varDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some prodExpr))
-    mkMd (.Block [varDecl, bodyExpr] none)
-  | .prodLetValue _ var ty val body =>
-    let valExpr := projectValue val
-    let bodyExpr := projectProducer body
-    let varDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some valExpr))
-    mkMd (.Block [varDecl, bodyExpr] none)
-  | .prodAssign _ target val body =>
-    let targetExpr := projectValue target
-    let valExpr := projectValue val
-    let bodyExpr := projectProducer body
-    let assignStmt := mkMd (.Assign [targetExpr] valExpr)
-    mkMd (.Block [assignStmt, bodyExpr] none)
-  | .prodVarDecl _ name ty init body =>
-    -- Recognize $uninit sentinel: project as LocalVariable without initializer.
-    -- When the body is a trivial continuation (prodReturnValue), don't nest in a Block.
-    -- This preserves flat structure needed by downstream resolve pass.
-    match init with
-    | .valVar _ sentinel =>
-      if sentinel.val == "$uninit" then
-        -- Scope-hoisted declaration with no initializer.
-        -- Check if body is trivial (just returns the declared variable).
-        match body with
-        | .prodReturnValue _ _ =>
-          -- Trivial continuation: emit just the LocalVariable (flat, no Block nesting)
-          mkMd (.LocalVariable (mkId name.val) (projectType ty) none)
-        | _ =>
-          -- Non-trivial continuation: need to nest
-          let bodyExpr := projectProducer body
-          mkMd (.Block [mkMd (.LocalVariable (mkId name.val) (projectType ty) none), bodyExpr] none)
-      else
-        let bodyExpr := projectProducer body
-        mkMd (.Block [mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init))), bodyExpr] none)
-    | _ =>
-      let bodyExpr := projectProducer body
-      mkMd (.Block [mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init))), bodyExpr] none)
   | .prodIfThenElse _ cond thenBr elseBr =>
     let condExpr := projectValue cond
     let thenExpr := projectProducer thenBr
     let elseExpr := projectProducer elseBr
     mkMd (.IfThenElse condExpr thenExpr (some elseExpr))
+  | _ =>
+    -- For all continuation-bearing producers, collect statements flat
+    let stmts := projectProducerFlat prod
+    match stmts with
+    | [single] => single
+    | _ => mkMd (.Block stmts none)
+
+/-- Collect statements from a Producer into a FLAT list.
+    This is the key flattening mechanism: instead of nesting
+    Block [decl, Block [decl, Block [...]]], we accumulate all
+    declarations and statements into one list. -/
+partial def projectProducerFlat (prod : FProducer) : List StmtExprMd :=
+  match prod with
+  | .prodReturnValue _ val =>
+    -- Terminal: just the value expression (often a trailing identifier or literal)
+    let v := projectValue val
+    match v.val with
+    | .Identifier _ => []  -- Skip bare trailing identifiers (continuation artifacts)
+    | .LiteralBool _ => []
+    | .LiteralInt _ => []
+    | _ => [v]
+  | .prodCall _ callee args =>
+    if callee.val == "$Hole" then
+      [mkMd (.Hole (deterministic := false))]
+    else
+      [mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))]
+  | .prodLetProd _ var ty prod body =>
+    let prodExpr := projectProducer prod
+    let varDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some prodExpr))
+    varDecl :: projectProducerFlat body
+  | .prodLetValue _ var ty val body =>
+    let valExpr := projectValue val
+    let varDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some valExpr))
+    varDecl :: projectProducerFlat body
+  | .prodAssign _ target val body =>
+    let targetExpr := projectValue target
+    let valExpr := projectValue val
+    let assignStmt := mkMd (.Assign [targetExpr] valExpr)
+    assignStmt :: projectProducerFlat body
+  | .prodVarDecl _ name ty init body =>
+    match init with
+    | .valVar _ sentinel =>
+      if sentinel.val == "$uninit" then
+        let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) none)
+        decl :: projectProducerFlat body
+      else
+        let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
+        decl :: projectProducerFlat body
+    | _ =>
+      let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
+      decl :: projectProducerFlat body
   | .prodAssert _ cond body =>
     let condExpr := projectValue cond
-    let bodyExpr := projectProducer body
-    mkMd (.Block [mkMd (.Assert condExpr), bodyExpr] none)
+    mkMd (.Assert condExpr) :: projectProducerFlat body
   | .prodAssume _ cond body =>
     let condExpr := projectValue cond
-    let bodyExpr := projectProducer body
-    mkMd (.Block [mkMd (.Assume condExpr), bodyExpr] none)
-  | .prodWhile _ cond _invs body after =>
+    mkMd (.Assume condExpr) :: projectProducerFlat body
+  | .prodWhile _ cond _invs loopBody after =>
     let condExpr := projectValue cond
-    let bodyExpr := projectProducer body
-    let afterExpr := projectProducer after
-    mkMd (.Block [mkMd (.While condExpr [] none bodyExpr), afterExpr] none)
+    let bodyExpr := projectProducer loopBody
+    mkMd (.While condExpr [] none bodyExpr) :: projectProducerFlat after
   | .prodNew _ name resultVar ty body =>
-    let bodyExpr := projectProducer body
     let newExpr := mkMd (.New (mkId name.val))
     let varDecl := mkMd (.LocalVariable (mkId resultVar.val) (projectType ty) (some newExpr))
-    mkMd (.Block [varDecl, bodyExpr] none)
+    varDecl :: projectProducerFlat body
   | .prodCallWithError _ callee args resultVar errorVar resultTy _errorTy body =>
-    -- Project as multi-output assignment + isError check
     let callExpr := mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))
     let resultRef := mkMd (.Identifier (mkId resultVar.val))
     let errorRef := mkMd (.Identifier (mkId errorVar.val))
@@ -855,36 +866,20 @@ partial def projectProducer : FProducer → StmtExprMd
     let isErrorCall := mkMd (.StaticCall (mkId "isError") [errorRef])
     let errorCheck := mkMd (.IfThenElse isErrorCall
       (mkMd (.Return (some errorRef))) none)
-    let bodyExpr := projectProducer body
     let varDeclResult := mkMd (.LocalVariable (mkId resultVar.val) (projectType resultTy) none)
     let varDeclError := mkMd (.LocalVariable (mkId errorVar.val)
       (liftType (.TCore "Error")) none)
-    mkMd (.Block [varDeclResult, varDeclError, multiAssign, errorCheck, bodyExpr] none)
+    [varDeclResult, varDeclError, multiAssign, errorCheck] ++ projectProducerFlat body
   | .prodSeq _ first second =>
-    let firstExpr := projectProducer first
-    let secondExpr := projectProducer second
-    mkMd (.Block [firstExpr, secondExpr] none)
+    projectProducerFlat first ++ projectProducerFlat second
   | .prodBlock _ stmts =>
-    -- Flatten: when projected statements are themselves Blocks, inline their children.
-    -- This prevents deep nesting that confuses downstream resolve pass.
-    let projected := stmts.val.toList.map projectProducer
-    let flattened := projected.foldl (init := ([] : List StmtExprMd)) fun acc stmt =>
-      match stmt.val with
-      | .Block innerStmts none =>
-        -- Flatten inner blocks (from prodLetProd/prodVarDecl projections)
-        -- but skip trailing trivial expressions (bare identifiers, literals)
-        let meaningful := innerStmts.filter fun s =>
-          match s.val with
-          | .Identifier _ => false
-          | .LiteralBool _ => false
-          | .LiteralInt _ => false
-          | .StaticCall callee [] => !(callee.text.startsWith "from_") -- skip upcasts used as trailing exprs
-          | _ => true
-        acc ++ meaningful
-      | .Identifier _ => acc  -- Skip bare identifier trailing values
-      | .LiteralBool _ => acc  -- Skip bare literal trailing values
-      | _ => acc ++ [stmt]
-    mkMd (.Block flattened none)
+    stmts.val.toList.foldl (init := ([] : List StmtExprMd)) fun acc p =>
+      acc ++ projectProducerFlat p
+  | .prodIfThenElse _ cond thenBr elseBr =>
+    let condExpr := projectValue cond
+    let thenExpr := projectProducer thenBr
+    let elseExpr := projectProducer elseBr
+    [mkMd (.IfThenElse condExpr thenExpr (some elseExpr))]
 end
 
 /-! ========================================================================
