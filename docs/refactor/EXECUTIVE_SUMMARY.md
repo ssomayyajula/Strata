@@ -8,43 +8,43 @@ to systemic problems that surface in every PR and review cycle.
 
 ### Problems with the Previous Implementation
 
-**1. No North Star for architecture or implementation.**
+**1. Correctness not enforced by types — bugs pass code review.**
 
-Reviews are fragile because there's no single source of truth defining what the code
-SHOULD be. Reviewers check "does this compile" and "do tests pass" but can't verify
-"does this follow the architecture" because no architecture exists. Each contributor
-works off different assumptions about how the pipeline should be structured.
+PR #835 introduced a subtle bug in its first implementation pass because the Lean
+types did not prevent generating incorrect Laurel output. The code compiled, tests
+passed, but the semantic translation was wrong. The bug was only caught during manual
+review — the type system offered no protection. This is symptomatic: `lake build`
+verifies that Lean code is well-typed, not that the translation is semantically correct.
 
-**2. Subtle bugs from differing assumptions.**
+**2. Multiple PRs attacking the same problem from different angles.**
 
-Without a shared architecture, contributors introduce bugs by making reasonable-looking
-changes that violate unstated invariants. Example: PR #835's first pass introduced
-issues because the author's mental model of the pipeline differed from the reviewer's.
-Neither could appeal to a written spec to resolve the disagreement.
+The Composite↔Any coercion issue has been approached from multiple PRs with different
+assumptions about where the coercion belongs, whether it should be a Hole (unsound
+approximation), a `from_Composite` injection, or handled by heap parameterization.
+Without a formal subtyping/narrowing discipline specifying the exact relation and
+where coercions are inserted, each PR makes a locally reasonable choice that may
+conflict with other PRs' assumptions.
 
-**3. Impossible to parallelize.**
+**3. Sequential bottleneck from implicit dependencies.**
 
-PRs get stuck in review hell because:
-- Changing assumptions for successive PRs (PR B depends on PR A's assumptions, which
-  change during A's review)
-- No way to verify PRs independently (each one implicitly depends on the whole system)
-- Reviewers can't approve without understanding the entire context
+PRs depend on each other's unstated assumptions. PR B assumes PR A's output has a
+certain shape, but A's shape changes during review. This creates sequential
+dependencies that prevent parallel work. A shared architecture with typed interfaces
+between passes would make these dependencies explicit and allow independent development.
 
-**4. `lake build` is a low bar for correctness.**
+**4. Lowering passes mask elaboration bugs.**
 
-The build passing gives no confidence that the translation is correct. The type system
-(Lean 4) checks Lean-level types but NOT the semantic correctness of the translation.
-A procedure can type-check in Lean while producing completely wrong Laurel output.
-There's no mechanism for correctness by construction.
+The 8 lowering passes in `translateWithLaurel` (heap parameterization, type hierarchy,
+short-circuit desugaring, ANF lifting, etc.) run after translation and silently fix up
+structural issues in the output. This means Translation can produce subtly wrong Laurel
+and the lowering passes compensate — until they don't, and the bug surfaces as a cryptic
+Core type error far from the source.
 
-**5. No confidence against regressions.**
+**5. No differential testing baseline.**
 
-Every PR potentially introduces bugs because:
-- No differential testing infrastructure
-- No formal specification of what the output should look like
-- "Tests pass" means the SMT solver didn't reject the output — not that the output is correct
-- The translation pipeline conflates multiple concerns (coercion insertion, scope handling,
-  error protocol, heap parameterization) in a single 2100-line function
+There is no automated mechanism to verify that a change doesn't regress previously-passing
+tests. The in-tree tests exercise the full pipeline (Python → SMT), making it impossible
+to distinguish "translation bug" from "verification timeout" from "SMT solver quirk."
 
 ---
 
@@ -79,6 +79,7 @@ Implementation is driven by AI agents operating under strict constraints:
 
 **Standard Preamble** (`AGENT_PREAMBLE.md`): Every agent reads this before writing code.
 It mandates:
+
 - Mechanical derivation from the spec (not problem-solving)
 - No heuristics, no peephole optimizations, no boolean blindness
 - Types determine the implementation (no choices)
@@ -86,6 +87,7 @@ It mandates:
 - Stop on gaps (don't invent workarounds)
 
 **Parallel Review Agents**: Every implementation agent gets a parallel review agent that:
+
 - Checks code compliance (grep-based violation detection)
 - Reads the implementation agent's transcript for process compliance
 - Reports violations immediately
@@ -156,6 +158,7 @@ With a written architecture:
 
 The previous approach to improving the pipeline was: write code, review code, iterate.
 This failed because:
+
 - No shared definition of "correct"
 - Reviews were judgment calls, not mechanical checks
 - Contributors could disagree and both be "right" under their own assumptions
