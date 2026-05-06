@@ -6,7 +6,7 @@
 -- FineGrainLaurel dialect definition, loaded from FineGrainLaurel.dialect.st
 -- NOTE: Changes to FineGrainLaurel.dialect.st are not automatically tracked by the build system.
 -- Update this file (e.g. this comment) to trigger a recompile after modifying FineGrainLaurel.dialect.st.
--- Last grammar change: initial definition with Value and Producer categories.
+-- Last grammar change: added prodExit for break/continue control flow preservation.
 
 module
 

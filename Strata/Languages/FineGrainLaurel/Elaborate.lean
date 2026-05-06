@@ -466,9 +466,12 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
       let (rhsProd, rhsTy) ← synthProducer value
       pure (rhsProd, rhsTy)
 
-  -- Block: nested prodLetProd via foldr
-  | .Block stmts _label => do
-    elaborateBlock stmts
+  -- Block: nested prodLetProd via foldr. Preserve label for break/continue.
+  | .Block stmts label => do
+    let (blockProd, blockTy) ← elaborateBlock stmts
+    match label with
+    | some lbl => pure (.prodLabeledBlock () (mkAnn lbl) blockProd, blockTy)
+    | none => pure (blockProd, blockTy)
 
   -- IfThenElse: condition must be bool, branches are producers
   | .IfThenElse cond thenBr elseBr => do
@@ -535,10 +538,9 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
       (.prodAssume () (.valVar () (mkAnn condTmp))
         (.prodReturnValue () (.valLiteralBool () (mkAnn true)))), .TVoid)
 
-  -- Exit (break/continue label)
-  | .Exit _label =>
-    -- ARCHITECTURE GAP: Exit maps to control flow that doesn't fit FGL directly
-    pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TVoid)
+  -- Exit (break/continue label) — per ARCHITECTURE.md §"Break/Continue Labels"
+  | .Exit label =>
+    pure (.prodExit () (mkAnn label), .TVoid)
 
   -- Hole: nondeterministic/deterministic values - pass through unchanged.
   -- The Hole is preserved as a StaticCall to a special sentinel that projectProducer
@@ -883,6 +885,13 @@ partial def splitProducer : FProducer → (List StmtExprMd) × StmtExprMd
     let errCheck := mkMd (.IfThenElse isErrorCall (mkMd (.Return (some exceptionWrapped))) none)
     let (bodyStmts, bodyExpr) := splitProducer body
     ([rDecl, eDecl, callAssign, errCheck] ++ bodyStmts, bodyExpr)
+
+  | .prodExit _ label =>
+    ([], mkMd (.Exit label.val))
+
+  | .prodLabeledBlock _ label body =>
+    let bodyExpr := projectProducer body
+    ([], mkMd (.Block [bodyExpr] (some label.val)))
 
   | .prodSeq _ first second =>
     let (ms, _) := splitProducer first

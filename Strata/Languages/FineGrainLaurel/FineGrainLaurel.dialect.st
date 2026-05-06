@@ -137,6 +137,13 @@ op prodSeq (first: Producer, second: Producer): Producer =>
 op prodBlock (stmts: SemicolonSepBy Producer): Producer =>
   @[prec(1000)] "{" stmts "}";
 
+// Exit a labelled block (break/continue control flow)
+op prodExit (label: Str): Producer => "exit " label;
+
+// Labeled block (target of prodExit — models break/continue)
+op prodLabeledBlock (label: Str, body: Producer): Producer =>
+  @[prec(0)] "block " label " {" body:0 "}";
+
 // ===========================================================================
 // Top-level Declarations (reuse Laurel structure)
 // ===========================================================================
