@@ -197,6 +197,11 @@ def freshVar (pfx : String := "tmp") : ElabM String := do
 def lookupEnv (name : String) : ElabM (Option NameInfo) := do
   pure (← read).names[name]?
 
+/-- Extend Γ with a variable binding. Used at binding sites (parameters, locals).
+    This is how Γ grows as elaboration descends under binders — standard type theory. -/
+def extendEnv (name : String) (ty : HighType) (action : ElabM α) : ElabM α := do
+  withReader (fun env => { env with names := env.names.insert name (.variable ty) }) action
+
 /-- Get a function signature from Γ. -/
 def lookupFuncSig (name : String) : ElabM (Option FuncSig) := do
   match (← read).names[name]? with
@@ -574,7 +579,13 @@ partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FGLProducer × Low
   | [last] => synthProducer last
   | stmt :: rest =>
     let (firstProd, _) ← synthProducer stmt
-    let (restProd, restTy) ← elaborateBlock rest
+    -- Extend Γ at binding sites: LocalVariable introduces a name into scope for rest.
+    -- This is standard type theory: Γ grows under binders.
+    let elaborateRest := elaborateBlock rest
+    let (restProd, restTy) ← match stmt.val with
+      | .LocalVariable nameId typeMd _ =>
+          extendEnv nameId.text typeMd.val elaborateRest
+      | _ => elaborateRest
     pure (sequenceProducers firstProd restProd, restTy)
 
 end -- mutual

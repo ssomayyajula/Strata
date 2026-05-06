@@ -1200,6 +1200,33 @@ This IS the type erasure for New: `New "Foo"` → `MkComposite(freshRef, Foo_Typ
 ```
 And Assign to FieldSelect → updateField(heap, obj, field, BoxT(val)).
 
+### 28. Fix Assign: track local variable types in ElabState
+
+**Diagnosis:** `lookupEnv` queries Γ (global TypeEnv). Function-local variables
+(scope-hoisted by Translation as `LocalVariable x int _`) are NOT in Γ. So the
+Assign case gets `TCore "Any"` for locals, causing spurious `from_int` upcasts.
+
+**Fix:** Add local scope to ElabState:
+```lean
+structure ElabState where
+  freshCounter : Nat := 0
+  currentProcReturnType : HighType := .TCore "Any"
+  localTypes : Std.HashMap String HighType := {}  -- function-local variable types
+```
+
+When `synthProducer` processes `.LocalVariable nameId typeMd _`:
+- Record `localTypes[nameId.text] := typeMd.val`
+
+When looking up a target type (Assign case, line 388):
+- Check `(← get).localTypes[id.text]?` FIRST
+- Fall back to `lookupEnv` (global Γ) only if not found locally
+
+Same for synthValue's `.Identifier` case — check local scope first.
+
+**Why:** Per ARCHITECTURE.md §"The Bidirectional Recipe" — assignment RHS is
+checked against the TARGET variable's declared type. That type comes from the
+`LocalVariable` declaration in the same block, not from global Γ.
+
 ### 21. End-to-end validation
 
 ```bash
