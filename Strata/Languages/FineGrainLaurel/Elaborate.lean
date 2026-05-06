@@ -280,7 +280,10 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
       | .ok ((fgl, _), _) => procs := procs ++ [{ proc with body := .Transparent (projectBody bodyExpr.md fgl) }]
       | .error _ => procs := procs ++ [proc]
     | _ => procs := procs ++ [proc]
-  pure { program with staticProcedures := procs, types := heapConstants.types ++ program.types }
+  -- Add just Composite (needed for prelude from_Composite). Not Heap/Field/Box (undefined for non-class tests).
+  let compositeType : TypeDefinition := .Datatype { name := "Composite", typeArgs := [], constructors := [{ name := "MkComposite", args := [{ name := "ref", type := ⟨.TInt, #[]⟩ }] }] }
+  let notSupportedType : TypeDefinition := .Datatype { name := "NotSupportedYet", typeArgs := [], constructors := [{ name := "MkNotSupportedYet", args := [] }] }
+  pure { program with staticProcedures := procs, types := [compositeType, notSupportedType] ++ program.types }
 
 end
 end Strata.FineGrainLaurel
