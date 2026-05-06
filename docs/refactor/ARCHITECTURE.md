@@ -59,7 +59,7 @@ Python AST (user code only)
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
   ↓ [elaborate: effect-passing translation — coercions, errors, heap made explicit]
 e' : FineGrainLaurel.Program (enriched FGCBV — effects explicit)
-  ↓ [project: effect calculus → impure language (trivial cata, all vars as Any)]
+  ↓ [project: effect calculus → impure language (trivial cata)]
 Laurel.Program (effects re-implicit, coercions/bindings as Laurel nodes, ready for Core)
   ↓ [Core translation]
 Core
@@ -1200,9 +1200,9 @@ projectProducer : FGLProducer → StmtExprMd
   ...
 ```
 
-**All projected variable types are `Any`.** Core uses Hindley-Milner unification.
-The prelude operates on `Any`. Precise types (from elaboration's LowType) are
-erased to `Any` during projection.
+**Projected variable types use their actual LowType.** Precise types from elaboration
+Projection uses `liftType` to convert LowType back to HighType for
+variable declarations. No type erasure in projection.
 
 **Uninitialized variables use `Hole`.** Core expects `<?>` for declarations without
 a meaningful initial value.

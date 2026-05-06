@@ -232,6 +232,7 @@ partial def projectValue (md : Imperative.MetaData Core.Expression) : FGLValue â
   | .litInt n => mkLaurel md (.LiteralInt n)
   | .litBool b => mkLaurel md (.LiteralBool b)
   | .litString s => mkLaurel md (.LiteralString s)
+  | .var "_hole" => mkLaurel md (.Hole)
   | .var name => mkLaurel md (.Identifier (Identifier.mk name none))
   | .fromInt v => mkLaurel md (.StaticCall (Identifier.mk "from_int" none) [projectValue md v])
   | .fromStr v => mkLaurel md (.StaticCall (Identifier.mk "from_str" none) [projectValue md v])
@@ -247,14 +248,14 @@ partial def projectValue (md : Imperative.MetaData Core.Expression) : FGLValue â
 partial def projectProducer (md : Imperative.MetaData Core.Expression) : FGLProducer â†’ List StmtExprMd
   | .returnValue v => [projectValue md v]
   | .assign target val body => [mkLaurel md (.Assign [projectValue md target] (projectValue md val))] ++ projectProducer md body
-  | .varDecl name _ty init body => [mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (.TCore "Any")) (some (projectValue md init)))] ++ projectProducer md body
+  | .varDecl name ty init body => [mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (liftType ty)) (some (projectValue md init)))] ++ projectProducer md body
   | .ifThenElse cond thn els => [mkLaurel md (.IfThenElse (projectValue md cond) (mkLaurel md (.Block (projectProducer md thn) none)) (some (mkLaurel md (.Block (projectProducer md els) none))))]
   | .whileLoop cond body after => [mkLaurel md (.While (projectValue md cond) [] none (mkLaurel md (.Block (projectProducer md body) none)))] ++ projectProducer md after
   | .assert cond body => [mkLaurel md (.Assert (projectValue md cond))] ++ projectProducer md body
   | .assume cond body => [mkLaurel md (.Assume (projectValue md cond))] ++ projectProducer md body
-  | .callWithError callee args rv ev _rTy _eTy body =>
+  | .callWithError callee args rv ev rTy _eTy body =>
     let call := mkLaurel md (.StaticCall (Identifier.mk callee none) (args.map (projectValue md)))
-    [mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md (.TCore "Any")) (some call)),
+    [mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md (liftType rTy)) (some call)),
      mkLaurel md (.LocalVariable (Identifier.mk ev none) (mkHighTypeMd md (.TCore "Error")) (some (mkLaurel md (.StaticCall (Identifier.mk "NoError" none) []))))]
     ++ projectProducer md body
   | .exit label => [mkLaurel md (.Exit label)]
@@ -273,7 +274,9 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
     | .Transparent bodyExpr =>
       let retTy := match proc.outputs with | [p] => p.type.val | _ => .TCore "Any"
       let st : ElabState := { freshCounter := 0, currentProcReturnType := retTy }
-      match (synthProducer bodyExpr).run typeEnv |>.run st with
+      -- Extend Î“ with procedure parameters
+      let extEnv := proc.inputs.foldl (fun env p => { env with names := env.names.insert p.name.text (.variable p.type.val) }) typeEnv
+      match (synthProducer bodyExpr).run extEnv |>.run st with
       | .ok ((fgl, _), _) => procs := procs ++ [{ proc with body := .Transparent (projectBody bodyExpr.md fgl) }]
       | .error _ => procs := procs ++ [proc]
     | _ => procs := procs ++ [proc]
