@@ -811,6 +811,80 @@ def translate (options: LaurelTranslateOptions) (program : Program): TranslateRe
   (core, diags)
 
 /--
+Minimal Laurel-to-Core pipeline for V2: resolve + inferHoleTypes + Core translation.
+Skips old lowering passes (heapParameterization, typeHierarchy, modifiesClauses,
+eliminateHoles, desugarShortCircuit, liftExpressionAssignments, eliminateReturns,
+constrainedTypeElim) — those are subsumed by Elaboration in the V2 pipeline.
+-/
+def translateMinimal (options : LaurelTranslateOptions) (program : Program) : TranslateResultWithLaurel :=
+  let program := { program with
+    staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ program.staticProcedures
+  }
+  -- Step 1: Resolve (build SemanticModel)
+  let result := resolve program
+  let resolutionErrors : List DiagnosticModel := if options.emitResolutionErrors then result.errors.toList else []
+  let (program, model) := (result.program, result.model)
+  -- Step 2: inferHoleTypes (cleanup)
+  let program := inferHoleTypes model program
+  -- Re-resolve after inferHoleTypes to ensure model is up-to-date
+  let result := resolve program (some model)
+  let (program, model) := (result.program, result.model)
+  -- Step 3: Core translation
+  let initState : TranslateState := { model := model }
+  let translateToCore : TranslateM Core.Program := do
+    let model := (← get).model
+    let sccDecls := computeSccDecls program
+    let orderedDecls ← sccDecls.flatMapM (fun (procs, isRecursive) => do
+      let isFuncSCC := procs.all (·.isFunctional)
+      if isFuncSCC then
+        let funcs ← procs.mapM (translateProcedureToFunction options isRecursive)
+        if isRecursive then
+          let coreFuncs := funcs.filterMap (fun d => match d with
+            | .func f _ => some f
+            | _ => none)
+          return [Core.Decl.recFuncBlock coreFuncs mdWithUnknownLoc]
+        else
+          return funcs
+      else
+        procs.flatMapM fun proc => do
+          let axiomDecls : List Core.Decl ← match proc.invokeOn with
+            | none => pure []
+            | some trigger => do
+              let axDecl? ← translateInvokeOnAxiom proc trigger
+              pure axDecl?.toList
+          let procDecl ← translateProcedure proc
+          return [Core.Decl.proc procDecl proc.md] ++ axiomDecls
+    )
+    let constantDecls ← program.constants.mapM fun c => do
+      let coreTy := translateType model c.type
+      let body ← c.initializer.mapM (translateExpr ·)
+      return Core.Decl.func {
+        name := ⟨c.name.text, ()⟩
+        typeArgs := []
+        inputs := []
+        output := coreTy
+        body := body
+      } mdWithUnknownLoc
+    let laurelDatatypes := program.types.filterMap fun td => match td with
+      | .Datatype dt => some dt
+      | _ => none
+    let ldatatypes := laurelDatatypes.map (translateDatatypeDefinition model)
+    let groups := groupDatatypes laurelDatatypes ldatatypes
+    let groupedDatatypeDecls := groups.map fun group => Core.Decl.type (.data group) mdWithUnknownLoc
+    -- Emit diagnostics for composite types that have instance procedures.
+    for td in program.types do
+      if let .Composite ct := td then
+        for proc in ct.instanceProcedures do
+          emitDiagnostic $ proc.md.toDiagnostic
+            s!"Instance procedure '{proc.name.text}' on composite type '{ct.name.text}' is not yet supported"
+            DiagnosticType.NotYetImplemented
+    pure { decls := groupedDatatypeDecls ++ constantDecls ++ orderedDecls }
+  let (coreProgramOption, translateState) := runTranslateM initState translateToCore
+  let allDiagnostics := resolutionErrors ++ translateState.diagnostics
+  let coreProgramOption := if translateState.coreProgramHasSuperfluousErrors then none else coreProgramOption
+  (coreProgramOption, allDiagnostics, program)
+
+/--
 Verify a Laurel program using an SMT solver
 -/
 def verifyToVcResults (program : Program)

@@ -360,6 +360,13 @@ public def translateCombinedLaurel (combined : Laurel.Program)
   let (coreOption, errors, _) := translateCombinedLaurelWithLowered combined
   (coreOption, errors)
 
+/-- Minimal Laurel-to-Core for V2: resolve + inferHoleTypes + Core translation.
+    Skips old lowering passes (subsumed by Elaboration in V2 pipeline). -/
+public def translateCombinedLaurelMinimal (combined : Laurel.Program)
+    : (Option Core.Program × List DiagnosticModel × Laurel.Program) :=
+  let (coreOption, errors, resolved) := Laurel.translateMinimal { inlineFunctionsWhenPossible := true } combined
+  (coreOption.map appendCorePartOfRuntime, errors, resolved)
+
 /-- Errors from the pyAnalyzeLaurel pipeline. -/
 public inductive PipelineError where
   /-- The Python source contains invalid code (bad method name, wrong arguments, etc.). -/

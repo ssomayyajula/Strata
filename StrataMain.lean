@@ -750,9 +750,11 @@ def pyAnalyzeV2Command : Command where
       let path := s!"{dir}/{baseName}.laurel"
       IO.FS.writeFile path (toString (Std.Format.pretty f!"{combinedLaurel}") ++ "\n")
 
+    -- V2 uses minimal pipeline: resolve + inferHoleTypes + Core translation.
+    -- Old lowering passes are subsumed by Elaboration (already run in pyAnalyzeLaurelV2).
     let (coreProgramOption, laurelTranslateErrors, loweredLaurel) ←
       profileStep profile "Laurel to Core translation" do
-        pure (Strata.translateCombinedLaurelWithLowered combinedLaurel)
+        pure (Strata.translateCombinedLaurelMinimal combinedLaurel)
 
     if let some dir := keepDir then
       let path := s!"{dir}/{baseName}.lowered.laurel"
