@@ -501,31 +501,47 @@ returns Box). To get concrete type: `Box → Any` via `Box..AnyVal!`, then
 Smart constructors: `mkLaurel md expr`. Process `.val`, keep `.md`. Synthesized
 nodes inherit metadata from the input node that triggered them.
 
-### Holes (Nondeterminism Effect)
+### Holes (Nondeterminism)
 
-Holes represent unknown/nondeterministic values. They are an elaboration effect —
-elaboration translates them into forms Core can handle.
+Holes are NOT first-class values in FGL. They only appear in Laurel as the RHS
+of Assign or init of LocalVariable. Elaboration absorbs them into the
+Assign/LocalVariable typing rules — they don't exist as separate terms.
 
-**Two kinds of Holes:**
+**Two kinds:**
+- **Nondeterministic** (`.Hole false`): for-loop havoc. "Any value of this type."
+- **Deterministic** (`.Hole true`): unsupported constructs. "Some fixed unknown value."
 
-- **Deterministic Hole** (`.Hole true`): "some fixed value of this type that we
-  don't know." Used for unsupported constructs. Elaboration translates to a call
-  to a freshly generated uninterpreted function (so SMT can reason about it).
+**Typing rules (Holes absorbed into Assign/LocalVariable):**
 
-- **Nondeterministic Hole** (`.Hole false`): "could be ANY value of this type."
-  Used for for-loop havoc. Elaboration translates to a `LocalVariable` with no
-  initializer (`none`), which Core emits as `.nondet` (havoced variable).
+```
+-- LocalVariable with nondeterministic Hole init: no init check, emit varDecl with none
+Γ,x:T ⊢_p body ⇐ C
+──────────────────────────────
+Γ ⊢_p (var x:T := Hole(false); body) ⇐ C     → varDecl x T none body
 
-**Typing:**
-- `Hole(some T)` synthesizes T (type stored in node)
-- `Hole(none)` checks against context (takes whatever type is expected)
+-- LocalVariable with deterministic Hole init: generate uninterpreted function
+Γ,x:T ⊢_p body ⇐ C
+──────────────────────────────
+Γ ⊢_p (var x:T := Hole(true); body) ⇐ C      → varDecl x T (some (staticCall "$hole_N" [inputs...])) body
 
-**After elaboration, no `.Hole` nodes remain in the output.** Core rejects them.
-The effect-passing translation converts them:
-- Deterministic → `StaticCall "$hole_N" [proc_inputs...]` (uninterpreted function)
-- Nondeterministic → `LocalVariable freshVar ty none` (havoc)
+-- Assign with nondeterministic Hole (re-havoc):
+──────────────────────────────
+Γ ⊢_p (x := Hole(false)) ⇒ TVoid              → varDecl x Γ(x) none .unit
 
-This obsoletes both `inferHoleTypes` and `eliminateHoles` from the old pipeline.
+-- Assign with deterministic Hole:
+──────────────────────────────
+Γ ⊢_p (x := Hole(true)) ⇒ TVoid               → varDecl x Γ(x) (some (staticCall "$hole_N" [inputs...])) .unit
+```
+
+**In FGL:** `varDecl` has `init : Option FGLValue`. `none` = nondet (havoc).
+`some v` = initialized (including uninterpreted function calls for deterministic holes).
+
+**In projection:** `none` → `LocalVariable x ty none`. `some v` → `LocalVariable x ty (some (projectValue v))`.
+
+**In Core:** `LocalVariable x ty none` → `Statement.init x ty .nondet` (havoc).
+
+**After elaboration, no `.Hole` nodes remain.** Core rejects them in expression
+position. This obsoletes both `inferHoleTypes` and `eliminateHoles`.
 
 ### Heap (only when classes exist)
 
