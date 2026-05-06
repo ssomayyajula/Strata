@@ -679,12 +679,89 @@ In our system:
    inside another producer (without let-binding) is a type error in FGCBV, though it's
    syntactically representable in CBV. The separate types make it unrepresentable.
 
-### Implementation
+### Implementation: Projection as Bind Reassociation
 
-DDM-generated. Automatic. Erases polarity annotations (`Value`/`Producer` distinction),
-keeps all inserted code (casts, let-bindings, effect handling) as regular Laurel
-`StmtExpr` nodes. No hand-written code. Nothing to decide — the forgetful functor
-is unique.
+Projection views an FGCBV term as a CBV term. The key operation: nested
+`prodLetProd` (monadic binds) become flat sequential statements. This is
+monadic bind ASSOCIATIVITY:
+
+```
+-- FGCBV (nested lets — right-associated):
+let x = (let y = N in K) in body
+
+-- CBV (flat statements — left-associated):
+y := N;
+x := K;
+body
+```
+
+The reassociation law: `let x = (let y = M in N) in K` = `let y = M in let x = N in K`
+
+This is not an optimization — it's the DEFINITION of viewing FGCBV as CBV.
+Every nested `prodLetProd` in the producer position of another `prodLetProd`
+gets reassociated to the same level.
+
+**The projection algorithm:**
+
+Two functions — one extracts the "prefix bindings + terminal expression" from a
+producer, the other flattens into a statement list:
+
+```
+-- Split a producer into (prefix statements, terminal expression)
+-- The terminal is what the producer "produces" — the value that would be bound
+-- by an enclosing `let x = M in ...`
+splitProducer : FGL.Producer → (List Laurel.Stmt, Laurel.Expr)
+
+splitProducer (prodReturnValue v)       = ([], projectValue v)
+splitProducer (prodCall f args)         = ([], StaticCall f (args.map projectValue))
+splitProducer (prodLetProd x ty M body) = let (mStmts, mExpr) := splitProducer M
+                                          let xDecl := LocalVariable x ty (some mExpr)
+                                          let (bodyStmts, bodyExpr) := splitProducer body
+                                          (mStmts ++ [xDecl] ++ bodyStmts, bodyExpr)
+splitProducer (prodAssign t v body)     = let assignStmt := Assign [projectValue t] (projectValue v)
+                                          let (bodyStmts, bodyExpr) := splitProducer body
+                                          ([assignStmt] ++ bodyStmts, bodyExpr)
+splitProducer (prodIfThenElse c t e)    = ([], IfThenElse (projectValue c) (project t) (project e))
+splitProducer (prodWhile c invs b aft)  = let whileStmt := While (projectValue c) invs (project b)
+                                          let (afterStmts, afterExpr) := splitProducer aft
+                                          ([whileStmt] ++ afterStmts, afterExpr)
+
+-- For a procedure body (top level): just get all statements, ignore terminal
+projectBody : FGL.Producer → Laurel.StmtExprMd
+projectBody prod = let (stmts, _terminal) := splitProducer prod
+                   Block stmts none
+```
+
+**Example — the reassociation in action:**
+
+```
+-- FGL (nested):
+prodLetProd "assertCond" bool
+  (prodLetProd "narrow" Any (prodCall "PAnd" [a, a]) (prodCall "Any_to_bool" [valVar "narrow"]))
+  (prodAssert (valVar "assertCond") continuation)
+
+-- splitProducer on the inner prodLetProd:
+-- splitProducer (prodCall "PAnd" [a,a]) = ([], PAnd(a,a))
+-- So: mStmts=[], mExpr=PAnd(a,a)
+-- xDecl = LocalVariable "narrow" Any (some PAnd(a,a))
+-- splitProducer (prodCall "Any_to_bool" [narrow]) = ([], Any_to_bool(narrow))
+-- So: bodyStmts=[], bodyExpr=Any_to_bool(narrow)
+-- Result: ([LocalVariable "narrow" Any (some PAnd(a,a))], Any_to_bool(narrow))
+
+-- Now the outer prodLetProd:
+-- (mStmts, mExpr) = ([LocalVariable "narrow" Any (some PAnd(a,a))], Any_to_bool(narrow))
+-- xDecl = LocalVariable "assertCond" bool (some Any_to_bool(narrow))
+-- Result includes: [LocalVariable "narrow" ..., LocalVariable "assertCond" ..., assert ...]
+
+-- FLAT output:
+var narrow: Any := PAnd(a, a);
+var assertCond: bool := Any_to_bool(narrow);
+assert assertCond;
+```
+
+**No heuristics. No filtering. No "expression vs statement position."**
+Just the monad law `(m >>= f) >>= g = m >>= (λx. f x >>= g)` applied as a
+syntactic transformation: split into prefix + terminal, thread through.
 
 ---
 
