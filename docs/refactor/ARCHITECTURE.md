@@ -508,9 +508,12 @@ injects into the `Any` sum, like `int` or `bool`.
 
 #### Exceptions via the Exception Monad (Standard CBPV Treatment)
 
-In FGCBV/CBPV, exceptions are modeled by the monad `T(A) = A + E`. A computation
-that may throw produces a sum type: either a value of type A (success) or an error
-of type E (failure). This is standard (Levy 2004, Chapter 5; Plotkin & Pretnar 2009).
+In FGCBV/CBPV, the effect monad for our system is `T(A) = Heap → ((A + E) × Heap)`.
+A computation takes the current heap, may modify it, and produces either a value of
+type A (success) or an error of type E (failure), along with the updated heap. This
+combines the state monad (heap threading, co-operation) with the exception monad
+(error sum, operation) in a single `T`. Standard treatment: Levy 2004 Ch.5, 
+Plotkin & Pretnar 2009.
 
 **The fundamental operations are:**
 1. `prodCall "f" [args]` — call the procedure (returns `A + E` as a sum)
