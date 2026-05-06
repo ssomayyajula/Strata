@@ -447,23 +447,30 @@ v ⇐ procReturnType
 Γ ⊢_p (return v) ⇐ procReturnType
 ```
 
-Producer checking fallback (narrowing — when no other producer checking rule matches):
+Narrowing (value → value, partial — precondition-guarded):
 ```
 Γ ⊢_v v ⇒ A    A ▷ B ~~> n
 ─────────────────────────────
-Γ ⊢_p n(v) ⇐ B
+Γ ⊢_v n(v) ⇐ B
 ```
-Narrowing is the producer checking FALLBACK (like subsumption is the value checking
-fallback). It takes a VALUE, applies the narrowing witness `n`, produces a PRODUCER
-that checks against expected type B. Both coercion rules operate on values — the
-difference is what they produce (value vs producer).
+Narrowing is a VALUE checking rule (like subsumption). The witness `n` is a partial
+function (e.g., `Any..as_int!` has precondition `Any..isfrom_int(v)`). Both upcast
+and narrowing produce VALUES. The partiality is a verification concern — the verifier
+emits a proof obligation, not a runtime error branch.
+
+This means: ALL coercion is value-level. No coercion introduces bindings.
+The ONLY producer form that introduces true bindings is `prodCallWithError`
+(procedures with `hasErrorOutput = true`).
 
 **Mode correctness invariants:**
 - Synth: output type determined by inputs (Γ, form, or fixed TVoid)
 - Check: expected type is INPUT from context, never conjured
 - No type equality anywhere — TVoid in while body is a CHECK (semantic constraint)
 - `M to x. N`: M SYNTHS (learn A for binding), N CHECKS against C from context
-- Subsumption is the FALLBACK (fires only when no other checking rule applies)
+- Value subsumption + narrowing are the value checking FALLBACK
+- The ONLY producer-level binding is `prodCallWithError` (hasErrorOutput procedures)
+- All coercion (upcast AND narrowing) is value-level — no bindings introduced
+- Partiality of narrowing is a verification concern, not an elaboration effect
 
 **Summary: which forms synthesize vs check:**
 
@@ -535,23 +542,28 @@ A ▷ B ~~> n         where n : Value(A) → Producer(B)
                     (e.g., Any ▷ bool ~~> Any_to_bool)
 ```
 
-The subsumption/narrowing rules APPLY these witnesses (both are CHECKING rules):
+The subsumption/narrowing rules APPLY these witnesses (both VALUE checking rules):
 
 ```
--- Value subsumption (applies upcast witness — value checking fallback):
+-- Value subsumption (upcast — infallible):
 Γ ⊢_v v ⇒ A    A <: B ~~> c
 ─────────────────────────────
-Γ ⊢_v c(v) ⇐ B                  (value in, value out, B from context)
+Γ ⊢_v c(v) ⇐ B                  (value in, value out)
 
--- Narrowing (applies downcast witness — producer checking fallback):
+-- Narrowing (downcast — partial, precondition-guarded):
 Γ ⊢_v v ⇒ A    A ▷ B ~~> n
 ─────────────────────────────
-Γ ⊢_p n(v) ⇐ B                  (value in, producer out, B from context)
+Γ ⊢_v n(v) ⇐ B                  (value in, value out, may have precondition)
 ```
 
-Key: BOTH are checking rules (B is INPUT from context). BOTH take a VALUE as input.
-The witness IS the coercion function/procedure. `canUpcast` returns the witness `c`.
-`canNarrow` returns the witness `n`. The coercion table is the collection of all witnesses.
+Key: BOTH are value checking rules. BOTH take a value and produce a value.
+Narrowing is partial (the witness `n` may have a `requires` precondition) but
+this is a VERIFICATION concern, not an elaboration concern. Elaboration inserts
+the correct call; the verifier proves the precondition.
+
+`canUpcast` returns the witness `c`. `canNarrow` returns the witness `n`.
+The coercion table is the collection of all witnesses. ALL coercion is value-level.
+No coercion introduces bindings.
 
 All coercion operates on VALUES. If you need to coerce a producer's result, BIND
 it first (`M to x.`), then apply the witness to `x` (a value). Producer checking
