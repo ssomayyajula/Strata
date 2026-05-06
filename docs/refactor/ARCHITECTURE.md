@@ -616,13 +616,52 @@ Our `HighType.TFloat64` maps to `real` in Core. The narrowing accessor is `Any..
 - To use the field value as type T: `Box..AnyVal!(readField(...))` then `Any ▷ T`
 - This is two subsumption steps chained: `Box → Any → T`
 
-**Implementation:** Subsumption is ONE function with three cases:
-1. Reflexivity (A = A via table): no coercion (short-circuit)
-2. Upcast (A <: B via canUpcast): wrap value, stay in value
-3. Narrow (A ▷ B via canNarrow): emit producer, bind to get value back
+**Implementation:** One function, one table, three outcomes:
 
-No `typesEqual` dispatch in the walk. No pattern matching on types. The coercion
-table decides everything. This function is called at every CHECK boundary.
+```lean
+inductive CoercionResult where
+  | refl                                    -- A = A, no coercion
+  | coerce (witness : FGLValue → FGLValue)  -- apply witness
+  | unrelated                               -- type error
+
+def subsume (actual expected : LowType) : CoercionResult :=
+  match actual, expected with
+  -- Reflexivity:
+  | .TInt, .TInt | .TBool, .TBool | .TString, .TString
+  | .TFloat64, .TFloat64 | .TVoid, .TVoid => .refl
+  | .TCore n1, .TCore n2 => if n1 == n2 then .refl else ...
+  -- Upcasts (infallible, value → value):
+  | .TInt, .TCore "Any" => .coerce .fromInt
+  | .TBool, .TCore "Any" => .coerce .fromBool
+  | .TString, .TCore "Any" => .coerce .fromStr
+  | .TFloat64, .TCore "Any" => .coerce .fromFloat
+  | .TCore "Composite", .TCore "Any" => .coerce .fromComposite
+  | .TCore "ListAny", .TCore "Any" => .coerce .fromListAny
+  | .TCore "DictStrAny", .TCore "Any" => .coerce .fromDictStrAny
+  | .TVoid, .TCore "Any" => .coerce (fun _ => .fromNone)
+  | _, .TCore "Box" => .coerce (fun v => .staticCall "Box..Any" [<upcast v to Any first>])
+  -- Narrowing (partial, precondition-guarded, value → value):
+  | .TCore "Any", .TBool => .coerce (fun v => .staticCall "Any_to_bool" [v])
+  | .TCore "Any", .TInt => .coerce (fun v => .staticCall "Any..as_int!" [v])
+  | .TCore "Any", .TString => .coerce (fun v => .staticCall "Any..as_string!" [v])
+  | .TCore "Any", .TFloat64 => .coerce (fun v => .staticCall "Any..as_float!" [v])
+  | .TCore "Any", .TCore "Composite" => .coerce (fun v => .staticCall "Any..as_Composite!" [v])
+  | .TCore "Box", .TCore "Any" => .coerce (fun v => .staticCall "Box..AnyVal!" [v])
+  -- Unrelated:
+  | _, _ => .unrelated
+```
+
+No separate `typesEqual` + `canUpcast` + `canNarrow`. One table. `checkValue` becomes:
+```lean
+checkValue expr expected :=
+  let (val, actual) ← synthValue expr
+  match subsume actual (eraseType expected) with
+  | .refl => val
+  | .coerce c => c val
+  | .unrelated => throw error
+```
+No separate `typesEqual`, `canUpcast`, `canNarrow`. One function (`subsume`),
+one table, called at every CHECK boundary. The table decides everything.
 
 **Critical: coercions go at the USE SITE (argument position, return position),
 NOT at the definition site.** An `int` literal assigned to an `int` variable
