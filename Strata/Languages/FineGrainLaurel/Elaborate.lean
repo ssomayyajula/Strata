@@ -372,8 +372,19 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
     let paramTypes := sig.map (·.params) |>.getD []
     let checkedArgs ← checkArgs args paramTypes
     let retTy := sig.map (·.returnType) |>.getD (.TCore "Any")
+    let hasError := sig.map (·.hasErrorOutput) |>.getD false
     let allArgs := targetVal :: checkedArgs
-    pure (.prodCall () (mkAnn qualName) (mkAnn allArgs.toArray), retTy)
+    -- Type-determined: hasErrorOutput → prodCallWithError, otherwise → prodCall
+    let call ← if hasError then do
+        let resultVar ← freshVar "res"
+        let errorVar ← freshVar "err"
+        pure (.prodCallWithError () (mkAnn qualName) (mkAnn allArgs.toArray)
+          (mkAnn resultVar) (mkAnn errorVar)
+          (highTypeToFGL retTy) (.coreType () (mkAnn "Error"))
+          (.prodReturnValue () (.valVar () (mkAnn resultVar))) : FProducer)
+      else
+        pure (.prodCall () (mkAnn qualName) (mkAnn allArgs.toArray) : FProducer)
+    pure (call, retTy)
 
   | .New name =>
     -- ARCHITECTURE GAP: prodNew needs heap threading (Phase 2 handles this)
