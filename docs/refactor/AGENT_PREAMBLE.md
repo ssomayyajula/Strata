@@ -28,6 +28,10 @@ to a specific section of these documents. If it doesn't, you're making something
 If you can't answer "what/why does the ARCHITECTURE say?" AND "how does the PLAN say
 to do it?" for what you're about to write — STOP.
 
+**These two documents MUST be kept in sync.** If you change something that affects
+what/why (the architecture), update both. If you change something that affects how
+(the plan), update both. A change to one without the other is INCOMPLETE.
+
 ## THERE IS ONLY ONE WAY TO DO IT
 
 The types determine the implementation. The architecture determines the types.
