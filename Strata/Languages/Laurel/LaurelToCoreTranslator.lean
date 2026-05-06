@@ -817,9 +817,8 @@ eliminateHoles, desugarShortCircuit, liftExpressionAssignments, eliminateReturns
 constrainedTypeElim) — those are subsumed by Elaboration in the V2 pipeline.
 -/
 def translateMinimal (options : LaurelTranslateOptions) (program : Program) : TranslateResultWithLaurel :=
-  let program := { program with
-    staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ program.staticProcedures
-  }
+  -- NOTE: coreDefinitionsForLaurel is already prepended by unifiedElaborate (Elaborate.lean:2044).
+  -- Do NOT prepend it again here — that causes duplicate procedure definitions.
   -- Step 1: Resolve (build SemanticModel)
   let result := resolve program
   let resolutionErrors : List DiagnosticModel := if options.emitResolutionErrors then result.errors.toList else []
