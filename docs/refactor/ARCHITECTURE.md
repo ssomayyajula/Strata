@@ -763,9 +763,12 @@ assert assertCond;
 Just the monad law `(m >>= f) >>= g = m >>= (λx. f x >>= g)` applied as a
 syntactic transformation: split into prefix + terminal, thread through.
 
-**Assumption: Laurel has function-level scoping.**
+**Assumption: elaboration generates FRESH names for all bindings.**
 
-The flattening widens variable scope. In the nested form:
+Laurel has block scoping (a `LocalVariable` at the top of a `Block` is scoped
+to that block). The flattening widens variable scope:
+
+In the nested form:
 ```
 let x = (let y = N in K) in body
 ```
@@ -777,15 +780,18 @@ y := N;
 x := K;
 body;
 ```
-`y` is now visible to `body` (it's in the same flat scope).
+`y` is now visible to `body` (same flat scope).
 
-This is SAFE because Laurel uses function-level scoping: all `LocalVariable`
-declarations at function top are visible throughout the body. Translation already
-hoists all declarations to function top (Python's scoping rule). So widening
-inner let-scopes to function scope is semantics-preserving.
+This is SAFE because:
+1. Elaboration generates FRESH variable names for all intermediate bindings
+   (`narrow$1`, `assertCond$2`, `arg$3`, etc. via `freshVar`)
+2. Fresh names cannot clash with any user-defined or prelude names
+3. Therefore scope widening cannot cause variable capture
+4. Additionally, Translation already hoists user-defined locals to function
+   top (Python's scoping rule), so user variables are already function-scoped
 
-**In a block-scoped target language, this flattening would be UNSOUND** (variable
-capture). We'd need alpha-renaming to ensure freshness. In Laurel, it's fine.
+**Invariant to maintain:** Elaboration MUST use `freshVar` for all intermediate
+bindings. If it ever reuses a name, the flattening becomes unsound.
 
 ---
 
