@@ -61,7 +61,6 @@ e : Laurel.Program (precisely-typed, no casts, no effects)
 e' : FineGrainLaurel.Program (Value/Producer types enforce polarity, all coercions + effects explicit)
   ↓ [project: mechanical mapping FGL → Laurel]
 Laurel.Program (coercions/effects as Laurel nodes, ready for Core)
-  ↓ [cleanup: inferHoleTypes, filterPrelude]
   ↓ [Core translation]
 Core
 ```
@@ -497,10 +496,11 @@ injects into the `Any` sum, like `int` or `bool`.
 
 ---
 
-**What remains as genuine cleanup (not elaboration):**
-- `inferHoleTypes` — completing partial type information (could become part of bidirectional synth)
-- `filterPrelude` — dead code elimination (optimization, not semantics)
-- `validateDiamondFieldAccesses` — error checking (could be a precondition on input)
+**Nothing remains as cleanup.** Elaboration subsumes all lowering. `inferHoleTypes`
+is subsumed by bidirectional synth (elaboration infers types at every node).
+`filterPrelude` is a performance optimization — add it back only if Core can't
+handle unused declarations. `validateDiamondFieldAccesses` is an error check that
+should be a precondition on Resolution output, not a post-hoc pass.
 
 ---
 
@@ -929,10 +929,14 @@ Illegal states are unrepresentable. You cannot put a Producer where a Value is
 expected — Lean's type system rejects it at construction time. No runtime checks,
 no predicates, no `by sorry`.
 
-### Metadata: Monad-Comonad Interaction Law
+### Metadata: Reader as Comonad
 
-Translation is monadic (`TransM`). Metadata is comonadic (`WithMetadata`). They
-compose via a formal interaction law:
+Metadata (source locations) flows via the reader monad. Reader is a comonad — the
+input node's `WithMetadata` wrapper is comonadic context that the elaboration monad
+can access at any point without explicit threading.
+
+**Translation:** Input Python nodes carry metadata. The fold extracts `wa.md` and
+attaches to output Laurel nodes via smart constructors (`mkExpr sr expr`).
 
 ```lean
 def translateM (wa : WithMetadata α) (f : α → TransM β) : TransM (WithMetadata β) := do
@@ -940,11 +944,24 @@ def translateM (wa : WithMetadata α) (f : α → TransM β) : TransM (WithMetad
   pure { val := result, md := wa.md }
 ```
 
-This guarantees source locations are never dropped through monadic sequencing.
-Smart constructors (`mkExpr sr expr`) enforce this structurally — they're the
-only way to build Laurel nodes.
+**Elaboration:** The current node's metadata lives in the reader context. When
+elaboration descends into a subnode, it updates `currentMd` from that node's
+`WithMetadata` wrapper. When projection emits a Laurel node, it reads `currentMd`
+and attaches it. No manual threading. No polymorphic FGL types.
 
-### Monad: Simple Stack
+```lean
+structure ElabContext where
+  env : TypeEnv        -- Γ (typing context)
+  currentMd : MetaData -- source location of the node being elaborated
+
+abbrev ElabM := ReaderT ElabContext (StateT ElabState (Except ElabError))
+```
+
+FGL types stay `Value`/`Producer` with no annotation parameter. Metadata is in
+the environment, not in the syntax tree. This is the correct factoring: the
+derivation (FGL) is separate from the source location metadata about that derivation.
+
+### Translation Monad
 
 ```lean
 abbrev TransM := ReaderT TypeEnv (StateT TransState (Except TransError))
@@ -1126,9 +1143,10 @@ There are no "HighLaurel/MidLaurel/LowLaurel" implicit invariants. The invariant
 ARE the types: FineGrainLaurel's `Value`/`Producer` separation makes illegal states
 (producer in value position) unrepresentable at construction time.
 
-After projection, the Laurel output goes through `inferHoleTypes` + `filterPrelude`
-(simple cleanup) then directly to Core translation. No lowering passes needed —
-elaboration already handled everything (coercions, heap threading, type hierarchy, ANF).
+After projection, the Laurel output goes directly to Core translation. No lowering
+passes needed — elaboration already handled everything (coercions, heap threading,
+type hierarchy, ANF). No cleanup passes either — bidirectional synth infers all types,
+and projection produces complete output.
 
 ---
 

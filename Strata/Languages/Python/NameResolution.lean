@@ -188,12 +188,10 @@ private partial def collectFromStmt (s : Python.stmt SourceRange) : List (String
   | .Assign _ targets _value _ =>
       targets.val.toList.flatMap fun target =>
         (extractAssignTargetNames target).map fun n => (n, .TCore "Any")
-  | .AnnAssign _ target _annotation _value _ =>
+  | .AnnAssign _ target annotation _value _ =>
       let names := extractAssignTargetNames target
-      -- All local variables use Any type in the dynamic pipeline.
-      -- Core's unification requires exact type matches and the prelude
-      -- operates on Any, so precise types cause unification failures.
-      names.map fun n => (n, .TCore "Any")
+      let ty := annotationToHighType annotation
+      names.map fun n => (n, ty)
   | .AugAssign _ target _ _ =>
       (extractAssignTargetNames target).map fun n => (n, .TCore "Any")
   | .If _ _ bodyStmts elseStmts =>
@@ -340,15 +338,10 @@ private def detectErrorOutput (body : Array (Python.stmt SourceRange)) : Bool :=
 private def resolveFunctionDef (name : Ann String SourceRange)
     (args : Python.arguments SourceRange)
     (body : Ann (Array (Python.stmt SourceRange)) SourceRange)
-    (_returns : Ann (Option (Python.expr SourceRange)) SourceRange) : (String × NameInfo) :=
-  -- All user function parameters and return types are Any in the dynamic pipeline.
-  -- Core's type checker uses Hindley-Milner unification which requires exact type
-  -- matches. Since all prelude operations (PAdd, PEq, etc.) operate on Any and
-  -- return Any, user functions must also use Any to avoid unification failures.
-  let rawParams := extractParams args
-  let params := rawParams.map fun (pName, _) => (pName, HighType.TCore "Any")
+    (returns : Ann (Option (Python.expr SourceRange)) SourceRange) : (String × NameInfo) :=
+  let params := extractParams args
   let defaults := extractDefaults args
-  let retTy : HighType := .TCore "Any"
+  let retTy := extractReturnType returns
   let hasError := detectErrorOutput body.val
   let hasKw := hasKwargsArg args
   let sig : FuncSig := {
@@ -377,19 +370,17 @@ private def resolveClassDef (name : Ann String SourceRange)
           | _ => "unknown"
         let fieldType := annotationToHighType annotation
         fields := fields ++ [(fieldName, fieldType)]
-    | .FunctionDef _ methodName methodArgs methodBody _ _methodReturns _ _ =>
+    | .FunctionDef _ methodName methodArgs methodBody _ methodReturns _ _ =>
         let qualName := s!"{name.val}@{methodName.val}"
-        -- For methods, skip `self` parameter (first param)
         let allParams := extractParams methodArgs
         let allDefaults := extractDefaults methodArgs
-        -- All method parameters and return types use Any (dynamic pipeline)
         let params := match allParams with
-          | (_selfName, _) :: rest => rest.map fun (pName, _) => (pName, HighType.TCore "Any")
+          | _ :: rest => rest
           | [] => []
         let defaults := match allDefaults with
           | _ :: rest => rest
           | [] => []
-        let retTy : HighType := .TCore "Any"
+        let retTy := extractReturnType methodReturns
         let hasError := detectErrorOutput methodBody.val
         let hasKw := hasKwargsArg methodArgs
         let sig : FuncSig := {

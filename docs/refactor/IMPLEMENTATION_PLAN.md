@@ -10,7 +10,7 @@ New entries go at the top.
 The pipeline (ARCHITECTURE.md §"The Pipeline") is:
 
 ```
-Resolution → Translation → Elaboration → Projection → Cleanup → Core
+Resolution → Translation → Elaboration → Projection → Core
 ```
 
 We implement BOTTOM-UP: start from what exists (Core), work backwards to
@@ -145,6 +145,10 @@ def translateM (wa : WithMetadata α) (f : α → TransM β) : TransM (WithMetad
 ```
 Smart constructors (`mkExpr sr expr`) enforce metadata attachment.
 
+For Translation: input Python nodes carry metadata. The fold extracts it and
+attaches to the output Laurel nodes via smart constructors. Standard comonadic
+extract + rebuild.
+
 **Validation (spec-driven):**
 - Translation is a catamorphism (one case per constructor)?
 - Emits NO coercions? `grep -n "from_int\|from_str\|from_bool\|Any_to_bool" Translation.lean` = empty
@@ -164,6 +168,21 @@ Needs audit against the full mapping table above.
 **Architecture section:** §"Elaboration (Derivation Transformation: Laurel → FineGrainLaurel)"
 
 **The method:** Bidirectional typing (Dunfield & Krishnaswami 2021).
+
+**Monad:**
+```lean
+structure ElabContext where
+  env : TypeEnv        -- Γ (typing context)
+  currentMd : MetaData -- source location of the node being elaborated (reader = comonad)
+
+abbrev ElabM := ReaderT ElabContext (StateT ElabState (Except ElabError))
+```
+
+Metadata lives in the reader. When elaboration descends into a subnode, it updates
+`currentMd` from that node's `WithMetadata` wrapper. When projection emits a Laurel
+node, it reads `currentMd` and attaches it. No manual threading. No polymorphic FGL
+types. Reader is a comonad — the input node's metadata is comonadic context that the
+monad can access at any point.
 
 **Four functions (per Lakhani & Pfenning's four judgments):**
 ```lean
@@ -334,15 +353,20 @@ def pyAnalyzeV2 (inputFile : String) (pyspecFiles : Array String) : IO Core.Prog
   let laurel := translateProgram ast typeEnv
   let fgl := elaborate laurel typeEnv
   let projectedLaurel := project fgl
-  let cleaned := inferHoleTypes (filterPrelude projectedLaurel)
-  let core := translateToCore cleaned
+  let core := translateToCore projectedLaurel
   return core
 ```
 
-**Cleanup (NOT lowering):** Only `inferHoleTypes` + `filterPrelude`. The 8 old
-lowering passes (liftExpressionAssignments, desugarShortCircuit, eliminateReturns,
-heapParameterization, typeHierarchyTransform, modifiesClausesTransform,
-constrainedTypeElim, eliminateHoles) are ALL subsumed by elaboration.
+**No cleanup passes.** The architecture pipeline is:
+```
+Resolution → Translation → Elaboration → Projection → Core translation
+```
+That's it. ALL old lowering passes (liftExpressionAssignments, desugarShortCircuit,
+eliminateReturns, heapParameterization, typeHierarchyTransform,
+modifiesClausesTransform, constrainedTypeElim, eliminateHoles, inferHoleTypes,
+filterPrelude) are either subsumed by elaboration or irrelevant. Elaboration produces
+a complete, correctly-typed FGL program. Projection maps it mechanically to Laurel.
+Core translates that Laurel. Nothing in between.
 
 **Validation:** `lake build` succeeds. Running the V2 command on test files produces
 Core output. Old pipeline (`pyAnalyzeLaurel`) is unchanged.
