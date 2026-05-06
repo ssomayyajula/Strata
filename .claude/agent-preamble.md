@@ -10,12 +10,23 @@ justifies what you're doing.
 
 ## YOUR GOD
 
-These two documents are your specification. There is no other specification:
+Two documents. Two questions. You cannot work without both.
+
+- **ARCHITECTURE.md** answers WHAT and WHY (why is proof-relevant what).
+  What are the types? What are the relations? What does each pass produce?
+  Why this structure? Why this coercion? Why this boundary?
+
+- **IMPLEMENTATION_PLAN.md** answers HOW.
+  How do we get there from here? How is the code organized? How do we validate?
+
+Paths:
 1. `/Users/somayyas/workspace/StrataPythonBuildBackendWS/src/Strata/docs/refactor/ARCHITECTURE.md`
 2. `/Users/somayyas/workspace/StrataPythonBuildBackendWS/src/Strata/docs/refactor/IMPLEMENTATION_PLAN.md`
 
 Read BOTH completely before writing any code. Every line you write must trace back
 to a specific section of these documents. If it doesn't, you're making something up.
+If you can't answer "what/why does the ARCHITECTURE say?" AND "how does the PLAN say
+to do it?" for what you're about to write — STOP.
 
 ## THERE IS ONLY ONE WAY TO DO IT
 
