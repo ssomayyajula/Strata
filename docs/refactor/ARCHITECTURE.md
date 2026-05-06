@@ -56,11 +56,11 @@ Python AST + library stubs (both .python.st.ion)
   +
 Python AST (user code only)
   ↓ [translate: source-to-source fold, type-directed via Γ]
-e : Laurel.Program (precisely-typed, no casts, no effects)
-  ↓ [elaborate: derivation transformation, syntax-directed, language-independent]
-e' : FineGrainLaurel.Program (coercions explicit as value expressions, error handling explicit as true lets)
-  ↓ [project: trivial cata — forget polarity, all vars as Any]
-Laurel.Program (coercions inline, error bindings as assignments, ready for Core)
+e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
+  ↓ [elaborate: effect-passing translation — coercions, errors, heap made explicit]
+e' : FineGrainLaurel.Program (enriched FGCBV — effects explicit)
+  ↓ [project: effect calculus → impure language (trivial cata, all vars as Any)]
+Laurel.Program (effects re-implicit, coercions/bindings as Laurel nodes, ready for Core)
   ↓ [Core translation]
 Core
 ```
@@ -253,12 +253,36 @@ If you find a decision point in translation, the design is wrong.
 
 ---
 
-## Elaboration (Derivation Transformation: Laurel → FineGrainLaurel)
+## Elaboration (Effect-Passing Translation: Laurel → FineGrainLaurel)
 
-**Input:** Laurel term + TypeEnv (= **Γ**)  
-**Output:** FineGrainLaurel (coercions explicit, error handling explicit)
+**Input:** Laurel (impure CBV — effects implicit) + TypeEnv (= **Γ**)  
+**Output:** FineGrainLaurel (enriched FGCBV — effects explicit)
 
 ### The Unifying Principle
+
+**Laurel is an impure CBV language.** Effects (errors, heap state, coercions) are
+implicit in the syntax. `f(x)` might throw, read the heap, or need a coercion —
+you can't tell from the term alone.
+
+**FineGrainLaurel is an effect calculus.** Each effect has an explicit implementation.
+The effect structure is visible in the syntax.
+
+**Elaboration is effect-passing translation:** it commits to an implementation
+for each implicit effect, making them explicit in the target calculus. The target
+is plain FGCBV (Levy 2003) — not enriched FGCBV. The only computation type is
+`↑A` (producer of A). The methodology of translating impure CBV to FGCBV via
+explicit effect passing follows Egger et al. 2014, but our target is simpler
+(no linear computation types).
+
+| Implicit effect in Laurel | Explicit implementation in FGL | Mechanism |
+|---|---|---|
+| Error (procedure may throw) | Error monad: `A × Error` | `prodCallWithError` (true let-binding) |
+| Heap (field read/write, allocation) | State monad: heap threaded as parameter | Signature rewriting + `readField`/`updateField` |
+| Coercion (type mismatch at boundary) | Value-level witnesses | `from_int(v)`, `Any_to_bool(v)` (inline) |
+
+These are ALL the same operation — effect-passing translation — applied to
+different effects. They're not three separate mechanisms. They're one mechanism
+(make implicit effects explicit) with three instances.
 
 **Elaboration is language-independent.** It knows about Laurel's type system and
 FineGrainLaurel's requirements — nothing about Python specifically. If we translate
@@ -449,15 +473,27 @@ but that's a verification concern. No bindings introduced by coercion.
 - Process `LocalVariable x : T` → extend Γ with `x : T` for continuation
 - Uses `withReader` on the reader monad. No mutable state. One Γ.
 
-### Heap (Co-Operations)
+### Heap (State-Passing Translation)
 
-Heap is a co-operation (Bauer 2018): discovered locally, propagated globally.
-- **Discovery:** FieldSelect on Composite, Assign to FieldSelect, New → mark procedure
-- **Propagation:** Fixpoint on call graph (if A calls B and B touches heap, A does too)
-- **Rewriting:** Add heap parameter to touching procedures, thread through calls
+Heap is the state effect. The state-passing translation (Egger et al. 2014) makes
+it explicit by threading the heap as a parameter:
 
-Field access: `readField(heap, obj, field)` is a VALUE (pure given heap, returns Box).
-To get concrete type: `Box ▷ Any ~~> Box..AnyVal!` then `Any ▷ T ~~> Any..as_T!`.
+- **Discovery:** Walk procedure bodies. FieldSelect on Composite, Assign to
+  FieldSelect, New → mark procedure as heap-touching.
+- **Propagation:** Fixpoint on call graph (transitive: if A calls heap-touching B,
+  A is heap-touching too).
+- **State-passing:** Add heap parameter to touching procedures. Calls to touching
+  procedures pass and receive heap. Field accesses become `readField(heap, obj, field)` /
+  `updateField(heap, obj, field, val)`.
+
+This is the SAME operation as error-passing (`prodCallWithError`), just for a
+different effect (state vs exceptions). Both are effect-passing translation:
+- Error-passing: `f(args)` → `let [result, err] = f(args) in ...`
+- State-passing: `f(args)` → `let (result, heap') = f(heap, args) in ...`
+
+Field access: `readField(heap, obj, field)` is a VALUE (pure given explicit heap,
+returns Box). To get concrete type: `Box → Any` via `Box..AnyVal!`, then
+`Any → T` via narrowing witness.
 
 ### Metadata
 
@@ -1133,12 +1169,16 @@ produces Laurel that the same elaboration pass processes identically.
 
 ## Projection (FineGrainLaurel → Laurel)
 
-### Projection is a Trivial Catamorphism
+### Projection: Effect Calculus → Impure Language (Trivial)
 
-Projection forgets the Value/Producer polarity distinction. It maps each FGL
+Going from an effect calculus (FGL) to an impure language (Laurel) is trivial —
+the impure language already handles effects implicitly. Projection just forgets
+the explicit effect structure and lets the impure semantics take over.
+
+Concretely: forget the Value/Producer polarity distinction. Map each FGL
 constructor to the corresponding Laurel constructor. No restructuring, no hoisting,
-no collapsing of intermediate variables — because there ARE no intermediate variables
-(only true lets from hasErrorOutput calls and user assignments).
+no collapsing — because elaboration didn't introduce administrative structure.
+Only true lets (from hasErrorOutput + user code) appear in the output.
 
 ```
 projectValue : FGLValue → StmtExprMd
