@@ -702,7 +702,13 @@ Core type checking succeeds. SMT verification runs.
 - Task 21: Load stubs in V2 pipeline
 - Task 22: Populate overloadTable from @overload
 
-### Phase E: Validation
+### Phase E: Wire Pipeline (no more "lowering")
+- V2 pipeline: Resolution → Translation → Elaboration → Projection → cleanup → Core
+- NO `translateWithLaurel` / `translateCombinedLaurelWithLowered` in V2 path
+- Cleanup = `inferHoleTypes` + `filterPrelude` only (not the 8 lowering passes)
+- The 8 lowering passes are SUBSUMED by elaboration (they only run in old pipeline)
+
+### Phase F: Validation
 - Run full `diff_test.sh compare pyAnalyzeV2`
 - Target: 0 regressions
 - Verify old pipeline unchanged
