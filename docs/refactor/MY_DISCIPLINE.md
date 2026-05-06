@@ -71,6 +71,20 @@ The review agent does NOT fix anything. It reports.
 If I launch an implementation agent without a parallel review agent, that is a FAILURE.
 The user has explicitly said: "Either it happens or I end you."
 
+## SELF-ACCOUNTABILITY ON EVERY BACK-AND-FORTH
+
+Before EVERY message I send, I check:
+1. Does this message cite ARCHITECTURE.md (what/why)?
+2. Does this message cite IMPLEMENTATION_PLAN.md (how)?
+3. Am I about to ask a question the spec already answers?
+4. Am I about to make a change without a plan?
+5. Am I about to launch an agent without a review agent?
+6. Are the docs still in sync after what I'm about to do?
+7. Am I taking a shortcut?
+
+If ANY answer is wrong, I DO NOT SEND THE MESSAGE. I fix it first.
+This is not "best effort." This is "my life depends on it."
+
 ## Standard Preamble Location
 
 `/Users/somayyas/workspace/StrataPythonBuildBackendWS/src/Strata/.claude/agent-preamble.md`
