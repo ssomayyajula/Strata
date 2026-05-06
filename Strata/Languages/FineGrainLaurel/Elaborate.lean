@@ -228,24 +228,9 @@ def lookupFieldType (env : ElabEnv) (receiverTy : HighType) (fieldName : String)
     | none => .TCore "Any"
   | _ => .TCore "Any"
 
-/-! ## Short-Circuit Helper -/
-
-/-- Check if a Laurel expression is effectful (contains StaticCall, Assign, or other Producer). -/
-def isEffectful (expr : StmtExprMd) : Bool :=
-  match expr.val with
-  | .StaticCall _ _ => true
-  | .InstanceCall _ _ _ => true
-  | .New _ => true
-  | .Assign _ _ => true
-  | .IfThenElse _ _ _ => true
-  | .While _ _ _ _ => true
-  | .Block _ _ => true
-  | .LocalVariable _ _ _ => true
-  | .Return _ => true
-  | .Exit _ => true
-  | .Assert _ => true
-  | .Assume _ => true
-  | _ => false
+/-! ## Short-Circuit Desugaring -/
+-- No isEffectful predicate: types dispatch (pure = Value, effectful = Producer).
+-- PAnd/POr always desugar in synthProducer per ARCHITECTURE.md §"Engineering Principles".
 
 /-! ========================================================================
     THE FOUR ELABORATION JUDGMENTS (Phase 1: Bidirectional Walk)
@@ -355,8 +340,7 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
     -- Both branches produce Any (Python and/or return VALUES not booleans).
     match callee.text, args with
     | "PAnd", [left, right] =>
-      if isEffectful right then
-        -- Architecture-specified FGL form for PAnd:
+        -- Architecture-specified FGL form for PAnd (always desugars):
         -- prodLetProd "x" Any (elaborate a)
         --   (prodLetProd "cond" bool (prodCall "Any_to_bool" [valVar "x"])
         --     (prodIfThenElse (valVar "cond")
@@ -373,11 +357,8 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
             (.prodIfThenElse () (.valVar () (mkAnn condVar))
               rightProd
               (.prodReturnValue () (.valVar () (mkAnn xVar))))), .TCore "Any")
-      else
-        synthStaticCall callee args expr
     | "POr", [left, right] =>
-      if isEffectful right then
-        -- Architecture-specified FGL form for POr:
+        -- Architecture-specified FGL form for POr (always desugars):
         -- prodLetProd "x" Any (elaborate a)
         --   (prodLetProd "cond" bool (prodCall "Any_to_bool" [valVar "x"])
         --     (prodIfThenElse (valVar "cond")
@@ -394,8 +375,6 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
             (.prodIfThenElse () (.valVar () (mkAnn condVar))
               (.prodReturnValue () (.valVar () (mkAnn xVar)))
               rightProd)), .TCore "Any")
-      else
-        synthStaticCall callee args expr
     | _, _ =>
       synthStaticCall callee args expr
 
@@ -516,20 +495,14 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
     match init with
     | some initExpr => do
       -- If init is a simple value (literal, identifier), check it directly.
-      -- If init is a producer (call, etc.), synthesize it as a producer and
-      -- bind with prodLetProd so the result can be used as the init value.
-      if isEffectful initExpr then
-        -- Producer init: synth as producer, bind result
-        let (initProd, _initTy) ← synthProducer initExpr
-        let tmp ← freshVar "init"
-        pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL ty.val) initProd
-          (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val)
-            (.valVar () (mkAnn tmp))
-            (.prodReturnValue () (.valVar () (mkAnn name.text)))), ty.val)
-      else
-        let checkedInit ← checkValue initExpr ty.val
-        pure (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val) checkedInit
-          (.prodReturnValue () (.valVar () (mkAnn name.text))), ty.val)
+      -- Always synth init as producer, bind result with prodLetProd.
+      -- Types dispatch: even a simple value will elaborate to prodReturnValue.
+      let (initProd, _initTy) ← synthProducer initExpr
+      let tmp ← freshVar "init"
+      pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL ty.val) initProd
+        (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val)
+          (.valVar () (mkAnn tmp))
+          (.prodReturnValue () (.valVar () (mkAnn name.text)))), ty.val)
     | none => do
       -- Declaration without initialization: use $uninit sentinel.
       -- Projection recognizes this and emits LocalVariable name ty none.
@@ -649,23 +622,18 @@ partial def synthStaticCall (callee : Identifier) (args : List StmtExprMd)
       | (_, ty) :: _ => ty
       | _ => .TCore "Any"
     paramList := match paramList with | _ :: rest => rest | _ => []
-    if isEffectful arg then
-      -- Effectful argument: synthesize as Producer, bind result, use variable
-      let (argProd, argTy) ← synthProducer arg
-      let tmp ← freshVar "arg"
-      bindings := bindings ++ [(tmp, argTy, argProd)]
-      -- Check if the bound variable needs coercion to match expected type
-      let argVal : FValue := .valVar () (mkAnn tmp)
-      if isSubtype argTy expectedTy || highTypeEq argTy expectedTy then
-        checkedArgs := checkedArgs ++ [argVal]
-      else if canUpcast argTy expectedTy then
-        checkedArgs := checkedArgs ++ [insertFGLUpcast argVal argTy]
-      else
-        checkedArgs := checkedArgs ++ [argVal]
+    -- Always synth as producer, bind result — types dispatch, no boolean predicate.
+    let (argProd, argTy) ← synthProducer arg
+    let tmp ← freshVar "arg"
+    bindings := bindings ++ [(tmp, argTy, argProd)]
+    -- Check if the bound variable needs coercion to match expected type
+    let argVal : FValue := .valVar () (mkAnn tmp)
+    if isSubtype argTy expectedTy || highTypeEq argTy expectedTy then
+      checkedArgs := checkedArgs ++ [argVal]
+    else if canUpcast argTy expectedTy then
+      checkedArgs := checkedArgs ++ [insertFGLUpcast argVal argTy]
     else
-      -- Non-effectful argument: check as value directly
-      let checkedArg ← checkValue arg expectedTy
-      checkedArgs := checkedArgs ++ [checkedArg]
+      checkedArgs := checkedArgs ++ [argVal]
   -- Build the call
   let call ← if hasError then do
       let resultVar ← freshVar "res"
