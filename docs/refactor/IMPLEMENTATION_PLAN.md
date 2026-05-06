@@ -169,6 +169,82 @@ This is the SAME pattern as `int <: Any` via `from_int`. Composite is just anoth
 
 ---
 
+## 2026-05-06 (after commit ee23041fb — architecture corrections from review)
+
+### Findings from Spec-Driven Audit + Architecture Discussion
+
+These are VIOLATIONS and BUGS that must be fixed. Not optional. Not tech debt.
+Derived from auditing the code against ARCHITECTURE.md.
+
+#### 1. `isEffectful` is boolean blindness — DELETE IT
+
+Per ARCHITECTURE.md §"Engineering Principles" (no boolean blindness) and §"FGCBV":
+In FGCBV, pure things are VALUES. Effectful things are PRODUCERS. The TYPES tell you.
+
+The short-circuit desugaring currently uses `isEffectful` (a boolean predicate) to
+decide whether to desugar PAnd/POr. This is WRONG:
+- If both operands are Values → emit `valAnd(a, b)` (VALUE operator, line 61 of dialect)
+- If either operand is a Producer → desugar to `e to x. if (truthy x) then f else produce x`
+
+The four-function structure (synthValue/synthProducer) ALREADY handles this:
+- `synthValue` tries to elaborate both operands as values → `valAnd`
+- If it can't → falls through to `synthProducer` which desugars
+
+No boolean predicate. Delete `isEffectful`. The types do the dispatch.
+
+#### 2. Downcasts are fallible CALLS (same pattern as any other call)
+
+Per ARCHITECTURE.md §"Exceptions via the Exception Monad": `T(A) = Heap → ((A+E) × Heap)`.
+A downcast (`Any_to_bool`) is just a call that may fail. Same treatment as any other
+fallible call: `prodCall` + `prodLetProd` + case on error.
+
+Currently `checkProducer` emits bare `prodCall "Any_to_bool"` without error handling.
+This is inconsistent: user functions with `hasErrorOutput` get the full treatment but
+downcasts don't. Per the architecture, they're the SAME thing.
+
+#### 3. Metadata must flow through elaboration and projection
+
+Per ARCHITECTURE.md §"Metadata: Monad-Comonad Interaction Law": never construct a
+Laurel node without metadata. Currently:
+- Elaboration operates on `.val` and discards `.md`
+- Projection emits nodes with `#[]` (empty metadata)
+- Result: "BUG: metadata without a filerange" errors
+
+Fix: The FGL types are `Value α` / `Producer α` where `α` is the annotation type.
+Currently `α = Unit`. It SHOULD carry metadata. Then projection extracts it and
+attaches to the projected Laurel nodes. The interaction law guarantees metadata flows.
+
+#### 4. Pipeline bugs (double-prepend, duplicate inferHoleTypes)
+
+- `coreDefinitionsForLaurel` prepended in BOTH `unifiedElaborate` (line 2043) AND
+  `translateMinimal` (line 828). Causes duplicate definitions. Remove one.
+- `inferHoleTypes` runs in BOTH Phase 5 of elaboration AND `translateMinimal`.
+  Remove one (probably the `translateMinimal` one since elaboration handles it).
+
+#### 5. Exit (break/continue) control flow lost
+
+Translation emits `Exit "label"`. Elaboration currently emits trivial
+`prodReturnValue (valLiteralBool true)` — the control flow is LOST. Per
+ARCHITECTURE.md §"Break/Continue Labels": these are structural and must be preserved.
+FGL needs an Exit/Break producer or it must be projected back correctly.
+
+#### 6. Stale dead code
+
+- `unifiedElaborate` has comment saying Phase 1 is skipped (FALSE — `fullElaborate`
+  runs Phase 1). Delete or fix the comment.
+- `PipelineNew.lean` still exists (dead code, old pipeline). Delete when V2 is complete.
+
+### Priority Order (per ARCHITECTURE.md — violations first, then bugs, then cleanup)
+
+1. Delete `isEffectful`, let types dispatch (§Engineering Principles)
+2. Fix metadata flow (§Interaction Law) — α = MetaData not Unit
+3. Downcasts use full exception pattern (§Exception Monad)
+4. Pipeline double-prepend bug (correctness)
+5. Exit/break/continue preservation (§Break/Continue Labels)
+6. Dead code cleanup
+
+---
+
 ## 2026-05-06 (after commit 383da1e58)
 
 **State:** 47/54 tests PASS (21 identical + 26 same-category-pass-different-output).
