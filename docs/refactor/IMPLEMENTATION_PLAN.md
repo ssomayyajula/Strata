@@ -208,7 +208,7 @@ def checkProducer (expr : Laurel.StmtExprMd) (expected : HighType) : ElabM FGL.P
 | `FieldSelect obj "field"` | field type from classFields | Γ's class def |
 | `New "ClassName"` | UserDefined ClassName | Γ's class entry |
 
-**What checks (expected type propagates inward):**
+**What checks (expected type flows in from context):**
 | Construct | Expected type | Source |
 |-----------|--------------|--------|
 | Arg in `f(arg)` | FuncSig.params[i] | Γ's signature |
@@ -216,7 +216,21 @@ def checkProducer (expr : Laurel.StmtExprMd) (expected : HighType) : ElabM FGL.P
 | RHS of `var x: T := expr` | T | Annotation |
 | `return expr` | procedure return type | Signature |
 | Condition in assert/if/while | bool | Language semantics |
-| Branches of if-then-else | enclosing expected type | Context |
+| IfThenElse branches (in CHECK position) | enclosing expected type | Context |
+| While body | TVoid | Statement |
+
+**Statement forms that SYNTHESIZE TVoid (context adds nothing):**
+- While, Assert, Assume, Exit, Assign → always TVoid, no CHECK needed
+
+**Why this split (DRY):** All synthesizing constructs have the same coercion
+pattern: "look up actual type, compare with expected, insert coercion if mismatch."
+That IS checkValue/checkProducer. One function, one place. No repeated logic.
+
+**MODE CORRECTNESS: No equality on HighTypes.** All type comparisons flow through
+canUpcast (A <: B) or canNarrow (A ▷ B). `typesEqual` is ONLY used in
+checkValue/checkProducer as the reflexivity short-circuit (A <: A). Never match
+on specific types in the walk. Never `if ty == TVoid`. The coercion table is the
+ONLY mechanism for relating types.
 
 **Subsumption (coercion insertion at CHECK boundaries):**
 - synth(e) = A, expected = B, A ≠ B:
@@ -633,6 +647,11 @@ def typesEqual (a b : HighType) : Bool :=
 ```
 **Why:** ARCHITECTURE.md §"Coercion Table" — exact table transcribed.
 
+**`typesEqual` is the reflexivity axiom (A <: A).** It is ONLY used inside the
+subsumption function (checkValue/checkProducer) as a short-circuit: "types already
+agree, no coercion needed." It must NEVER appear in the elaboration walk itself.
+All type comparisons in the walk flow through canUpcast/canNarrow.
+
 ### 6. `synthValue`: literals + Identifier + FieldSelect
 
 **File:** Elaborate.lean (inside mutual block)  
@@ -743,49 +762,61 @@ emit prodCallWithError if hasErrorOutput.
 ```
 **Why:** ARCHITECTURE.md §"What CHECKS" — "RHS of var x: T := expr" checked against T.
 
-### 12. `synthProducer`: conditions (IfThenElse/While/Assert/Assume) — NARROWING
+### 12. `synthProducer`: conditions (IfThenElse/While/Assert/Assume) — SUBSUMPTION
 
 **File:** Elaborate.lean (inside mutual block)  
-**Logic (CRITICAL — conditions need producer-level narrowing, not value-level upcasting):**
+**Logic: Use subsumption function, NO type dispatch in the walk.**
+
+The condition is a CHECK position (checked against bool). We use a single
+`subsumeBool` helper that:
+1. synthValue cond → (condVal, condTy)
+2. canUpcast condTy .TBool → coerce (value→value) [nothing in table does this]
+3. canNarrow condTy .TBool → emit callWithError, bind result to get Value(bool)
+4. Reflexivity (condTy already bool via canUpcast .TBool .TBool = none, but
+   we need a reflexivity check) → use condVal directly
+
+The reflexivity check is the ONLY place where type comparison is legitimate
+(A <: A, the short-circuit). Implemented as: if canUpcast returns none AND
+canNarrow returns none AND it's not an error → types must already agree.
+
 ```
-.IfThenElse cond thenBranch elseBranch →
-  -- Condition might be Any (from prelude ops like PEq, PGt).
-  -- Any→bool is NARROWING = producer-level (fallible).
-  -- So: synth the condition, if it's Any, bind it and narrow.
+-- Helper: subsume a value to bool for condition positions.
+-- Returns (condValue, Option wrapperProducer).
+-- If narrowing needed: wrapperProducer wraps the if/while/assert in a callWithError.
+subsumeToBool (cond : StmtExprMd) : ElabM (SubsumeResult) :=
   let (condVal, condTy) ← synthValue cond
-  let boolCond ← if typesEqual condTy .TBool then
-    pure condVal  -- already bool, use directly
-  else if condTy matches .TCore "Any" then
-    -- Narrowing: bind the value, call Any_to_bool (producer), bind result
-    -- This creates: letProd tmp Any (returnValue condVal) (callWithError "Any_to_bool" [tmp] ...)
-    -- But we need a VALUE for ifThenElse's condition field.
-    -- Solution: this becomes a letProd that binds the narrowed result, then
-    -- the whole if becomes part of the body.
-    -- Actually: we return the WHOLE thing as a producer that includes the narrowing.
-    let narrowVar ← freshVar "cond"
-    let (thenProd, thenTy) ← synthProducer thenBranch
-    let elsProd ← match elseBranch with
-      | some e => (synthProducer e).map (·.1)
-      | none => pure .unit
-    return (.letProd narrowVar .TBool
-              (.callWithError "Any_to_bool" [condVal] narrowVar (narrowVar ++ "_err") .TBool (.TCore "Error") (.returnValue (.var narrowVar)))
-              (.ifThenElse (.var narrowVar) thenProd elsProd), thenTy)
-  else
-    pure condVal  -- non-Any non-bool: use as-is (may be wrong, but architecture says well-typed input)
-  -- If we didn't return early above (the narrowing case returns directly):
+  match canUpcast condTy .TBool with
+  | some coerce => pure (.value (coerce condVal))  -- value-level, stays in value
+  | none => match canNarrow condTy .TBool with
+    | some narrowFn =>
+      -- Producer-level: need to bind. Return info for caller to wrap.
+      let narrowVar ← freshVar "cond"
+      pure (.narrow condVal narrowFn narrowVar)
+    | none => pure (.value condVal)  -- already bool (reflexivity)
+
+-- IfThenElse uses subsumeToBool:
+.IfThenElse cond thenBranch elseBranch →
+  let result ← subsumeToBool cond
   let (thenProd, thenTy) ← synthProducer thenBranch
   let elsProd ← match elseBranch with
     | some e => (synthProducer e).map (·.1)
     | none => pure .unit
-  return (.ifThenElse boolCond thenProd elsProd, thenTy)
+  match result with
+  | .value boolVal =>
+    return (.ifThenElse boolVal thenProd elsProd, thenTy)
+  | .narrow condVal narrowFn narrowVar =>
+    -- callWithError IS the binding. Body is the if.
+    return (.callWithError narrowFn [condVal] narrowVar (narrowVar ++ "_err")
+              .TBool (.TCore "Error")
+              (.ifThenElse (.var narrowVar) thenProd elsProd), thenTy)
 ```
-Same pattern for While, Assert, Assume: narrow condition to bool before using.
+Same pattern for While (body synths, result = TVoid), Assert/Assume (result = TVoid).
 
-**Why:** ARCHITECTURE.md §"What CHECKS" — conditions checked against bool. Any→bool is
-NARROWING (§"Narrowing (A ▷ B)") — value→producer, fallible. This is the critical
-insight from the review agent: you cannot use checkValue here because narrowing
-produces a PRODUCER, not a value. The condition field of ifThenElse takes a VALUE.
-So narrowing must happen BEFORE the if, via a let-binding.
+**Why:** ARCHITECTURE.md §"MODE CORRECTNESS: No equality on HighTypes." All type
+comparisons flow through canUpcast/canNarrow. The coercion table decides. No
+`typesEqual condTy .TBool` dispatch. Subsumption is ONE function called at
+CHECK boundaries. Narrowing gives a producer; bind it to get a value back for
+the condition slot.
 
 ### 13. `synthProducer`: Block + Exit + New + Return
 
@@ -849,17 +880,28 @@ shortCircuitDesugar "PAnd" [a, b] :=
   let condVar ← freshVar "cond"
   let (aProd, _) ← synthProducer a  -- elaborate first operand
   let (bProd, _) ← synthProducer b  -- elaborate second operand (lazy)
+  -- Structure: bind a's result to xVar, then narrow xVar to bool, then branch.
+  -- callWithError IS the binding for condVar (no extra letProd around it).
   return (.letProd xVar (.TCore "Any") aProd
-    (.letProd condVar .TBool
-      (.callWithError "Any_to_bool" [.var xVar] condVar (condVar ++ "_err") .TBool (.TCore "Error") (.returnValue (.var condVar)))
+    (.callWithError "Any_to_bool" [.var xVar] condVar (condVar ++ "_err")
+      .TBool (.TCore "Error")
       (.ifThenElse (.var condVar)
         bProd                          -- truthy: evaluate b, return it
         (.returnValue (.var xVar)))),  -- falsy: return a's value
     .TCore "Any")
 
 shortCircuitDesugar "POr" [a, b] :=
-  -- Same but branches swapped:
-  -- truthy → return a's value, falsy → evaluate b
+  let xVar ← freshVar "sc"
+  let condVar ← freshVar "cond"
+  let (aProd, _) ← synthProducer a
+  let (bProd, _) ← synthProducer b
+  return (.letProd xVar (.TCore "Any") aProd
+    (.callWithError "Any_to_bool" [.var xVar] condVar (condVar ++ "_err")
+      .TBool (.TCore "Error")
+      (.ifThenElse (.var condVar)
+        (.returnValue (.var xVar))     -- truthy: return a's value
+        bProd)),                        -- falsy: evaluate b, return it
+    .TCore "Any")
 ```
 **Why:** ARCHITECTURE.md §"Short-Circuit Desugaring in FGL" — exact transcription.
 
@@ -972,35 +1014,82 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
 **Why:** IMPLEMENTATION_PLAN.md §"Phase 6" — fullElaborate is the entry point.
 Elaborates each proc body, projects back. `currentProcReturnType` from proc.outputs.
 
-### 19. Heap co-op Phase 1: mark heap-touching
+### 19. Heap co-op Phase 1: analysis (collect reads/writes/callees per procedure)
 
 **File:** Elaborate.lean  
-**Change:** Add `heapTouching : Std.HashSet String := {}` to ElabState. In synthProducer,
-when encountering:
-- `.FieldSelect obj field` where objTy is UserDefined → mark current proc
-- `.New classId` → mark current proc
-- `.Assign [target] value` where target is `.FieldSelect` → mark current proc
+**Data:**
+```lean
+structure HeapAnalysis where
+  readsHeap : Bool := false    -- FieldSelect on composite
+  writesHeap : Bool := false   -- Assign to FieldSelect target, New
+  callees : List String := []  -- StaticCall targets (for propagation)
+```
+**Logic:** Walk each procedure body BEFORE elaboration (or during). For each node:
+- `.FieldSelect target _` where target type is UserDefined/Composite → `readsHeap := true`
+- `.New _` → `writesHeap := true`
+- `.Assign [target] _` where `target.val` is `.FieldSelect _ _` → `writesHeap := true`
+- `.StaticCall callee _` → record callee in `callees`
 
-Collect the set after all procs elaborated.
+Produce `Std.HashMap String HeapAnalysis` (proc name → analysis).
 
 **Why:** ARCHITECTURE.md §"Operations vs Co-Operations" — local walk discovers co-ops.
+Reference: `Strata/Languages/Laurel/HeapParameterization.lean` lines 48-80 does the
+same analysis in the old pipeline (`collectExpr`).
 
-### 20. Heap co-op Phase 2: fixpoint propagation
+### 20. Heap co-op Phase 2: fixpoint propagation + signature rewriting
 
 **File:** Elaborate.lean  
-**Logic:** After all procs elaborated:
+**Phase 2a: Propagation.** Fixpoint on call graph:
+```lean
+def propagateHeap (analysis : Std.HashMap String HeapAnalysis) : Std.HashMap String HeapAnalysis :=
+  -- Iterate until no changes:
+  -- If proc A calls proc B, and B reads/writes heap, then A reads/writes heap too.
+  loop:
+    for (procName, info) in analysis:
+      for callee in info.callees:
+        match analysis[callee]? with
+        | some calleeInfo =>
+          if calleeInfo.readsHeap && !info.readsHeap → mark A as readsHeap, changed=true
+          if calleeInfo.writesHeap && !info.writesHeap → mark A as writesHeap, changed=true
+        | none => skip (external/prelude — check prelude sigs for heap)
+    if changed: continue loop
+    else: return analysis
 ```
-loop:
-  for each proc A in program:
-    for each call to proc B in A's body:
-      if B ∈ heapTouching && A ∉ heapTouching:
-        add A to heapTouching
-        changed = true
-  if changed: goto loop
-```
-Then for all heap-touching procs: add Heap parameter to inputs, thread through calls.
+
+**Phase 2b: Signature rewriting.** For each heap-touching procedure:
+- If `writesHeap`: add `heap : Heap` to BOTH inputs AND outputs (inout)
+- If `readsHeap` only: add `heap : Heap` to inputs only
+
+**Phase 2c: Call-site rewriting.** For each call to a heap-touching procedure:
+- If callee writes heap (inout): `heap, result := callee(heap, args...)`
+  In FGL: `callWithError` with heap as first arg, heap as additional output
+- If callee only reads heap: `result := callee(heap, args...)`
+  In FGL: add `heap` to call args
+
+**Phase 2d: Field access rewriting.**
+- `.FieldSelect obj field` → `readField(heap, obj, field)` (StaticCall)
+- `.Assign [.FieldSelect obj field] value` → `heap := updateField(heap, obj, field, BoxT(value))`
+- `.New className` → `heap, obj := allocate(heap, className)` (heap gets new ref)
+
+**Concrete types (from HeapParameterizationConstants.lean):**
+- `Heap` = `TCore "Heap"` (datatype with `data: Map Composite (Map Field Box)`, `nextReference: int`)
+- `Composite` = `TCore "Composite"` (type synonym for int — heap reference)
+- `Field` = `TCore "Field"` (enum of all field names across all classes)
+- `Box` = `TCore "Box"` (sum type: BoxInt, BoxBool, BoxFloat64, BoxComposite, BoxAny)
+- `TypeTag` = `TCore "TypeTag"` (enum of class names for runtime type checks)
+
+**Type infrastructure declarations.** fullElaborate must emit these datatypes in
+`program.types` for Core to function:
+- `Composite` composite type (just ref:int + typeTag:TypeTag)
+- `Box` datatype with constructors per primitive
+- `Field` enum datatype
+- `Heap` datatype
+- `TypeTag` enum datatype
 
 **Why:** ARCHITECTURE.md §"Operations vs Co-Operations" — global propagation via fixpoint.
+Reference: existing `HeapParameterization.lean` (400+ lines) does exactly this in the
+old pipeline. We replicate its output but produce it from the elaboration framework
+rather than as a separate pass.
 
 ### 21. End-to-end validation
 

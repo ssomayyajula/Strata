@@ -284,7 +284,14 @@ where the only computation type is `↑A` (a producer of value type A). This mea
 The bidirectional discipline follows from this polarization, adapted to our system
 where Python annotations drive the checking context:
 
-**What SYNTHESIZES (type known from structure or Γ):**
+**Mode Discipline: Synthesize Maximally, Coerce at CHECK Boundaries**
+
+The bidirectional discipline follows from DRY: constructs whose type is determined
+by Γ or by form SYNTHESIZE. Constructs where an expected type naturally flows in
+from context CHECK. Subsumption (coercion insertion) is the ONE glue function where
+synth meets check — coercion logic lives in exactly one place (checkValue/checkProducer).
+
+**What SYNTHESIZES (type determined by Γ or form — no expected type needed):**
 
 | Construct | Synthesized type | Source of type |
 |---|---|---|
@@ -296,10 +303,11 @@ where Python annotations drive the checking context:
 | `FieldSelect obj "field"` | field type from classFields | Γ's class definition |
 | `New "ClassName"` | `UserDefined ClassName` | Γ's class entry |
 
-These are all ELIMINATION forms or atoms — they produce known types without
-needing external context.
+These all have their type determined by lookup or form. They don't need external
+context to know what they produce. Subsumption fires when their synthesized type
+meets an enclosing CHECK boundary.
 
-**What CHECKS (expected type from annotation propagates inward):**
+**What CHECKS (expected type flows in from context):**
 
 | Construct | Expected type | Source of expected type |
 |---|---|---|
@@ -308,7 +316,51 @@ needing external context.
 | RHS of `var x: T := expr` | T | The annotation on the declaration |
 | `return expr` | procedure's return type | Procedure signature |
 | Condition in `assert/if/while` | `bool` | Language semantics (conditions must be bool) |
-| Branches of `if c then a else b` | enclosing expected type | Propagates from context |
+| IfThenElse branches | enclosing expected type | Propagates from context (when in CHECK position) |
+| While body | `TVoid` | Statement (no value produced) |
+
+**Statement forms that SYNTHESIZE (result type is fixed, context adds nothing):**
+
+| Construct | Synthesized type | Why |
+|---|---|---|
+| `While cond body` | TVoid | Loops don't produce values |
+| `Assert cond` / `Assume cond` | TVoid | Effect operations, no value |
+| `Exit label` | TVoid | Control flow, no value |
+| `Assign [target] value` | TVoid | Mutation, no value |
+
+These synthesize because their result type is determined by form (always TVoid).
+An expected type flowing in would just be `== TVoid` — an implicit equality check
+that's unwarranted. CHECK is only useful when the expected type guides something.
+
+**Why this split (DRY principle):** All synthesizing constructs have the same
+coercion pattern: "look up actual type, compare with expected, insert coercion if
+mismatch." That IS `checkValue`/`checkProducer`. One function, one place.
+
+**IfThenElse:** When in a CHECK position (e.g., RHS of assignment), expected type
+propagates into branches — genuinely useful (guides coercions inside branches).
+When standalone (statement-level), branches synthesize.
+
+**MODE CORRECTNESS PRINCIPLE: No equality on HighTypes.**
+
+All type comparisons in the elaboration walk MUST flow through:
+- `canUpcast actual expected` → subtyping (A <: B, infallible, value-level)
+- `canNarrow actual expected` → narrowing (A ▷ B, fallible, producer-level)
+
+If you find yourself writing `typesEqual` or pattern matching on a specific type
+in the elaboration walk, you are mode-incorrect. The only legitimate uses of
+`typesEqual` are:
+1. Inside `checkValue`/`checkProducer` BEFORE trying coercion (short-circuit: if
+   types already agree, no coercion needed — this is the reflexivity axiom A <: A)
+2. Nowhere else
+
+Specifically NEVER:
+- `if expectedType == .TVoid then ...` (TVoid constructs SYNTH, not CHECK)
+- `if actualType == .TBool then ...` (the coercion table handles this)
+- `match expectedType with | .TInt => ... | .TBool => ...` (that's dispatch on types)
+
+The coercion table is the ONLY mechanism for relating types. If two types aren't
+related by the table (neither `canUpcast` nor `canNarrow` produces a match), they
+are UNRELATED — that's a type error, not a case to handle.
 
 **The Python annotations ARE the checking context.** Translation preserved them as
 precise types on LocalVariable declarations, procedure inputs/outputs. Elaboration
@@ -324,16 +376,32 @@ When CHECK finds synth(e) = A and expected = B with A ≠ B:
 - If neither: type error (should not happen on well-typed Translation output)
 
 ```
--- Subtyping (value-level, infallible):
+-- Subtyping (value-level, infallible) — CHECK in value judgment:
 Γ ⊢_v e ⇒ A    A <: B
 ─────────────────────────
-Γ ⊢_v upcast(e) ⇐ B           (e.g., valFromInt(e) : Value)
+Γ ⊢_v e ⇐ B    ~~>  upcast(e)     (e.g., valFromInt(e) : Value(Any))
 
--- Narrowing (producer-level, fallible):
+-- Narrowing (producer-level, fallible) — CHECK in producer judgment:
 Γ ⊢_v e ⇒ A    A ▷ B
 ─────────────────────────
-Γ ⊢_p narrow(e) : B            (e.g., Any_to_bool(e) : Producer)
+Γ ⊢_p e ⇐ B    ~~>  narrow(e)     (e.g., Any_to_bool(e) : Producer(bool))
 ```
+
+Both are CHECKING rules. The expected type B comes from context. The difference
+is what judgment the conclusion lives in:
+- Upcasting: conclusion is ⊢_v (value in, value out, stays in value judgment)
+- Narrowing: conclusion is ⊢_p (value in, producer out, jumps to producer judgment)
+
+To get back to a VALUE after narrowing, bind the producer:
+`callWithError "Any_to_bool" [condVal] x ... (use (.var x) as Value(bool))`
+
+**Implementation:** Subsumption is ONE function with three cases:
+1. Reflexivity (A = A via table): no coercion (short-circuit)
+2. Upcast (A <: B via canUpcast): wrap value, stay in value
+3. Narrow (A ▷ B via canNarrow): emit producer, bind to get value back
+
+No `typesEqual` dispatch in the walk. No pattern matching on types. The coercion
+table decides everything. This function is called at every CHECK boundary.
 
 **Critical: coercions go at the USE SITE (argument position, return position),
 NOT at the definition site.** An `int` literal assigned to an `int` variable

@@ -197,6 +197,23 @@ def typesEqual (a b : HighType) : Bool :=
   | .UserDefined id1, .UserDefined id2 => id1.text == id2.text
   | _, _ => false
 
+/-! ## sequenceProducers helper (IMPLEMENTATION_PLAN.md §"Task 13")
+
+Replaces .unit continuations when sequencing statements in a block.
+Put BEFORE the mutual block so that synthProducer/elaborateBlock can use it.
+-/
+
+/-- Sequence two producers: replaces .unit continuations in the first with the second.
+    Per IMPLEMENTATION_PLAN.md §"Task 13": foldr over block stmts uses this. -/
+private def sequenceProducers (first second : FGLProducer) : FGLProducer :=
+  match first with
+  | .unit => second
+  | .assign target val .unit => .assign target val second
+  | .varDecl name ty init .unit => .varDecl name ty init second
+  | .assert cond .unit => .assert cond second
+  | .assume cond .unit => .assume cond second
+  | _ => .seq first second
+
 /-! ## Tasks 6-8: synthValue + checkValue (ARCHITECTURE.md §"The Bidirectional Recipe")
 
 Per ARCHITECTURE.md §"What SYNTHESIZES":
@@ -254,6 +271,201 @@ partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValu
   | some coerce => return (coerce val)
   | none =>
     throw (ElabError.typeError s!"Cannot coerce {repr actual} to {repr expected}")
+
+-- Tasks 9-13: synthProducer (ARCHITECTURE.md §"The Bidirectional Recipe")
+-- Per ARCHITECTURE.md §"What CHECKS":
+-- - Arg in f(arg) → checked against FuncSig.params[i]
+-- - RHS of x := expr → checked against type of x
+-- - RHS of var x: T := expr → checked against T
+-- - return expr → checked against procedure return type
+-- - Condition in assert/if/while → checked against bool (NARROWING if Any)
+
+/-- Synthesize a producer and its type from a Laurel statement expression.
+    Per ARCHITECTURE.md §"How Elaboration Works":
+    - StaticCall: look up f in Γ, CHECK args, hasErrorOutput → callWithError
+    - Assign: CHECK RHS against target type from Γ
+    - LocalVariable: CHECK init against declared type
+    - IfThenElse/While/Assert/Assume: NARROW condition (Any→bool via callWithError)
+    - Block/Exit/New/Return: structural cases -/
+partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) := do
+  match expr.val with
+  -- Task 9: StaticCall (CHECK args against FuncSig.params via checkValue)
+  | .StaticCall callee args =>
+    -- PAnd/POr: stub for now returning plain call (short-circuit comes in task 15)
+    if callee.text == "PAnd" || callee.text == "POr" then
+      let sig ← lookupFuncSig callee.text
+      let argVals ← args.mapM (fun a => do let (v, _) ← synthValue a; pure v)
+      let retTy := match sig with
+        | some s => s.returnType
+        | none => .TCore "Any"
+      pure (.call callee.text argVals, retTy)
+    else
+      let sig ← lookupFuncSig callee.text
+      let checkedArgs ← match sig with
+        | some s =>
+          let paramTypes := s.params.map (·.2)
+          let pairs := args.zip paramTypes
+          pairs.mapM (fun (arg, paramTy) => checkValue arg paramTy)
+        | none => args.mapM (fun a => do let (v, _) ← synthValue a; pure v)
+      let retTy := match sig with
+        | some s => s.returnType
+        | none => .TCore "Any"
+      if (match sig with | some s => s.hasErrorOutput | none => false) then
+        let rv ← freshVar "result"
+        let ev ← freshVar "err"
+        pure (.callWithError callee.text checkedArgs rv ev retTy (.TCore "Error")
+               (.returnValue (.var rv)), retTy)
+      else
+        pure (.call callee.text checkedArgs, retTy)
+
+  -- Task 10: Assign (CHECK RHS against target type from Γ)
+  | .Assign targets value =>
+    match targets with
+    | [target] =>
+      let targetTy ← match target.val with
+        | .Identifier id =>
+          match (← lookupEnv id.text) with
+          | some (.variable t) => pure t
+          | _ => pure (.TCore "Any")
+        | _ => pure (.TCore "Any")
+      let (targetVal, _) ← synthValue target
+      let checkedRhs ← checkValue value targetTy
+      pure (.assign targetVal checkedRhs .unit, targetTy)
+    | _ => pure (.unit, .TCore "Any")  -- multi-target: ARCHITECTURE GAP
+
+  -- Task 11: LocalVariable (CHECK init against declared type)
+  | .LocalVariable nameId typeMd initOpt =>
+    let declTy := typeMd.val
+    let initVal ← match initOpt with
+      | some init => checkValue init declTy
+      | none => pure (.var "_uninit")
+    pure (.varDecl nameId.text declTy initVal .unit, declTy)
+
+  -- Task 12: IfThenElse — condition is CHECK against bool via subsumption.
+  -- No typesEqual dispatch. Coercion table decides.
+  | .IfThenElse cond thenBranch elseBranch =>
+    let (condVal, condTy) ← synthValue cond
+    let (thenProd, thenTy) ← synthProducer thenBranch
+    let elsProd ← match elseBranch with
+      | some e => do let (p, _) ← synthProducer e; pure p
+      | none => pure .unit
+    -- Subsume condition to bool: try upcast, try narrow, else reflexivity
+    match canUpcast condTy .TBool with
+    | some coerce => pure (.ifThenElse (coerce condVal) thenProd elsProd, thenTy)
+    | none => match canNarrow condTy .TBool with
+      | some narrowFn =>
+        let narrowVar ← freshVar "cond"
+        pure (.callWithError narrowFn [condVal] narrowVar (narrowVar ++ "_err")
+                  .TBool (.TCore "Error")
+                  (.ifThenElse (.var narrowVar) thenProd elsProd), thenTy)
+      | none => pure (.ifThenElse condVal thenProd elsProd, thenTy)  -- reflexivity
+
+  -- Task 12: While — condition subsumed to bool, result = TVoid (synthesizes)
+  | .While cond _invariants _decreases body =>
+    let (condVal, condTy) ← synthValue cond
+    let (bodyProd, _) ← synthProducer body
+    match canUpcast condTy .TBool with
+    | some coerce => pure (.whileLoop (coerce condVal) bodyProd .unit, .TVoid)
+    | none => match canNarrow condTy .TBool with
+      | some narrowFn =>
+        let narrowVar ← freshVar "cond"
+        pure (.callWithError narrowFn [condVal] narrowVar (narrowVar ++ "_err")
+                  .TBool (.TCore "Error")
+                  (.whileLoop (.var narrowVar) bodyProd .unit), .TVoid)
+      | none => pure (.whileLoop condVal bodyProd .unit, .TVoid)
+
+  -- Task 12: Assert — condition subsumed to bool, result = TVoid
+  | .Assert condition =>
+    let (condVal, condTy) ← synthValue condition
+    match canUpcast condTy .TBool with
+    | some coerce => pure (.assert (coerce condVal) .unit, .TVoid)
+    | none => match canNarrow condTy .TBool with
+      | some narrowFn =>
+        let narrowVar ← freshVar "cond"
+        pure (.callWithError narrowFn [condVal] narrowVar (narrowVar ++ "_err")
+                  .TBool (.TCore "Error")
+                  (.assert (.var narrowVar) .unit), .TVoid)
+      | none => pure (.assert condVal .unit, .TVoid)
+
+  -- Task 12: Assume — condition subsumed to bool, result = TVoid
+  | .Assume condition =>
+    let (condVal, condTy) ← synthValue condition
+    match canUpcast condTy .TBool with
+    | some coerce => pure (.assume (coerce condVal) .unit, .TVoid)
+    | none => match canNarrow condTy .TBool with
+      | some narrowFn =>
+        let narrowVar ← freshVar "cond"
+        pure (.callWithError narrowFn [condVal] narrowVar (narrowVar ++ "_err")
+                  .TBool (.TCore "Error")
+                  (.assume (.var narrowVar) .unit), .TVoid)
+      | none => pure (.assume condVal .unit, .TVoid)
+
+  -- Task 13: Block
+  | .Block stmts label =>
+    let (prod, ty) ← elaborateBlock stmts
+    match label with
+    | some l => pure (.labeledBlock l prod, ty)
+    | none => pure (prod, ty)
+
+  -- Task 13: Exit
+  | .Exit target => pure (.exit target, .TVoid)
+
+  -- Task 13: New
+  | .New classId =>
+    let objVar ← freshVar "obj"
+    let ty := HighType.UserDefined classId
+    pure (.newObj classId.text objVar ty (.returnValue (.var objVar)), ty)
+
+  -- Task 13: Return
+  | .Return valueOpt =>
+    let retTy := (← get).currentProcReturnType
+    match valueOpt with
+    | some v =>
+      let checkedVal ← checkValue v retTy
+      pure (.returnValue checkedVal, retTy)
+    | none => pure (.returnValue .fromNone, .TVoid)
+
+  -- Fallback: synth as value, wrap in returnValue
+  | _ =>
+    let (v, t) ← synthValue expr
+    pure (.returnValue v, t)
+
+-- Task 14: checkProducer (ARCHITECTURE.md §"Narrowing")
+-- Per ARCHITECTURE.md §"Subsumption":
+-- - synthProducer to get (prod, actual)
+-- - typesEqual → return prod
+-- - canNarrow actual expected → letProd tmpVar actual prod (callWithError narrowFn ...)
+-- - else → throw ElabError
+
+/-- Check a producer against an expected type, inserting narrowing as needed.
+    Per ARCHITECTURE.md §"Narrowing (A ▷ B)": bind producer, narrow result via fallible call. -/
+partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FGLProducer := do
+  let (prod, actual) ← synthProducer expr
+  if typesEqual actual expected then return prod
+  match canNarrow actual expected with
+  | some narrowFn =>
+    let tmpVar ← freshVar "narrow"
+    let resultVar ← freshVar "narrowed"
+    pure (.letProd tmpVar actual prod
+           (.callWithError narrowFn [.var tmpVar] resultVar (resultVar ++ "_err")
+             expected (.TCore "Error") (.returnValue (.var resultVar))))
+  | none =>
+    throw (ElabError.typeError s!"Cannot narrow {repr actual} to {repr expected}")
+
+-- Task 13: elaborateBlock (ARCHITECTURE.md §"Blocks as Nested Lets")
+-- Per ARCHITECTURE.md §"Blocks as Nested Lets (CBV → FGCBV)":
+-- foldr over stmts. Each elaborated via synthProducer, sequenced via sequenceProducers.
+
+/-- Elaborate a block of statements into a single producer.
+    Per ARCHITECTURE.md §"Blocks as Nested Lets (CBV → FGCBV)" — foldr, Levy §3.2. -/
+partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FGLProducer × HighType) := do
+  match stmts with
+  | [] => pure (.unit, .TVoid)
+  | [last] => synthProducer last
+  | stmt :: rest =>
+    let (firstProd, _) ← synthProducer stmt
+    let (restProd, restTy) ← elaborateBlock rest
+    pure (sequenceProducers firstProd restProd, restTy)
 
 end -- mutual
 
