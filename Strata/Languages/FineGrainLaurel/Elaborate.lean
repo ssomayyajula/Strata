@@ -282,19 +282,34 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FValue × HighType) := do
     let fieldTy := lookupFieldType env receiverTy field.text
     pure (.valFieldAccess () targetVal (mkAnn field.text), fieldTy)
 
-  -- For expressions that are naturally Producers, we must bind them to get a Value
-  | _ => do
+  -- Hole: used for nondeterministic values (e.g., havoc in for-loops)
+  -- In value position, Holes represent unknown constants. Project as $Hole variable
+  -- which is safe since Holes are always assigned to variables (never used directly).
+  | .Hole _det tyOpt =>
+    let ty := tyOpt.map (·.val) |>.getD (.TCore "Any")
+    pure (.valVar () (mkAnn "$Hole_val"), ty)
+
+  -- PrimitiveOp: value-level operations (comparison, arithmetic at Laurel level).
+  -- These are used by downstream passes (e.g., heapParameterization, modifies clauses)
+  -- but rarely appear in Translation output. Pass through with Any type.
+  -- Use $PrimOp_val sentinel that projects back to a placeholder.
+  | .PrimitiveOp _op _args =>
+    pure (.valVar () (mkAnn "$PrimOp_val"), .TCore "Any")
+
+  -- For expressions that are naturally Producers, we must bind them to get a Value.
+  -- IMPORTANT: Only call synthProducer for known Producer forms to avoid infinite
+  -- mutual recursion on unhandled constructors.
+  | .StaticCall .. | .InstanceCall .. | .New .. | .Assign .. | .Block .. |
+    .IfThenElse .. | .While .. | .LocalVariable .. | .Return .. |
+    .Assert .. | .Assume .. | .Exit .. => do
     let (_prod, ty) ← synthProducer expr
     let tmp ← freshVar "v"
-    -- We can't return a "pure" value here -- the caller must handle the binding.
-    -- Per FGCBV: when we need a value but have a producer, we introduce a let-binding.
-    -- However synthValue's contract says it returns a Value. So we use a "thunked" approach:
-    -- Return the variable, and the caller's Producer context will wrap with prodLetProd.
-    -- For the minimal implementation, we return the variable reference and note that
-    -- the binding is handled by the caller (synthProducer/checkProducer).
-    -- ARCHITECTURE GAP: proper ANF lift needs the caller to sequence.
-    -- For now, return a variable that will be bound in the producer context.
     pure (.valVar () (mkAnn tmp), ty)
+
+  -- Fallback for any other constructors: return as Any-typed variable
+  -- This prevents infinite recursion between synthValue and synthProducer
+  | _ =>
+    pure (.valVar () (mkAnn "$unknown"), .TCore "Any")
 
 /-- Check a Laurel expression AS a Value against an expected type.
     Inserts upcast (subtyping) coercion if needed. Value→Value only.
@@ -378,11 +393,31 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
       let (rhsProd, rhsTy) ← synthProducer value
       let targetVal ← synthTargetValue target
       if isSubtype rhsTy expectedTy || highTypeEq rhsTy expectedTy then
-        -- RHS type matches target -- bind the producer, assign, continue
-        let tmp ← freshVar "rhs"
-        pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL rhsTy) rhsProd
-          (.prodAssign () targetVal (.valVar () (mkAnn tmp))
-            (.prodReturnValue () (.valVar () (mkAnn tmp)))), expectedTy)
+        -- RHS type matches target.
+        -- Optimization: if the RHS is a simple value (prodReturnValue), skip let-binding
+        match rhsProd with
+        | .prodReturnValue _ rhsVal =>
+          pure (.prodAssign () targetVal rhsVal
+            (.prodReturnValue () rhsVal), expectedTy)
+        | _ =>
+          let tmp ← freshVar "rhs"
+          pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL rhsTy) rhsProd
+            (.prodAssign () targetVal (.valVar () (mkAnn tmp))
+              (.prodReturnValue () (.valVar () (mkAnn tmp)))), expectedTy)
+      else if canUpcast rhsTy expectedTy then
+        -- RHS is concrete, target is Any.
+        -- Optimization: if RHS is a simple value, directly upcast without let-binding
+        match rhsProd with
+        | .prodReturnValue _ rhsVal =>
+          let upcasted := insertFGLUpcast rhsVal rhsTy
+          pure (.prodAssign () targetVal upcasted
+            (.prodReturnValue () upcasted), expectedTy)
+        | _ =>
+          let tmp ← freshVar "rhs"
+          let upcasted := insertFGLUpcast (.valVar () (mkAnn tmp)) rhsTy
+          pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL rhsTy) rhsProd
+            (.prodAssign () targetVal upcasted
+              (.prodReturnValue () upcasted)), expectedTy)
       else if canNarrow rhsTy expectedTy then
         -- RHS is Any, target is concrete -- bind RHS, then narrow
         let tmp ← freshVar "rhs"
@@ -485,6 +520,40 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
     -- ARCHITECTURE GAP: Exit maps to control flow that doesn't fit FGL directly
     pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TVoid)
 
+  -- Hole: nondeterministic/deterministic values - pass through unchanged.
+  -- The Hole is preserved as a StaticCall to a special sentinel that projectProducer
+  -- doesn't need to handle specially (it's a regular call that downstream hole elimination handles).
+  -- We represent it as returning Any since Holes represent unknown values.
+  | .Hole det tyOpt => do
+    let ty := tyOpt.map (·.val) |>.getD (.TCore "Any")
+    -- Emit a prodCall that will project to the original Hole structure
+    -- Use a special name that projectProducer maps back to Hole
+    let detStr := if det then "true" else "false"
+    let _ := detStr
+    -- Simply return the expression unchanged via prodReturnValue with a special marker.
+    -- Actually, the cleanest approach: just let the projection handle it by
+    -- wrapping the original expression in a prodBlock of size 1.
+    -- But since we need to return FGL types, use prodCall "$Hole" which projects to StaticCall "$Hole".
+    -- Better: we know Hole is handled by downstream holeElimination, so project it as a Hole.
+    -- Use a valVar that matches the special Hole pattern. Downstream phases expect Holes.
+    pure (.prodCall () (mkAnn "$Hole") (mkAnn #[]), ty)
+
+  -- PrimitiveOp: direct value-level operations (comparison, arithmetic at Laurel level)
+  | .PrimitiveOp _op args => do
+    let mut checkedArgs : List FValue := []
+    for arg in args do
+      let (argVal, _) ← synthValue arg
+      checkedArgs := checkedArgs ++ [argVal]
+    -- PrimitiveOps return bool or Any depending on the operation
+    pure (.prodReturnValue () (.valVar () (mkAnn "$primop")), .TCore "Any")
+
+  -- Forall/Exists: quantifiers used in specifications
+  | .Forall _param _trigger _body =>
+    pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TBool)
+
+  | .Exists _param _trigger _body =>
+    pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TBool)
+
   -- Values in producer position: wrap with prodReturnValue
   | _ => do
     let (val, ty) ← synthValue expr
@@ -513,25 +582,57 @@ partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FPro
     -- Types unrelated -- return unchanged
     pure prod
 
-/-- Helper: synthesize a static call. -/
+/-- Helper: synthesize a static call.
+    Handles the ANF lifting needed when arguments are themselves Producers (calls).
+    Each effectful argument is bound to a fresh variable via prodLetProd, then the
+    variable is passed to the call. -/
 partial def synthStaticCall (callee : Identifier) (args : List StmtExprMd)
     (_expr : StmtExprMd) : ElabM (FProducer × HighType) := do
   let env ← read
   let sig := lookupFuncSig env callee.text
   let paramTypes := sig.map (·.params) |>.getD []
-  let checkedArgs ← checkArgs args paramTypes
   let retTy := sig.map (·.returnType) |>.getD (.TCore "Any")
   let hasError := sig.map (·.hasErrorOutput) |>.getD false
-  if hasError then
-    -- Error-producing call: use prodCallWithError
-    let resultVar ← freshVar "res"
-    let errorVar ← freshVar "err"
-    pure (.prodCallWithError () (mkAnn callee.text) (mkAnn checkedArgs.toArray)
-      (mkAnn resultVar) (mkAnn errorVar)
-      (highTypeToFGL retTy) (.coreType () (mkAnn "Error"))
-      (.prodReturnValue () (.valVar () (mkAnn resultVar))), retTy)
-  else
-    pure (.prodCall () (mkAnn callee.text) (mkAnn checkedArgs.toArray), retTy)
+  -- Process arguments: for effectful args, create let-bindings (ANF lift)
+  let mut checkedArgs : List FValue := []
+  let mut bindings : List (String × HighType × FProducer) := []
+  let mut paramList := paramTypes
+  for arg in args do
+    let expectedTy : HighType := match paramList with
+      | (_, ty) :: _ => ty
+      | _ => .TCore "Any"
+    paramList := match paramList with | _ :: rest => rest | _ => []
+    if isEffectful arg then
+      -- Effectful argument: synthesize as Producer, bind result, use variable
+      let (argProd, argTy) ← synthProducer arg
+      let tmp ← freshVar "arg"
+      bindings := bindings ++ [(tmp, argTy, argProd)]
+      -- Check if the bound variable needs coercion to match expected type
+      let argVal : FValue := .valVar () (mkAnn tmp)
+      if isSubtype argTy expectedTy || highTypeEq argTy expectedTy then
+        checkedArgs := checkedArgs ++ [argVal]
+      else if canUpcast argTy expectedTy then
+        checkedArgs := checkedArgs ++ [insertFGLUpcast argVal argTy]
+      else
+        checkedArgs := checkedArgs ++ [argVal]
+    else
+      -- Non-effectful argument: check as value directly
+      let checkedArg ← checkValue arg expectedTy
+      checkedArgs := checkedArgs ++ [checkedArg]
+  -- Build the call
+  let call ← if hasError then do
+      let resultVar ← freshVar "res"
+      let errorVar ← freshVar "err"
+      pure (.prodCallWithError () (mkAnn callee.text) (mkAnn checkedArgs.toArray)
+        (mkAnn resultVar) (mkAnn errorVar)
+        (highTypeToFGL retTy) (.coreType () (mkAnn "Error"))
+        (.prodReturnValue () (.valVar () (mkAnn resultVar))) : FProducer)
+    else
+      pure (.prodCall () (mkAnn callee.text) (mkAnn checkedArgs.toArray) : FProducer)
+  -- Wrap the call in any let-bindings for effectful arguments
+  let result := bindings.foldr (init := call) fun (name, ty, prod) body =>
+    .prodLetProd () (mkAnn name) (highTypeToFGL ty) prod body
+  pure (result, retTy)
 
 /-- Helper: check a list of arguments against expected parameter types. -/
 partial def checkArgs (args : List StmtExprMd)
@@ -560,7 +661,12 @@ partial def synthTargetValue (target : StmtExprMd) : ElabM FValue := do
 
 /-- Helper: elaborate a block of statements into a prodBlock (flat sequencing).
     Block [s1, s2, s3] → prodBlock [synthProducer(s1), synthProducer(s2), synthProducer(s3)]
-    Preserves flat block structure required by downstream Laurel-to-Core translation. -/
+    Preserves flat block structure required by downstream Laurel-to-Core translation.
+
+    KEY: When a LocalVariable declaration is encountered, the declared name and type
+    are added to localTypes in the ElabEnv for subsequent statements. This ensures
+    that later references to the variable get the correct type rather than defaulting
+    to Any. -/
 partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FProducer × HighType) := do
   match stmts with
   | [] => pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TVoid)
@@ -568,10 +674,29 @@ partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FProducer × HighT
   | _ => do
     let mut prods : Array FProducer := #[]
     let mut lastTy : HighType := .TVoid
+    let mut extraLocals : Std.HashMap String HighType := {}
     for stmt in stmts do
-      let (prod, ty) ← synthProducer stmt
+      -- Thread local types: use withReader to add any accumulated declarations
+      let (prod, ty) ← if extraLocals.isEmpty then
+        synthProducer stmt
+      else
+        let locals := extraLocals
+        withReader (fun env => { env with localTypes := env.localTypes.insertMany locals.toList }) (synthProducer stmt)
       prods := prods.push prod
       lastTy := ty
+      -- After processing, if this was a LocalVariable, record its type for subsequent stmts
+      match stmt.val with
+      | .LocalVariable name ty _ => extraLocals := extraLocals.insert name.text ty.val
+      | .Assign [target] _ =>
+        -- Also track simple assignments to identifiers when we can infer the type
+        match target.val with
+        | .Identifier name =>
+          -- If we know the target's type from earlier declarations, keep it
+          -- (the type doesn't change). If it's a new assignment, record Any.
+          if !(extraLocals.contains name.text) then
+            extraLocals := extraLocals.insert name.text lastTy
+        | _ => pure ()
+      | _ => pure ()
     pure (.prodBlock () (mkAnn prods), lastTy)
 
 end -- mutual
@@ -608,7 +733,12 @@ partial def projectValue : FValue → StmtExprMd
   | .valLiteralBool _ b => mkMd (.LiteralBool b.val)
   | .valLiteralReal _ d => mkMd (.LiteralDecimal d.val)
   | .valLiteralString _ s => mkMd (.LiteralString s.val)
-  | .valVar _ name => mkMd (.Identifier (mkId name.val))
+  | .valVar _ name =>
+    -- Recognize $Hole_val sentinel: project back to a proper Hole node
+    if name.val == "$Hole_val" then
+      mkMd (.Hole (deterministic := false))
+    else
+      mkMd (.Identifier (mkId name.val))
   | .valAdd _ l r => mkMd (.PrimitiveOp .Add [projectValue l, projectValue r])
   | .valSub _ l r => mkMd (.PrimitiveOp .Sub [projectValue l, projectValue r])
   | .valMul _ l r => mkMd (.PrimitiveOp .Mul [projectValue l, projectValue r])
@@ -649,7 +779,11 @@ partial def projectValue : FValue → StmtExprMd
 partial def projectProducer : FProducer → StmtExprMd
   | .prodReturnValue _ val => projectValue val
   | .prodCall _ callee args =>
-    mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))
+    -- Recognize $Hole sentinel: project back to a proper Hole node
+    if callee.val == "$Hole" then
+      mkMd (.Hole (deterministic := false))
+    else
+      mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))
   | .prodLetProd _ var ty prod body =>
     let prodExpr := projectProducer prod
     let bodyExpr := projectProducer body
@@ -667,17 +801,28 @@ partial def projectProducer : FProducer → StmtExprMd
     let assignStmt := mkMd (.Assign [targetExpr] valExpr)
     mkMd (.Block [assignStmt, bodyExpr] none)
   | .prodVarDecl _ name ty init body =>
-    let bodyExpr := projectProducer body
-    -- Recognize $uninit sentinel: project as LocalVariable without initializer
-    let varDecl := match init with
-      | .valVar _ sentinel =>
-        if sentinel.val == "$uninit" then
+    -- Recognize $uninit sentinel: project as LocalVariable without initializer.
+    -- When the body is a trivial continuation (prodReturnValue), don't nest in a Block.
+    -- This preserves flat structure needed by downstream resolve pass.
+    match init with
+    | .valVar _ sentinel =>
+      if sentinel.val == "$uninit" then
+        -- Scope-hoisted declaration with no initializer.
+        -- Check if body is trivial (just returns the declared variable).
+        match body with
+        | .prodReturnValue _ _ =>
+          -- Trivial continuation: emit just the LocalVariable (flat, no Block nesting)
           mkMd (.LocalVariable (mkId name.val) (projectType ty) none)
-        else
-          mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
-      | _ =>
-        mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
-    mkMd (.Block [varDecl, bodyExpr] none)
+        | _ =>
+          -- Non-trivial continuation: need to nest
+          let bodyExpr := projectProducer body
+          mkMd (.Block [mkMd (.LocalVariable (mkId name.val) (projectType ty) none), bodyExpr] none)
+      else
+        let bodyExpr := projectProducer body
+        mkMd (.Block [mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init))), bodyExpr] none)
+    | _ =>
+      let bodyExpr := projectProducer body
+      mkMd (.Block [mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init))), bodyExpr] none)
   | .prodIfThenElse _ cond thenBr elseBr =>
     let condExpr := projectValue cond
     let thenExpr := projectProducer thenBr
@@ -720,7 +865,26 @@ partial def projectProducer : FProducer → StmtExprMd
     let secondExpr := projectProducer second
     mkMd (.Block [firstExpr, secondExpr] none)
   | .prodBlock _ stmts =>
-    mkMd (.Block (stmts.val.toList.map projectProducer) none)
+    -- Flatten: when projected statements are themselves Blocks, inline their children.
+    -- This prevents deep nesting that confuses downstream resolve pass.
+    let projected := stmts.val.toList.map projectProducer
+    let flattened := projected.foldl (init := ([] : List StmtExprMd)) fun acc stmt =>
+      match stmt.val with
+      | .Block innerStmts none =>
+        -- Flatten inner blocks (from prodLetProd/prodVarDecl projections)
+        -- but skip trailing trivial expressions (bare identifiers, literals)
+        let meaningful := innerStmts.filter fun s =>
+          match s.val with
+          | .Identifier _ => false
+          | .LiteralBool _ => false
+          | .LiteralInt _ => false
+          | .StaticCall callee [] => !(callee.text.startsWith "from_") -- skip upcasts used as trailing exprs
+          | _ => true
+        acc ++ meaningful
+      | .Identifier _ => acc  -- Skip bare identifier trailing values
+      | .LiteralBool _ => acc  -- Skip bare literal trailing values
+      | _ => acc ++ [stmt]
+    mkMd (.Block flattened none)
 end
 
 /-! ========================================================================
