@@ -8,43 +8,67 @@ to systemic problems that surface in every PR and review cycle.
 
 ### Problems with the Previous Implementation
 
-**1. Correctness not enforced by types — bugs pass code review.**
+**1. Correctness not enforced by types — bugs pass compilation and tests.**
 
-PR #835 introduced a subtle bug in its first implementation pass because the Lean
-types did not prevent generating incorrect Laurel output. The code compiled, tests
-passed, but the semantic translation was wrong. The bug was only caught during manual
-review — the type system offered no protection. This is symptomatic: `lake build`
-verifies that Lean code is well-typed, not that the translation is semantically correct.
+In PR #835 ("Laurel: Lift Procedure Calls in Asserts"), an agent-authored commit 
+(`97bce95`) introduced a bug where `getLast` selected the ERROR output channel of a 
+multi-output procedure instead of the primary return value. The generated code used 
+`$c_1` (the error channel) where it should have used `$c_0` (the result). This compiled
+cleanly and passed tests — both variables were valid at that program point with compatible
+Lean types. The bug was caught only by human review of the generated Laurel output.
 
-**2. Multiple PRs attacking the same problem from different angles.**
+**Root cause:** The Lean types don't encode "which output variable is semantically correct."
+`lake build` verifies Lean well-typedness, not semantic translation correctness.
 
-The Composite↔Any coercion issue has been approached from multiple PRs with different
-assumptions about where the coercion belongs, whether it should be a Hole (unsound
-approximation), a `from_Composite` injection, or handled by heap parameterization.
-Without a formal subtyping/narrowing discipline specifying the exact relation and
-where coercions are inserted, each PR makes a locally reasonable choice that may
-conflict with other PRs' assumptions.
+**2. Multiple PRs attacking the same problem without a shared discipline.**
 
-**3. Sequential bottleneck from implicit dependencies.**
+The Composite↔Any coercion problem (Issue #882: 13 failing tests) has spawned at least
+4 PRs with incompatible approaches:
 
-PRs depend on each other's unstated assumptions. PR B assumes PR A's output has a
-certain shape, but A's shape changes during review. This creates sequential
-dependencies that prevent parallel work. A shared architecture with typed interfaces
-between passes would make these dependencies explicit and allow independent development.
+| PR | Approach | Status |
+|----|----------|--------|
+| #727 | Emit `Hole` (unconstrained value) — avoids crash, loses precision | Merged |
+| #918 | Rename heap datatypes + coercion pathways | Draft (Git conflicts) |
+| #954 | DynamicComposite wrapping + heap parameterization | Open (134 comments, architectural disagreement) |
+| #1106 | Coerce args to Any at call sites | Open (defeats precondition model) |
 
-**4. Lowering passes mask elaboration bugs.**
+PR #954's 134-comment thread reflects a fundamental architectural disagreement: one
+approach extends `FieldSelect` with heap parameterization, the other uses opaque
+`read`/`update` procedures. Neither can yield because there's no written architecture
+to appeal to.
 
-The 8 lowering passes in `translateWithLaurel` (heap parameterization, type hierarchy,
-short-circuit desugaring, ANF lifting, etc.) run after translation and silently fix up
-structural issues in the output. This means Translation can produce subtly wrong Laurel
-and the lowering passes compensate — until they don't, and the bug surfaces as a cryptic
-Core type error far from the source.
+**Root cause:** No formal subtyping/narrowing discipline specifying when Composite↔Any
+coercions fire, at what pipeline stage, and via what mechanism.
 
-**5. No differential testing baseline.**
+**3. Sequential bottleneck from architectural disagreements.**
 
-There is no automated mechanism to verify that a change doesn't regress previously-passing
-tests. The in-tree tests exercise the full pipeline (Python → SMT), making it impossible
-to distinguish "translation bug" from "verification timeout" from "SMT solver quirk."
+- PR #753 (pipeline restructuring): 472 comments, 195 commits, ~2 months of iteration
+- PR #475 (CoreSMT pipeline): open since Feb 2026, has Git conflicts
+- PR #954: blocked on unresolved design disagreement for weeks
+
+These aren't slow reviews — they're the absence of a shared architecture causing
+repeated rework. Each iteration discovers a new unstated assumption that conflicts
+with the reviewer's model.
+
+**4. Lowering passes mask translation bugs and create ordering dependencies.**
+
+PR #1011 (bot-authored, still Draft) exposes a pass-ordering bug: `HeapParameterization`
+generates uninitialized local variables inside assertions that `LiftExpressionAssignments`
+then fails to handle. The bug exists because:
+- Translation produces structurally invalid Laurel
+- Heap parameterization transforms it into a DIFFERENT structurally invalid form
+- The expression lifter can't recover
+
+Similarly, PR #727's `Hole` approach explicitly acknowledges masking: "Composite values
+are replaced with Hole (unconstrained Any value) since Composite→Any coercion is not
+yet modeled. This limits bug-finding ability."
+
+**5. Agent contributions require expensive human oversight.**
+
+The `keyboardDrummer-bot` has 55 PRs (12 open, 43 merged). While productive, agent
+contributions consistently require human review to catch semantic correctness issues
+(PR #835 being the clearest example). The cost: every agent PR must be manually
+verified against an architecture that exists only in the reviewer's head.
 
 ---
 
