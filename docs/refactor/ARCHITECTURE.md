@@ -929,37 +929,31 @@ Illegal states are unrepresentable. You cannot put a Producer where a Value is
 expected — Lean's type system rejects it at construction time. No runtime checks,
 no predicates, no `by sorry`.
 
-### Metadata: Reader as Comonad
+### Metadata: Smart Constructors (the ONLY way to build AST nodes)
 
-Metadata (source locations) flows via the reader monad. Reader is a comonad — the
-input node's `WithMetadata` wrapper is comonadic context that the elaboration monad
-can access at any point without explicit threading.
-
-**Translation:** Input Python nodes carry metadata. The fold extracts `wa.md` and
-attaches to output Laurel nodes via smart constructors (`mkExpr sr expr`).
+Every AST node (`StmtExprMd` = `WithMetadata StmtExpr`) is constructed through a
+smart constructor that takes the metadata and the inner value. You NEVER write
+`{ val := ..., md := ... }` directly. The smart constructor makes forgetting
+metadata impossible — you cannot construct a node without providing source location.
 
 ```lean
-def translateM (wa : WithMetadata α) (f : α → TransM β) : TransM (WithMetadata β) := do
-  let result ← f wa.val
-  pure { val := result, md := wa.md }
+def mkLaurel (md : Imperative.MetaData Core.Expression) (e : StmtExpr) : StmtExprMd :=
+  { val := e, md := md }
 ```
 
-**Elaboration:** The current node's metadata lives in the reader context. When
-elaboration descends into a subnode, it updates `currentMd` from that node's
-`WithMetadata` wrapper. When projection emits a Laurel node, it reads `currentMd`
-and attaches it. No manual threading. No polymorphic FGL types.
+**Where does `md` come from?**
+- For nodes that correspond to an input node: use the input node's `.md`
+- For synthesized nodes (let-bindings, coercion calls): inherit `.md` from the
+  input node that triggered the synthesis
 
-```lean
-structure ElabContext where
-  env : TypeEnv        -- Γ (typing context)
-  currentMd : MetaData -- source location of the node being elaborated
+This is the standard source-location pattern in every functional compiler.
+Pattern match on `.val`, thread `.md` through the smart constructor on output.
 
-abbrev ElabM := ReaderT ElabContext (StateT ElabState (Except ElabError))
-```
+**Translation** uses `mkExpr sr expr` (reads `sr` from the Python AST node).
+**Elaboration** uses `mkLaurel md expr` (reads `md` from the input Laurel node).
+**Projection** uses `mkLaurel md expr` (reads `md` from the FGL node being projected).
 
-FGL types stay `Value`/`Producer` with no annotation parameter. Metadata is in
-the environment, not in the syntax tree. This is the correct factoring: the
-derivation (FGL) is separate from the source location metadata about that derivation.
+No polymorphic types. No reader-based threading. Just smart constructors.
 
 ### Translation Monad
 
