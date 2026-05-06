@@ -1026,12 +1026,10 @@ private def resolveQualifiedFieldNameFromEnv (typeEnv : TypeEnv) (fieldName : St
   return none
 
 /-- Get the type of a field from TypeEnv. Returns the HighType or defaults to Any. -/
-private def fieldTypeFromEnv (typeEnv : TypeEnv) (fieldName : String) : HighType := Id.run do
-  for (_className, fields) in typeEnv.classFields.toList do
-    for (fName, fType) in fields do
-      if fName == fieldName then
-        return fType
-  return .TCore "Any"
+private def fieldTypeFromEnv (_typeEnv : TypeEnv) (_fieldName : String) : HighType :=
+  -- In the dynamic pipeline, all method params and field values flow as Any.
+  -- Use TCore "Any" uniformly so Box constructors match (BoxAny for all fields).
+  .TCore "Any"
 
 /-- Get the Box constructor name for a given type. -/
 private def boxConstructorNameForType (ty : HighType) : String :=
@@ -1461,7 +1459,16 @@ private partial def rewriteTypeHierarchyExpr (exprMd : StmtExprMd) : THM StmtExp
       return ⟨.Block stmts' label, md⟩
   | .LocalVariable n ty i => do
       let i' ← match i with | some x => some <$> rewriteTypeHierarchyExpr x | none => pure none
-      return ⟨.LocalVariable n ty i', md⟩
+      -- Flatten: if initializer became a Block (e.g., from lowerNew), extract prefix stmts
+      match i' with
+      | some ⟨.Block stmts none, _⟩ =>
+        match stmts.reverse with
+        | [] => return ⟨.LocalVariable n ty none, md⟩
+        | terminal :: prefixRev => do
+          let prefixStmts := prefixRev.reverse
+          let localVar : StmtExprMd := ⟨.LocalVariable n ty (some terminal), md⟩
+          return ⟨.Block (prefixStmts ++ [localVar]) none, md⟩
+      | _ => return ⟨.LocalVariable n ty i', md⟩
   | .While c invs d b => do
       let d' ← match d with | some x => some <$> rewriteTypeHierarchyExpr x | none => pure none
       let invs' ← invs.mapM rewriteTypeHierarchyExpr
@@ -1471,7 +1478,17 @@ private partial def rewriteTypeHierarchyExpr (exprMd : StmtExprMd) : THM StmtExp
       return ⟨.Return v', md⟩
   | .Assign targets v => do
       let targets' ← targets.mapM rewriteTypeHierarchyExpr
-      return ⟨.Assign targets' (← rewriteTypeHierarchyExpr v), md⟩
+      let v' ← rewriteTypeHierarchyExpr v
+      -- Flatten: if value became a Block (e.g., from lowerNew), extract prefix stmts
+      match v' with
+      | ⟨.Block stmts none, _⟩ =>
+        match stmts.reverse with
+        | [] => return ⟨.Assign targets' (mkMd .Hole), md⟩
+        | terminal :: prefixRev => do
+          let prefixStmts := prefixRev.reverse
+          let assignStmt : StmtExprMd := ⟨.Assign targets' terminal, md⟩
+          return ⟨.Block (prefixStmts ++ [assignStmt]) none, md⟩
+      | _ => return ⟨.Assign targets' v', md⟩
   | .FieldSelect t f => do return ⟨.FieldSelect (← rewriteTypeHierarchyExpr t) f, md⟩
   | .PureFieldUpdate t f v => do return ⟨.PureFieldUpdate (← rewriteTypeHierarchyExpr t) f (← rewriteTypeHierarchyExpr v), md⟩
   | .StaticCall callee args => do

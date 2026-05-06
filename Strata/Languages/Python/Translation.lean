@@ -1328,8 +1328,13 @@ partial def translateClass (s : Python.stmt SourceRange)
   | .ClassDef _ className _bases _ ⟨_, body⟩ _ _ => do
       let classNameStr := className.val
 
-      -- Extract fields (type-directed from annotations)
-      let fields ← extractFields body
+      -- Use TypeEnv's classFields (from Resolution) which includes both class-level
+      -- and __init__-declared fields. All fields typed as Core(Any) for dynamic pipeline.
+      let envFields ← lookupClassFields classNameStr
+      let fields : List Field := envFields.map fun (fName, _) =>
+        { name := Identifier.mk fName none,
+          type := mkTypeDefault (.TCore "Any"),
+          isMutable := true }
 
       -- Translate methods (as methods with mutable param copies)
       let mut methods : List Procedure := []
