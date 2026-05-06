@@ -153,9 +153,8 @@ def isSubtype (source target : HighType) : Bool :=
   (isAny source && isAny target) ||
   highTypeEq source .Unknown ||
   highTypeEq target .Unknown ||
-  -- UserDefined types are represented as Any at Core level, no coercion needed
-  (match source with | .UserDefined _ => isAny target | _ => false) ||
-  (match target with | .UserDefined _ => isAny source | _ => false) ||
+  -- Per ARCHITECTURE.md §"Subtyping and Narrowing": Composite <: Any requires from_Composite.
+  -- UserDefined ↔ Any is NOT free — the coercion must be inserted by canUpcast/canNarrow.
   -- TVoid is compatible with Any (None is Any)
   (highTypeEq source .TVoid && isAny target) ||
   (isAny source && highTypeEq target .TVoid)
