@@ -487,8 +487,14 @@ public def pyAnalyzeLaurelV2
     | .error e => throw (.internal s!"Elaboration failed: {e}")
     | .ok prog => pure prog
 
-  -- Step 6: Combine with Python runtime Laurel part
+  -- Step 6: Filter prelude (remove unused procedures that would cause type errors in Core)
+  let filteredPrelude ← profileStep profile "Filter prelude" do
+    match Laurel.filterPrelude Python.pythonRuntimeLaurelPart elaboratedProgram with
+    | .ok prog => pure prog
+    | .error msg => throw (.internal msg)
+
+  -- Step 7: Combine with filtered runtime
   profileStep profile "Combine with runtime" do
-    return combinePySpecLaurel Python.pythonRuntimeLaurelPart elaboratedProgram
+    return combinePySpecLaurel filteredPrelude elaboratedProgram
 
 end Strata

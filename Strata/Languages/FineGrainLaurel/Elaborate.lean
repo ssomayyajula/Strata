@@ -43,6 +43,67 @@ def mkLaurel (md : Imperative.MetaData Core.Expression) (e : StmtExpr) : StmtExp
 def mkHighTypeMd (md : Imperative.MetaData Core.Expression) (ty : HighType) : HighTypeMd :=
   { val := ty, md := md }
 
+/-! ## Task 22: LowType + eraseType (ARCHITECTURE.md §"Two Type Systems: HighType and LowType")
+
+Per ARCHITECTURE.md: "Elaboration is a typed translation between two type systems
+(Harper & Morrisett 1995, TIL). The source system has class identity. The target
+system has a uniform heap representation."
+
+UserDefined is UNREPRESENTABLE in LowType. If elaboration accidentally tries to emit
+a UserDefined in FGL output, it's a Lean type error. The type system enforces the
+erasure boundary.
+-/
+
+/-- LowType: FGL's type system (elaboration's output).
+    Per ARCHITECTURE.md §"Two Type Systems": NO UserDefined. All class instances are Composite.
+    UserDefined is unrepresentable — Lean enforces the erasure boundary. -/
+inductive LowType where
+  | TInt | TBool | TString | TFloat64 | TVoid
+  | TCore (name : String)
+  deriving Inhabited, Repr, BEq
+
+/-- Type translation: HighType → LowType (total, deterministic).
+    Per ARCHITECTURE.md §"The type translation (eraseType)":
+    Every HighType maps to a LowType. UserDefined always becomes Composite. -/
+def eraseType : HighType → LowType
+  | .TInt => .TInt
+  | .TBool => .TBool
+  | .TString => .TString
+  | .TFloat64 => .TFloat64
+  | .TVoid => .TVoid
+  | .TCore name => .TCore name
+  | .UserDefined _ => .TCore "Composite"
+  | .THeap => .TCore "Heap"
+  | .TReal => .TCore "real"
+  | .TTypedField _ => .TCore "Field"
+  | .TSet _ => .TCore "Any"
+  | .TMap _ _ => .TCore "Any"
+  | .Applied _ _ => .TCore "Any"
+  | .Pure _ => .TCore "Composite"
+  | .Intersection _ => .TCore "Any"
+  | .Unknown => .TCore "Any"
+
+/-- Equality on LowTypes (reflexivity axiom in the erased world).
+    Per ARCHITECTURE.md §"MODE CORRECTNESS": Only used inside checkValue/checkProducer
+    as the short-circuit (A <: A). -/
+def lowTypesEqual (a b : LowType) : Bool :=
+  match a, b with
+  | .TInt, .TInt | .TBool, .TBool | .TString, .TString
+  | .TFloat64, .TFloat64 | .TVoid, .TVoid => true
+  | .TCore n1, .TCore n2 => n1 == n2
+  | _, _ => false
+
+/-- Lift a LowType back to HighType (for projection to Laurel which uses HighType).
+    Per IMPLEMENTATION_PLAN.md §"Task 9 Note": Projection outputs Laurel nodes with
+    HighType (for the LocalVariable type annotations). -/
+def liftType : LowType → HighType
+  | .TInt => .TInt
+  | .TBool => .TBool
+  | .TString => .TString
+  | .TFloat64 => .TFloat64
+  | .TVoid => .TVoid
+  | .TCore name => .TCore name
+
 /-! ## Task 2: FGLValue (ARCHITECTURE.md §"Representation Decisions: Separate Value and Producer Types")
 
 Value category — inert terms: literals, variables, pure constructions.
@@ -79,19 +140,19 @@ The only negative type: ↑A for any positive A (= a producer that yields A).
 inductive FGLProducer where
   | returnValue (v : FGLValue)
   | call (name : String) (args : List FGLValue)
-  | letProd (var : String) (ty : HighType) (prod : FGLProducer) (body : FGLProducer)
+  | letProd (var : String) (ty : LowType) (prod : FGLProducer) (body : FGLProducer)
   | assign (target : FGLValue) (val : FGLValue) (body : FGLProducer)
-  | varDecl (name : String) (ty : HighType) (init : FGLValue) (body : FGLProducer)
+  | varDecl (name : String) (ty : LowType) (init : FGLValue) (body : FGLProducer)
   | ifThenElse (cond : FGLValue) (thn : FGLProducer) (els : FGLProducer)
   | whileLoop (cond : FGLValue) (body : FGLProducer) (after : FGLProducer)
   | assert (cond : FGLValue) (body : FGLProducer)
   | assume (cond : FGLValue) (body : FGLProducer)
   | callWithError (callee : String) (args : List FGLValue)
       (resultVar : String) (errorVar : String)
-      (resultTy : HighType) (errorTy : HighType) (body : FGLProducer)
+      (resultTy : LowType) (errorTy : LowType) (body : FGLProducer)
   | exit (label : String)
   | labeledBlock (label : String) (body : FGLProducer)
-  | newObj (className : String) (resultVar : String) (ty : HighType) (body : FGLProducer)
+  | newObj (className : String) (resultVar : String) (ty : LowType) (body : FGLProducer)
   | seq (first : FGLProducer) (second : FGLProducer)
   | unit
   deriving Inhabited
@@ -163,14 +224,16 @@ The type tells you which. You don't decide.
 
 /-- Can we upcast actual to expected? Returns the value-level coercion function.
     Per ARCHITECTURE.md §"Subtyping (value-level, infallible)":
-    Γ ⊢_v e ⇒ A    A <: B  ⊢  Γ ⊢_v upcast(e) ⇐ B -/
-def canUpcast (actual expected : HighType) : Option (FGLValue → FGLValue) :=
+    Γ ⊢_v e ⇒ A    A <: B  ⊢  Γ ⊢_v upcast(e) ⇐ B
+    Now operates on LowType (Task 25): UserDefined → Any becomes TCore "Composite" → Any
+    because eraseType already converted it. -/
+def canUpcast (actual expected : LowType) : Option (FGLValue → FGLValue) :=
   match actual, expected with
   | .TInt, .TCore "Any" => some .fromInt
   | .TBool, .TCore "Any" => some .fromBool
   | .TString, .TCore "Any" => some .fromStr
   | .TFloat64, .TCore "Any" => some .fromFloat
-  | .UserDefined _, .TCore "Any" => some .fromComposite
+  | .TCore "Composite", .TCore "Any" => some .fromComposite
   | .TCore "ListAny", .TCore "Any" => some .fromListAny
   | .TCore "DictStrAny", .TCore "Any" => some .fromDictStrAny
   | .TVoid, .TCore "Any" => some (fun _ => .fromNone)
@@ -178,25 +241,16 @@ def canUpcast (actual expected : HighType) : Option (FGLValue → FGLValue) :=
 
 /-- Can we narrow actual to expected? Returns the downcast procedure name.
     Per ARCHITECTURE.md §"Narrowing (producer-level, fallible)":
-    Γ ⊢_v e ⇒ A    A ▷ B  ⊢  Γ ⊢_p narrow(e) : B -/
-def canNarrow (actual expected : HighType) : Option String :=
+    Γ ⊢_v e ⇒ A    A ▷ B  ⊢  Γ ⊢_p narrow(e) : B
+    Now operates on LowType (Task 25). -/
+def canNarrow (actual expected : LowType) : Option String :=
   match actual, expected with
   | .TCore "Any", .TBool => some "Any_to_bool"
   | .TCore "Any", .TInt => some "Any..as_int!"
   | .TCore "Any", .TString => some "Any..as_string!"
   | .TCore "Any", .TFloat64 => some "Any..as_float!"
-  | .TCore "Any", .UserDefined _ => some "Any..as_Composite!"
+  | .TCore "Any", .TCore "Composite" => some "Any..as_Composite!"
   | _, _ => none
-
-/-- Are two types equal (no coercion needed)?
-    Per ARCHITECTURE.md: "If actual = expected → no coercion" -/
-def typesEqual (a b : HighType) : Bool :=
-  match a, b with
-  | .TInt, .TInt | .TBool, .TBool | .TString, .TString
-  | .TFloat64, .TFloat64 | .TVoid, .TVoid => true
-  | .TCore n1, .TCore n2 => n1 == n2
-  | .UserDefined id1, .UserDefined id2 => id1.text == id2.text
-  | _, _ => false
 
 /-! ## sequenceProducers helper (IMPLEMENTATION_PLAN.md §"Task 13")
 
@@ -233,45 +287,58 @@ Per ARCHITECTURE.md §"Subsumption (coercion insertion)":
 mutual
 
 /-- Synthesize a value and its type from a Laurel expression.
-    Per ARCHITECTURE.md §"What SYNTHESIZES" — elimination forms produce known types. -/
-partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × HighType) := do
+    Per ARCHITECTURE.md §"What SYNTHESIZES" — elimination forms produce known types.
+    Task 24: Returns LowType (the erased type in FGL's type system). -/
+partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
   match expr.val with
   | .LiteralInt n => pure (.litInt n, .TInt)
   | .LiteralBool b => pure (.litBool b, .TBool)
   | .LiteralString s => pure (.litString s, .TString)
   | .Identifier id =>
     match (← lookupEnv id.text) with
-    | some (.variable ty) => pure (.var id.text, ty)
-    | some (.function sig) => pure (.var id.text, sig.returnType)
+    | some (.variable ty) => pure (.var id.text, eraseType ty)
+    | some (.function sig) => pure (.var id.text, eraseType sig.returnType)
     | _ => pure (.var id.text, .TCore "Any")
   | .FieldSelect obj field =>
     let (objVal, objTy) ← synthValue obj
-    match objTy with
-    | .UserDefined className =>
-      let fieldTy ← lookupFieldType className.text field.text
-      pure (.fieldAccess objVal field.text, fieldTy)
-    | _ => pure (.fieldAccess objVal field.text, .TCore "Any")
+    -- Task 27: When obj type is Composite, emit readField (heap field access)
+    if lowTypesEqual objTy (.TCore "Composite") then
+      pure (.staticCall "readField" [.var "$heap", objVal, .staticCall (field.text ++ "_Field") []], .TCore "Box")
+    else
+      -- Non-composite field access: look up field type via HighType world
+      -- We need the original HighType to look up classFields. Use the expr to recover it.
+      let fieldTy ← match obj.val with
+        | .Identifier id =>
+          match (← lookupEnv id.text) with
+          | some (.variable (.UserDefined className)) =>
+            lookupFieldType className.text field.text
+          | _ => pure (.TCore "Any")
+        | _ => pure (.TCore "Any")
+      pure (.fieldAccess objVal field.text, eraseType fieldTy)
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
     let retTy := match sig with
-      | some s => s.returnType
+      | some s => eraseType s.returnType
       | none => .TCore "Any"
     let argVals ← args.mapM (fun a => do let (v, _) ← synthValue a; pure v)
     pure (.staticCall callee.text argVals, retTy)
   | .New classId =>
-    pure (.var classId.text, .UserDefined classId)
+    -- Task 26: New emits MkComposite in the erased world (not UserDefined)
+    pure (.staticCall "MkComposite" [.staticCall "Heap..nextReference!" [.var "$heap"], .staticCall (classId.text ++ "_TypeTag") []], .TCore "Composite")
   | _ => pure (.var "_hole", .TCore "Any")
 
 /-- Check an expression against an expected type, inserting coercions as needed.
     Per ARCHITECTURE.md §"Subsumption (coercion insertion at CHECK boundaries)":
-    synth(e) = A, expected = B, A ≠ B → insert upcast if A <: B. -/
+    synth(e) = A, expected = B, A ≠ B → insert upcast if A <: B.
+    Task 25: expected is HighType (from annotations), but comparison is in LowType. -/
 partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
-  let (val, actual) ← synthValue expr
-  if typesEqual actual expected then return val
-  match canUpcast actual expected with
+  let (val, actual) ← synthValue expr   -- actual : LowType
+  let expectedLow := eraseType expected  -- convert expected to LowType
+  if lowTypesEqual actual expectedLow then return val
+  match canUpcast actual expectedLow with
   | some coerce => return (coerce val)
   | none =>
-    throw (ElabError.typeError s!"Cannot coerce {repr actual} to {repr expected}")
+    throw (ElabError.typeError s!"Cannot coerce {repr actual} to {repr expectedLow}")
 
 -- Tasks 9-13: synthProducer (ARCHITECTURE.md §"The Bidirectional Recipe")
 -- Per ARCHITECTURE.md §"What CHECKS":
@@ -288,7 +355,7 @@ partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValu
     - LocalVariable: CHECK init against declared type
     - IfThenElse/While/Assert/Assume: NARROW condition (Any→bool via callWithError)
     - Block/Exit/New/Return: structural cases -/
-partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) := do
+partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) := do
   match expr.val with
   -- Task 9: StaticCall (CHECK args against FuncSig.params via checkValue)
   | .StaticCall callee args =>
@@ -303,8 +370,8 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) 
           let pairs := args.zip paramTypes
           pairs.mapM (fun (arg, paramTy) => checkValue arg paramTy)
         | none => args.mapM (fun a => do let (v, _) ← synthValue a; pure v)
-      let retTy := match sig with
-        | some s => s.returnType
+      let retTy : LowType := match sig with
+        | some s => eraseType s.returnType
         | none => .TCore "Any"
       if (match sig with | some s => s.hasErrorOutput | none => false) then
         let rv ← freshVar "result"
@@ -326,7 +393,7 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) 
         | _ => pure (.TCore "Any")
       let (targetVal, _) ← synthValue target
       let checkedRhs ← checkValue value targetTy
-      pure (.assign targetVal checkedRhs .unit, targetTy)
+      pure (.assign targetVal checkedRhs .unit, .TVoid)
     | _ => pure (.unit, .TCore "Any")  -- multi-target: ARCHITECTURE GAP
 
   -- Task 11: LocalVariable (CHECK init against declared type)
@@ -335,10 +402,11 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) 
     let initVal ← match initOpt with
       | some init => checkValue init declTy
       | none => pure (.var "_uninit")
-    pure (.varDecl nameId.text declTy initVal .unit, declTy)
+    pure (.varDecl nameId.text (eraseType declTy) initVal .unit, eraseType declTy)
 
   -- Task 12: IfThenElse — condition is CHECK against bool via subsumption.
   -- No typesEqual dispatch. Coercion table decides.
+  -- canUpcast/canNarrow now operate on LowType (Task 25).
   | .IfThenElse cond thenBranch elseBranch =>
     let (condVal, condTy) ← synthValue cond
     let (thenProd, thenTy) ← synthProducer thenBranch
@@ -406,19 +474,24 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) 
   -- Task 13: Exit
   | .Exit target => pure (.exit target, .TVoid)
 
-  -- Task 13: New
+  -- Task 13 + Task 26: New → emit MkComposite (erased world)
+  -- Per IMPLEMENTATION_PLAN.md §Task 26: New "Foo" → MkComposite(freshRef, Foo_TypeTag())
   | .New classId =>
+    let refVar ← freshVar "ref"
     let objVar ← freshVar "obj"
-    let ty := HighType.UserDefined classId
-    pure (.newObj classId.text objVar ty (.returnValue (.var objVar)), ty)
+    let prod := FGLProducer.letProd refVar .TInt (.call "Heap..nextReference!" [.var "$heap"])
+      (.letProd objVar (.TCore "Composite")
+        (.call "MkComposite" [.var refVar, .staticCall (classId.text ++ "_TypeTag") []])
+        (.returnValue (.var objVar)))
+    pure (prod, .TCore "Composite")
 
-  -- Task 13: Return
+  -- Task 13: Return — checkValue uses HighType (currentProcReturnType), result is LowType
   | .Return valueOpt =>
     let retTy := (← get).currentProcReturnType
     match valueOpt with
     | some v =>
       let checkedVal ← checkValue v retTy
-      pure (.returnValue checkedVal, retTy)
+      pure (.returnValue checkedVal, eraseType retTy)
     | none => pure (.returnValue .fromNone, .TVoid)
 
   -- Fallback: synth as value, wrap in returnValue
@@ -434,19 +507,21 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) 
 -- - else → throw ElabError
 
 /-- Check a producer against an expected type, inserting narrowing as needed.
-    Per ARCHITECTURE.md §"Narrowing (A ▷ B)": bind producer, narrow result via fallible call. -/
+    Per ARCHITECTURE.md §"Narrowing (A ▷ B)": bind producer, narrow result via fallible call.
+    Task 25: expected is HighType, comparison in LowType. -/
 partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FGLProducer := do
   let (prod, actual) ← synthProducer expr
-  if typesEqual actual expected then return prod
-  match canNarrow actual expected with
+  let expectedLow := eraseType expected
+  if lowTypesEqual actual expectedLow then return prod
+  match canNarrow actual expectedLow with
   | some narrowFn =>
     let tmpVar ← freshVar "narrow"
     let resultVar ← freshVar "narrowed"
     pure (.letProd tmpVar actual prod
            (.callWithError narrowFn [.var tmpVar] resultVar (resultVar ++ "_err")
-             expected (.TCore "Error") (.returnValue (.var resultVar))))
+             expectedLow (.TCore "Error") (.returnValue (.var resultVar))))
   | none =>
-    throw (ElabError.typeError s!"Cannot narrow {repr actual} to {repr expected}")
+    throw (ElabError.typeError s!"Cannot narrow {repr actual} to {repr expectedLow}")
 
 -- Task 15: shortCircuitDesugar (ARCHITECTURE.md §"Short-Circuit Desugaring in FGL")
 -- PAnd(a, b): Python semantics = return a if FALSY, else evaluate and return b
@@ -457,7 +532,7 @@ partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FGLP
     Per ARCHITECTURE.md §"Short-Circuit Desugaring in FGL":
     PAnd: `e to x. callWithError Any_to_bool [x] cond ... (if cond then elaborate b else returnValue x)`
     POr: `e to x. callWithError Any_to_bool [x] cond ... (if cond then returnValue x else elaborate b)` -/
-partial def shortCircuitDesugar (op : String) (args : List StmtExprMd) : ElabM (FGLProducer × HighType) := do
+partial def shortCircuitDesugar (op : String) (args : List StmtExprMd) : ElabM (FGLProducer × LowType) := do
   match args with
   | [a, b] =>
     let xVar ← freshVar "sc"
@@ -493,7 +568,7 @@ partial def shortCircuitDesugar (op : String) (args : List StmtExprMd) : ElabM (
 
 /-- Elaborate a block of statements into a single producer.
     Per ARCHITECTURE.md §"Blocks as Nested Lets (CBV → FGCBV)" — foldr, Levy §3.2. -/
-partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FGLProducer × HighType) := do
+partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FGLProducer × LowType) := do
   match stmts with
   | [] => pure (.unit, .TVoid)
   | [last] => synthProducer last
@@ -544,7 +619,7 @@ partial def splitProducer (md : Imperative.MetaData Core.Expression) : FGLProduc
       ([], mkLaurel md (.StaticCall (Identifier.mk name none) (args.map (projectValue md))))
   | .letProd x ty inner body =>
       let (innerStmts, innerExpr) := splitProducer md inner
-      let xDecl := mkLaurel md (.LocalVariable (Identifier.mk x none) (mkHighTypeMd md ty) (some innerExpr))
+      let xDecl := mkLaurel md (.LocalVariable (Identifier.mk x none) (mkHighTypeMd md (liftType ty)) (some innerExpr))
       let (bodyStmts, bodyExpr) := splitProducer md body
       (innerStmts ++ [xDecl] ++ bodyStmts, bodyExpr)
   | .assign target val body =>
@@ -552,7 +627,7 @@ partial def splitProducer (md : Imperative.MetaData Core.Expression) : FGLProduc
       let (bodyStmts, bodyExpr) := splitProducer md body
       ([stmt] ++ bodyStmts, bodyExpr)
   | .varDecl name ty init body =>
-      let decl := mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md ty) (some (projectValue md init)))
+      let decl := mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (liftType ty)) (some (projectValue md init)))
       let (bodyStmts, bodyExpr) := splitProducer md body
       ([decl] ++ bodyStmts, bodyExpr)
   | .ifThenElse cond thn els =>
@@ -571,8 +646,8 @@ partial def splitProducer (md : Imperative.MetaData Core.Expression) : FGLProduc
       ([stmt] ++ bodyStmts, bodyExpr)
   | .callWithError callee args rv ev rTy eTy body =>
       let callExpr := mkLaurel md (.StaticCall (Identifier.mk callee none) (args.map (projectValue md)))
-      let rvDecl := mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md rTy) (some callExpr))
-      let evDecl := mkLaurel md (.LocalVariable (Identifier.mk ev none) (mkHighTypeMd md eTy) (some (mkLaurel md (.StaticCall (Identifier.mk "NoError" none) []))))
+      let rvDecl := mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md (liftType rTy)) (some callExpr))
+      let evDecl := mkLaurel md (.LocalVariable (Identifier.mk ev none) (mkHighTypeMd md (liftType eTy)) (some (mkLaurel md (.StaticCall (Identifier.mk "NoError" none) []))))
       let (bodyStmts, bodyExpr) := splitProducer md body
       ([rvDecl, evDecl] ++ bodyStmts, bodyExpr)
   | .exit label => ([mkLaurel md (.Exit label)], mkLaurel md (.LiteralBool true))
@@ -580,7 +655,7 @@ partial def splitProducer (md : Imperative.MetaData Core.Expression) : FGLProduc
       ([mkLaurel md (.Block [projectBody md body] (some label))], mkLaurel md (.LiteralBool true))
   | .newObj className rv ty body =>
       let newExpr := mkLaurel md (.New (Identifier.mk className none))
-      let decl := mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md ty) (some newExpr))
+      let decl := mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md (liftType ty)) (some newExpr))
       let (bodyStmts, bodyExpr) := splitProducer md body
       ([decl] ++ bodyStmts, bodyExpr)
   | .seq first second =>
@@ -774,12 +849,14 @@ def addHeapTypeInfrastructure (program : Strata.Laurel.Program)
   let heapProcs := heapConstants.staticProcedures
   -- Rewrite heap procedures' signatures if they reference heap-touching procs
   let rewrittenProcs := rewriteSignatures program.staticProcedures analysis
-  -- NOTE: heapProcs (readField, updateField, increment) are included because
-  -- the old pipeline's combinePySpecLaurel + translateWithLaurel expects them.
-  -- They will be type-checked by Core only if referenced from user code.
+  -- Type declarations ALWAYS added (prelude's Any references from_Composite).
+  -- Heap procedures only when heap is used (otherwise Core chokes on the signatures).
+  let hasHeapUsage := analysis.toList.any (fun (_, info) => info.readsHeap || info.writesHeap)
+  let rewrittenProcs := rewriteSignatures program.staticProcedures analysis
+  let finalProcs := if hasHeapUsage then heapProcs ++ rewrittenProcs else rewrittenProcs
   { program with
     types := heapTypeDefs ++ [fieldDatatype, boxDatatype, typeTagDatatype] ++ program.types
-    staticProcedures := heapProcs ++ rewrittenProcs
+    staticProcedures := finalProcs
   }
 
 /-! ## Task 18: fullElaborate (IMPLEMENTATION_PLAN.md §"Task 18")
