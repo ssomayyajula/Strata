@@ -467,6 +467,36 @@ This is analogous to type inference: constraints are collected locally, then sol
 
 ---
 
+### Composite and Any: The Pointer Injection
+
+`Any` is a TAGGED UNION (sum type) of Python values. `Composite` is a heap reference
+(`MkComposite(ref: int, typeTag: TypeTag)`). The relationship:
+
+**`Composite` injects into `Any` via `from_Composite`** — a pointer-preserving injection.
+The `Any` value holds the heap reference directly. No serialization, no deep copy.
+
+```
+datatype Any { ..., from_Composite (as_Composite: Composite), ... }
+```
+
+This means:
+- `Composite <: Any` via `from_Composite` (subtyping: value→value, infallible)
+- `Any ▷ Composite` via `Any..as_Composite!` (narrowing: value→producer, may throw TypeError)
+
+**Why pointer-preserving is sound:**
+- The `Composite` inside `Any` IS the heap reference (same `ref` integer, same `typeTag`)
+- Mutations via `updateField(heap, obj, field, val)` are visible regardless of whether
+  `obj` is typed `Composite` or unwrapped from `Any` — same pointer
+- Identity preserved: two `from_Composite(x)` wrappings of the same `x` are equal
+- No aliasing issues: there's still one object on the heap, one reference to it
+
+**This resolves Issue #882** (Composite/Any unification failure) and the 4 competing
+PRs (#727 Hole approach, #918 rename + pathways, #954 DynamicComposite, #1106 coerce
+at call sites). The correct answer: `Composite` is just another concrete type that
+injects into the `Any` sum, like `int` or `bool`.
+
+---
+
 **What remains as genuine cleanup (not elaboration):**
 - `inferHoleTypes` — completing partial type information (could become part of bidirectional synth)
 - `filterPrelude` — dead code elimination (optimization, not semantics)
