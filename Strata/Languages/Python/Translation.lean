@@ -310,9 +310,8 @@ partial def translateExpr (e : Python.expr SourceRange) : TransM StmtExprMd := d
       mkExpr sr (.LiteralBool false)
   | .Constant sr (.ConNone _) _ =>
       mkExpr sr (.StaticCall "from_None" [])
-  | .Constant sr (.ConFloat _ f) _ => do
-      let strLit ← mkExpr sr (.LiteralString f.val)
-      mkExpr sr (.StaticCall "from_float" [strLit])
+  | .Constant sr (.ConFloat _ f) _ =>
+      mkExpr sr (.LiteralString f.val)
   | .Constant sr (.ConBytes _ _) _ => mkExpr sr .Hole
   | .Constant sr (.ConComplex _ _ _) _ => mkExpr sr .Hole
   | .Constant sr (.ConEllipsis _) _ => mkExpr sr .Hole
@@ -873,19 +872,8 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
       match value.val with
       | some expr => do
           let e ← translateExpr expr
-          -- If the returned value is a composite-typed variable, use Hole
-          -- (matching old pipeline's coerceToAny behavior)
-          let returnVal ← match expr with
-            | .Name _ varName _ => do
-                let varTy ← lookupVariableType varName.val
-                match varTy with
-                | some _className =>
-                    -- Variable is composite-typed: use Hole
-                    mkExpr sr .Hole
-                | none => pure e
-            | _ => pure e
           let laurelResultId ← mkExpr sr (.Identifier "LaurelResult")
-          let assignResult ← mkExpr sr (.Assign [laurelResultId] returnVal)
+          let assignResult ← mkExpr sr (.Assign [laurelResultId] e)
           let exitBody ← mkExpr sr (.Exit "$body")
           pure [assignResult, exitBody]
       | none => do
@@ -1207,26 +1195,30 @@ partial def translateFunction (s : Python.stmt SourceRange)
     : TransM (Option Procedure) := do
   match s with
   | .FunctionDef sr name args body _decorators _returns _typeComment _ => do
-      -- Translate parameters: typed as Any UNLESS annotated with a known class type.
-      -- Core's type checker requires exact type matches and the prelude operates
-      -- on Any. Class-typed parameters must use UserDefined so that heap
-      -- parameterization converts them to Composite (matching what callers pass).
-      let env ← read
-      let allParams ← match args with
-        | .mk_arguments _ _ argList _ _ _ _kwargs _defaults =>
-            argList.val.toList.mapM fun arg => do
-              match arg with
-              | .mk_arg _ argName annotation _ =>
-                let paramType := match annotation.val with
-                  | some annExpr =>
-                      let typeStr := extractTypeStr annExpr
-                      match env.names[typeStr]? with
-                      | some (.class_ className _) =>
-                          HighType.UserDefined (Identifier.mk className none)
-                      | _ => .TCore "Any"
-                  | none => .TCore "Any"
-                pure ({ name := Identifier.mk argName.val none,
-                        type := mkTypeDefault paramType } : Parameter)
+      -- Determine procedure name first (needed for Γ lookup)
+      let procName := match className with
+        | some cn => s!"{cn}@{name.val}"
+        | none => name.val
+      -- Translate parameters: use types from Γ (Resolution already extracted
+      -- precise annotations). Only falls back to re-reading the AST if Γ has no entry.
+      let allParams ← do
+        let info ← lookupName procName
+        match info with
+        | some (.function sig) =>
+            pure (sig.params.map fun (pName, pType) =>
+              ({ name := Identifier.mk pName none, type := mkTypeDefault pType } : Parameter))
+        | _ =>
+            -- Fallback: read from AST (shouldn't happen if Resolution is correct)
+            match args with
+            | .mk_arguments _ _ argList _ _ _ _kwargs _defaults =>
+                argList.val.toList.mapM fun arg => do
+                  match arg with
+                  | .mk_arg _ argName annotation _ =>
+                    let paramType := match annotation.val with
+                      | some annExpr => pythonTypeToLaurel (extractTypeStr annExpr)
+                      | none => .TCore "Any"
+                    pure ({ name := Identifier.mk argName.val none,
+                            type := mkTypeDefault paramType } : Parameter)
 
       -- For methods: skip self, emit mutable copies for remaining params
       let (inputs, paramCopies) ← if isMethod then do
@@ -1252,9 +1244,12 @@ partial def translateFunction (s : Python.stmt SourceRange)
       else
         pure (allParams, [])
 
-      -- Return type: Any for the dynamic Python pipeline.
-      -- The prelude operations all return Any, and Core requires exact unification.
-      let returnType : HighType := .TCore "Any"
+      -- Return type: from Γ (precise annotation). Only Any if genuinely unannotated.
+      let returnType ← do
+        let info ← lookupName procName
+        match info with
+        | some (.function sig) => pure sig.returnType
+        | _ => pure (.TCore "Any")
       let outputs : List Parameter := [{ name := Identifier.mk "LaurelResult" none,
                                           type := mkTypeDefault returnType }]
 
@@ -1280,11 +1275,6 @@ partial def translateFunction (s : Python.stmt SourceRange)
       -- Assemble: paramCopies + scopeDecls + maybe_except + body
       let allStmts := paramCopies ++ scopeDecls ++ [maybeExceptDecl] ++ bodyStmts
       let bodyBlock ← mkExpr sr (.Block allStmts none)
-
-      -- Determine procedure name
-      let procName := match className with
-        | some cn => s!"{cn}@{name.val}"
-        | none => name.val
 
       let filePath := (← get).filePath
 
@@ -1329,11 +1319,11 @@ partial def translateClass (s : Python.stmt SourceRange)
       let classNameStr := className.val
 
       -- Use TypeEnv's classFields (from Resolution) which includes both class-level
-      -- and __init__-declared fields. All fields typed as Core(Any) for dynamic pipeline.
+      -- and __init__-declared fields. Types come from annotations.
       let envFields ← lookupClassFields classNameStr
-      let fields : List Field := envFields.map fun (fName, _) =>
+      let fields : List Field := envFields.map fun (fName, fType) =>
         { name := Identifier.mk fName none,
-          type := mkTypeDefault (.TCore "Any"),
+          type := mkTypeDefault fType,
           isMutable := true }
 
       -- Translate methods (as methods with mutable param copies)
