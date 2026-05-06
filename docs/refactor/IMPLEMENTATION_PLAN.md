@@ -868,24 +868,35 @@ via `sequenceProducers` (replaces .unit continuations).
 Return is just another CHECK position in the bidirectional recipe (§"What CHECKS" table):
 expected type from proc signature flows down, same subsumption as everywhere else.
 
-### 14. `checkProducer`: synth → narrow
+### 14. `checkProducer`: structural rules + narrowing fallback
 
 **File:** Elaborate.lean (inside mutual block)  
-**Logic:**
+**Logic (per ARCHITECTURE.md producer checking rules):**
 ```
 checkProducer expr expected :=
-  let (prod, actual) ← synthProducer expr
-  if typesEqual actual expected then return prod
-  match canNarrow actual expected with
-  | some narrowFn =>
-    let tmpVar ← freshVar "narrow"
-    let resultVar ← freshVar "narrowed"
-    return (.letProd tmpVar actual prod
-             (.callWithError narrowFn [.var tmpVar] resultVar (resultVar ++ "_err")
-               expected (.TCore "Error") (.returnValue (.var resultVar))))
-  | none => throw (ElabError.typeError s!"Cannot narrow {actual} to {expected}")
+  match expr.val with
+  -- Structural producer checking rules (expected type propagates inward):
+  | .IfThenElse cond thn els =>
+      -- Elaborate+bind condition, check against bool
+      -- Then check BOTH branches against expected C
+      let condVal ← elaborateAndCheckBool cond
+      let thnProd ← checkProducer thn expected
+      let elsProd ← match els with | some e => checkProducer e expected | none => ...
+      ...
+  | .Block stmts label => ... (last stmt checks against expected)
+  -- Fallback: synth then narrow
+  | _ =>
+      let (prod, actual) ← synthProducer expr
+      if lowTypesEqual actual (eraseType expected) then return prod
+      -- Bind the producer to get a value, then narrow
+      let tmpVar ← freshVar "narrow"
+      match canNarrow actual (eraseType expected) with
+      | some narrowFn =>
+          .letProd tmpVar actual prod (narrowFn applied to .var tmpVar)
+      | none => throw ...
 ```
-**Why:** ARCHITECTURE.md §"Narrowing" — bind producer, narrow result via fallible call.
+**Why:** ARCHITECTURE.md producer checking rules (if, var-bind, M-to-x, return)
++ narrowing as fallback. Narrowing operates on the BOUND VALUE (bind first).
 
 ### 15. Short-circuit: PAnd/POr
 
