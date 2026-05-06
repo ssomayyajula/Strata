@@ -284,61 +284,157 @@ where the only computation type is `↑A` (a producer of value type A). This mea
 The bidirectional discipline follows from this polarization, adapted to our system
 where Python annotations drive the checking context:
 
-**Mode Discipline: Synthesize Maximally, Coerce at CHECK Boundaries**
+**Elaboration = CBV→FGCBV Embedding (Levy 2003 §3.2)**
 
-The bidirectional discipline follows from DRY: constructs whose type is determined
-by Γ or by form SYNTHESIZE. Constructs where an expected type naturally flows in
-from context CHECK. Subsumption (coercion insertion) is the ONE glue function where
-synth meets check — coercion logic lives in exactly one place (checkValue/checkProducer).
+Elaboration IS the standard embedding of CBV (Laurel) into FGCBV (FineGrainLaurel).
+This embedding is deterministic — no choices, no routing decisions. Every CBV term
+has exactly one FGCBV translation.
 
-**What SYNTHESIZES (type determined by Γ or form — no expected type needed):**
+**The embedding:**
+```
+⟦n⟧           = produce (litInt n)                    -- literal → value, wrapped in produce
+⟦x⟧           = produce (var x)                      -- variable → value, wrapped in produce
+⟦f(a₁,...,aₙ)⟧ = ⟦a₁⟧ to x₁. ... ⟦aₙ⟧ to xₙ.       -- evaluate args left-to-right
+                  f(coerce(x₁,T₁), ..., coerce(xₙ,Tₙ)) to z.  -- call with coerced values
+                  produce z                           -- result is a value
+⟦x := e⟧     = ⟦e⟧ to tmp. assign x (coerce(tmp, Γ(x))) continuation
+⟦let x:T = e in body⟧ = ⟦e⟧ to tmp. varDecl x T (coerce(tmp,T)) ⟦body⟧
+⟦if c then a else b⟧  = ⟦c⟧ to cond. narrow(cond,bool) to b. if b then ⟦a⟧ else ⟦b⟧
+```
 
-| Construct | Synthesized type | Source of type |
+Key properties:
+- **Every subexpression is elaborated as a PRODUCER** (`⟦e⟧` always produces a producer)
+- **Every intermediate result is BOUND** (`to x.` = letProd)
+- **Coercions applied to BOUND VALUES** (x₁, x₂, ... are values after binding)
+- **synthValue only handles ATOMS** (literals, variables — things that ARE values)
+- **No routing decision** — the embedding is uniform
+
+**Values vs Producers:**
+
+| Laurel construct | In FGCBV | Why |
 |---|---|---|
-| `Identifier "x"` | Γ(x) | Variable's declared type in Γ |
-| `LiteralInt n` | `int` | Literal form determines type |
-| `LiteralBool b` | `bool` | Literal form |
-| `LiteralString s` | `str` | Literal form |
-| `StaticCall "f" [args]` | `FuncSig.returnType` | Γ's signature for f |
-| `FieldSelect obj "field"` | field type from classFields | Γ's class definition |
-| `New "ClassName"` | `UserDefined ClassName` | Γ's class entry |
+| `LiteralInt/Bool/String` | VALUE (atom) | Inert, no effects |
+| `Identifier "x"` | VALUE (atom) | Variable reference, inert |
+| `StaticCall "f" [args]` | PRODUCER | May throw, evaluates args |
+| `New "Foo"` | PRODUCER | Heap allocation |
+| `FieldSelect obj field` | PRODUCER (on heap) / VALUE (non-heap) | May read heap |
+| `Assign/LocalVariable` | PRODUCER | Mutation/binding |
+| `IfThenElse/While` | PRODUCER | Control flow |
+| `Block` | PRODUCER | Sequencing (M to _. N to _. ...) |
+| Everything else | PRODUCER | Effects or control |
 
-These all have their type determined by lookup or form. They don't need external
-context to know what they produce. Subsumption fires when their synthesized type
-meets an enclosing CHECK boundary.
+**synthValue handles ONLY atoms:** Identifier, Literal. Nothing else.
 
-**What CHECKS (expected type flows in from context):**
+**synthProducer handles EVERYTHING else.** It applies the embedding uniformly:
+elaborate each sub-expression, bind result, apply coercions to bound values.
 
-| Construct | Expected type | Source of expected type |
+**checkValue only sees atoms.** Because every compound expression has already been
+bound by the time a coercion check happens. The bound variable IS an atom.
+
+**Projection is the LEFT INVERSE of the embedding.** It forgets the FGCBV structure
+back into CBV. The chain of `letProd`s becomes a flat sequence of assignments.
+`splitProducer` implements this via bind reassociation (monad law).
+
+Round-trip:
+```
+Laurel (CBV) → [Embedding/Elaboration] → FGL (FGCBV) → [Projection/Forgetting] → Laurel (CBV)
+```
+What comes back has explicit coercions and bindings that weren't in the input.
+That's the whole point — making implicit effects explicit.
+
+**Γ extension at binding sites:**
+
+Γ grows as elaboration descends under binders (standard type theory):
+- Enter procedure → extend Γ with parameter names and types
+- Process `LocalVariable x : T` → extend Γ with `x : T` for continuation
+- Uses `withReader` on the reader monad. No mutable state. One Γ.
+
+**The routing table (which function handles which):**
+
+| Construct | Value or Producer? | Handled by | Why |
+|---|---|---|---|
+| `LiteralInt/Bool/String` | VALUE | synthValue | Inert, pure |
+| `Identifier "x"` | VALUE | synthValue | Variable reference, pure |
+| `FieldSelect obj field` | VALUE | synthValue | Pure projection |
+| `StaticCall "f" [args]` | **PRODUCER** | **synthProducer** | May throw, coerces args |
+| `New "ClassName"` | **PRODUCER** | **synthProducer** | Heap allocation |
+| `Assign` | PRODUCER | synthProducer | Mutation |
+| `LocalVariable` | PRODUCER | synthProducer | Binding introduction |
+| `IfThenElse` | PRODUCER | synthProducer | Control flow |
+| `While/Assert/Assume` | PRODUCER | synthProducer | Effect/control |
+| `Block` | PRODUCER | synthProducer | Sequencing |
+| `Exit/Return` | PRODUCER | synthProducer | Control flow |
+
+**checkValue NEVER sees producers.** It only handles atoms (Identifier, Literal).
+The caller (synthProducer) is responsible for binding producer results BEFORE
+passing them to coercion. No `isProducer` dispatch. No routing in checkValue.
+
+**Worked example:** `x := PAdd(a, b)` where `x: int`, PAdd: `(Any,Any)→Any`:
+```
+-- synthProducer for Assign [x] (StaticCall "PAdd" [a, b]):
+⟦Identifier "a"⟧ to arg0.              -- elaborate arg a (atom → produce (var a))
+⟦Identifier "b"⟧ to arg1.              -- elaborate arg b (atom → produce (var b))
+-- arg0 has type int (from Γ), PAdd expects Any → coerce:
+let coerced0 = fromInt(arg0)
+let coerced1 = fromInt(arg1)
+-- Call:
+PAdd(coerced0, coerced1) to tmp.        -- bind call result (type Any)
+-- Assign target x has type int → narrow Any→int:
+Any..as_int!(tmp) to narrowed.          -- narrow (type int)
+assign x narrowed                       -- assign the value
+```
+
+In FGL terms:
+```
+letProd "arg0" int (returnValue (var "a"))
+ (letProd "arg1" int (returnValue (var "b"))
+   (letProd "tmp" Any (call "PAdd" [fromInt (var "arg0"), fromInt (var "arg1")])
+     (callWithError "Any..as_int!" [var "tmp"] "narrowed" "err" int Error
+       (assign (var "x") (var "narrowed") continuation))))
+```
+
+Note: for atoms (Identifier "a"), `⟦a⟧ = produce (var a)` which is trivially bound.
+In practice, we can SHORT-CIRCUIT atoms: if the expression is an atom, skip the
+bind and use the value directly. This is an optimization, not a semantic change.
+The embedding is still uniform — atoms just don't need a real letProd.
+
+**What synthValue handles (ONLY atoms):**
+
+| Construct | Synthesized type | Source |
 |---|---|---|
-| Function arg in `f(arg)` | `FuncSig.params[i]` | Γ's signature for f |
-| RHS of `x := expr` | type of x | Γ (from scope hoisting / LocalVariable) |
-| RHS of `var x: T := expr` | T | The annotation on the declaration |
-| `return expr` | procedure's return type | Procedure signature |
-| Condition in `assert/if/while` | `bool` | Language semantics (conditions must be bool) |
-| IfThenElse branches | enclosing expected type | Propagates from context (when in CHECK position) |
-| While body | `TVoid` | Statement (no value produced) |
+| `Identifier "x"` | Γ(x) | Variable's declared type |
+| `LiteralInt n` | int | Literal form |
+| `LiteralBool b` | bool | Literal form |
+| `LiteralString s` | str | Literal form |
 
-**Statement forms that SYNTHESIZE (result type is fixed, context adds nothing):**
+That's it. No FieldSelect (may read heap), no StaticCall, no New.
 
-| Construct | Synthesized type | Why |
+**What synthProducer handles (everything else):**
+
+| Construct | Synthesized type | Key actions |
 |---|---|---|
-| `While cond body` | TVoid | Loops don't produce values |
-| `Assert cond` / `Assume cond` | TVoid | Effect operations, no value |
-| `Exit label` | TVoid | Control flow, no value |
-| `Assign [target] value` | TVoid | Mutation, no value |
+| `StaticCall "f" [args]` | returnType from Γ | CHECK args against params |
+| `New "ClassName"` | Composite | Heap allocation (MkComposite) |
+| `Assign [target] value` | TVoid | CHECK RHS against Γ(target) |
+| `LocalVariable x T init` | TVoid | CHECK init against T, extend Γ |
+| `IfThenElse/While` | branch type / TVoid | Narrow condition to bool |
+| `Assert/Assume` | TVoid | Narrow condition to bool |
+| `Block` | tail type | Sequence, extend Γ at binders |
+| `Exit/Return` | TVoid | Return checks against proc retType |
 
-These synthesize because their result type is determined by form (always TVoid).
-An expected type flowing in would just be `== TVoid` — an implicit equality check
-that's unwarranted. CHECK is only useful when the expected type guides something.
+**Where coercions are inserted (on BOUND values, not raw expressions):**
 
-**Why this split (DRY principle):** All synthesizing constructs have the same
-coercion pattern: "look up actual type, compare with expected, insert coercion if
-mismatch." That IS `checkValue`/`checkProducer`. One function, one place.
+| After binding... | Coerce against | Source |
+|---|---|---|
+| Each arg of `f(...)` bound to `xᵢ` | `FuncSig.params[i]` | Γ's signature |
+| RHS of `x := e` bound to `tmp` | Γ(x) | Extended Γ |
+| Init of `var x: T := e` bound to `tmp` | T | Annotation |
+| Return value bound to `tmp` | procedure return type | Proc signature |
+| Condition bound to `tmp` | bool | Semantics (narrow) |
 
-**IfThenElse:** When in a CHECK position (e.g., RHS of assignment), expected type
-propagates into branches — genuinely useful (guides coercions inside branches).
-When standalone (statement-level), branches synthesize.
+Note: coercions operate on VALUES (bound variables), not expressions. The
+embedding ensures everything is bound before coercion. `canUpcast`/`canNarrow`
+take the bound value's type and the expected type, produce the coercion.
 
 **MODE CORRECTNESS PRINCIPLE: No equality on HighTypes.**
 
@@ -854,11 +950,24 @@ In our system:
 - **Laurel** = CBV: single `StmtExpr` type, sequencing implicit, effects implicit
 - **Projection** = forgetful functor: erases polarity, keeps the inserted let-bindings and coercions as regular Laurel nodes
 
+### Elaboration and Projection are Inverses
+
+The round-trip:
+```
+Laurel (CBV) → [Elaboration = CBV→FGCBV embedding] → FGL → [Projection = FGCBV→CBV] → Laurel (CBV)
+```
+
+Projection is the LEFT INVERSE of elaboration. What comes back is the SAME
+program but with explicit coercions and let-bindings that weren't in the input.
+The embedding makes effects explicit. The forgetting flattens them back into
+imperative sequential code. The net effect: coercions inserted, sequencing made
+explicit, type errors caught.
+
 ### Why This Matters
 
-1. **Elaboration targets FGCBV** because it needs to reason about which subexpressions
-   are values vs. producers to decide where to insert let-bindings. In CBV (Laurel),
-   this information is invisible.
+1. **Elaboration targets FGCBV** because the CBV→FGCBV embedding is what forces
+   every subexpression to be bound. Binding is where coercions are inserted.
+   In CBV (Laurel), subexpressions are implicit — no place to insert coercions.
 
 2. **Projection is total and meaning-preserving.** Every FGCBV term projects to a
    unique CBV term. The projection cannot fail and cannot change semantics — it only
