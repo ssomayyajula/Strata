@@ -2030,12 +2030,6 @@ def unifiedElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : UnifiedEla
   }
 
   -- Phase 1: Bidirectional walk (coercions, short-circuit)
-  -- SKIPPED: The V2 Translation already wraps literals (from_int/from_str/from_bool)
-  -- and inserts Any_to_bool for conditions. Running the bidirectional walk would
-  -- cause double-wrapping (e.g., from_int(from_int(5))). The bidirectional elaboration
-  -- will be enabled once Translation stops inserting coercions (i.e., produces "HighLaurel"
-  -- per the architecture). For now, Translation handles coercions and this pass handles
-  -- everything else (heap, type hierarchy, holes, etc.).
   let program := program
 
   -- Phase 2: Heap parameterization (the co-operation)
