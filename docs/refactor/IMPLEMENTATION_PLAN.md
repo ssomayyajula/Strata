@@ -1042,6 +1042,157 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
 **Why:** IMPLEMENTATION_PLAN.md §"Phase 6" — fullElaborate is the entry point.
 Elaborates each proc body, projects back. `currentProcReturnType` from proc.outputs.
 
+### PATH TO PARITY (diagnosed 2026-05-06)
+
+After implementing the CBV→FGCBV embedding, elaboration produces correct coercions
+but Core rejects the output. Root causes (compared old pipeline output vs ours):
+
+| Issue | Old pipeline | Our output | Fix |
+|---|---|---|---|
+| Intermediate vars | None — expressions nested | letProd for every subexpr | Pure calls as values (no bind) |
+| Variable types | All `Any` | Precise (`int`, `bool`) | Project all vars as `Any` |
+| Var initialization | `Hole` (= `<?>`) | `_uninit` | Use Hole |
+| Inline locals | None — all at top | Interleaved from letProd | No unnecessary letProds |
+| Box constructors | `Box..Any(AnyVal: Any)` | Multi-constructor | Single constructor |
+| Composite | `MkComposite(ref: int, typeTag: TypeTag)` | `MkComposite(ref: int)` | Add typeTag |
+
+**The core fix: pure calls stay as values (no binding).**
+
+In the CBV→FGCBV embedding, we DON'T bind things that have no elaboration effects.
+A "pure call" (no hasErrorOutput, not a narrowing) is a VALUE in FGL. It stays nested.
+Only genuinely effectful operations (narrowing, error-producing calls, heap mutation)
+become producers that need binding.
+
+This means:
+- `PAdd(from_int(x), from_int(y))` — one nested value expression. No letProds.
+- `Any_to_bool(PEq(x, from_int(5)))` — PEq is pure (value), Any_to_bool is narrowing (producer, bound).
+- `PMul(x, y)` assigned to `prod: int` — PMul is pure (value), assignment is a producer.
+  But the RESULT is Any and target is int → narrowing needed → that's the only binding.
+
+**Implementation tasks:**
+
+### 30. Make pure StaticCalls value-level (no binding)
+
+**File:** Elaborate.lean  
+**Change:** In `elaborateExpr`, if the expression is a StaticCall AND the callee has
+`hasErrorOutput = false` AND it's not a narrowing operation → elaborate as a VALUE
+(recursive `synthValue` on the call). Only effectful calls go through synthProducer.
+
+```lean
+partial def elaborateExpr (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :=
+  match expr.val with
+  | .LiteralInt _ | .LiteralBool _ | .LiteralString _ | .Identifier _ =>
+    let (val, ty) ← synthValue expr
+    pure (.returnValue val, ty)
+  | .StaticCall callee args =>
+    let sig ← lookupFuncSig callee.text
+    let isEffectful := (sig.map (·.hasErrorOutput)).getD false
+    if !isEffectful then
+      -- Pure call: elaborate as value (stays nested)
+      let (val, ty) ← synthValue expr
+      pure (.returnValue val, ty)
+    else
+      -- Effectful call: elaborate as producer (gets bound)
+      synthProducer expr
+  | _ => synthProducer expr
+```
+
+And `synthValue` gets `StaticCall` back (for pure calls only):
+```lean
+| .StaticCall callee args =>
+    let sig ← lookupFuncSig callee.text
+    let paramTypes := ...
+    -- Elaborate args as VALUES (recursive synthValue — they're atoms or pure calls)
+    let checkedArgs ← args.zip paramTypes |>.map (fun (arg, paramTy) =>
+      checkValue arg paramTy)  -- subsumption fires on each arg
+    pure (.staticCall callee.text checkedArgs, eraseType retTy)
+```
+
+### 31. Project all variable types as Any
+
+**File:** Elaborate.lean (projection)  
+**Change:** When projecting a `letProd`/`varDecl` to a `LocalVariable`, use `TCore "Any"`
+for the type annotation instead of the precise LowType. Core's HM unification requires
+all variables to be `Any` (prelude operations return Any, assignment targets must match).
+
+### 32. Fix Composite: add typeTag field
+
+**File:** Elaborate.lean (addHeapTypeInfrastructure)  
+**Change:** `MkComposite(ref: int, typeTag: TypeTag)` not just `MkComposite(ref: int)`.
+Match old pipeline's output from typeHierarchyTransform.
+
+### 33. Fix Box: single constructor Box..Any(AnyVal: Any)
+
+**File:** Elaborate.lean (addHeapTypeInfrastructure)  
+**Change:** Generate Box with single constructor `Box..Any(AnyVal: Any)` matching
+old pipeline. Not multi-constructor BoxInt/BoxBool/etc.
+
+### 34. Use Hole for uninitialized variables (not _uninit)
+
+**File:** Elaborate.lean (projection)  
+**Change:** When projecting a variable declaration with no meaningful initializer,
+use `.Hole` instead of `.Identifier "_uninit"`.
+
+### 35. End-to-end validation
+
+Run diff_test.sh. Target: 0 regressions. Diagnose against architecture.
+
+### 29. Two-pass projection: hoist declarations, emit assignments
+
+**File:** Elaborate.lean — rewrite `projectBody`  
+**Why:** ARCHITECTURE.md §"Projection: Two-Pass (Declaration Hoisting)". Core expects
+all LocalVariable at block top, then only Assign/control below. No inline LocalVariable.
+
+**Pass 1 — collectDecls:** Walk FGLProducer, gather all letProd/varDecl/callWithError
+bindings as `(name, type)` pairs. These become hoisted `LocalVariable name type Hole`.
+
+```lean
+partial def collectDecls (prod : FGLProducer) : List (String × LowType) :=
+  match prod with
+  | .letProd name ty inner body => [(name, ty)] ++ collectDecls inner ++ collectDecls body
+  | .callWithError _ _ rv ev rTy eTy body => [(rv, rTy), (ev, eTy)] ++ collectDecls body
+  | .varDecl name ty _ body => [(name, ty)] ++ collectDecls body
+  | .newObj _ rv ty body => [(rv, ty)] ++ collectDecls body
+  | .assign _ _ body => collectDecls body
+  | .assert _ body | .assume _ body => collectDecls body
+  | .ifThenElse _ thn els => collectDecls thn ++ collectDecls els
+  | .whileLoop _ body after => collectDecls body ++ collectDecls after
+  | .labeledBlock _ body => collectDecls body
+  | .seq first second => collectDecls first ++ collectDecls second
+  | _ => []
+```
+
+**Pass 2 — emitBody:** Walk FGLProducer, emit `Assign` for letProd bindings instead
+of `LocalVariable`. Same splitProducer logic but letProd/varDecl/callWithError produce
+Assign nodes, not LocalVariable nodes.
+
+```lean
+-- letProd case becomes:
+| .letProd name ty inner body =>
+    let (innerStmts, innerExpr) := emitBody md inner
+    let assignStmt := mkLaurel md (.Assign [mkLaurel md (.Identifier (Identifier.mk name none))] innerExpr)
+    let (bodyStmts, bodyExpr) := emitBody md body
+    (innerStmts ++ [assignStmt] ++ bodyStmts, bodyExpr)
+```
+
+**projectBody now:**
+```lean
+def projectBody (md : MetaData) (prod : FGLProducer) : StmtExprMd :=
+  -- Pass 1: collect all binding declarations
+  let decls := collectDecls prod
+  let declStmts := decls.map fun (name, ty) =>
+    mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (liftType ty)) (some (mkLaurel md (.Hole))))
+  -- Pass 2: emit assignments + control flow
+  let (bodyStmts, terminal) := emitBody md prod
+  -- Combine: declarations at top, body below
+  mkLaurel md (.Block (declStmts ++ bodyStmts ++ [terminal]) none)
+```
+
+**This fixes:**
+- "local variables should have been lifted" — all LocalVariable at top now
+- `_uninit` errors — replaced with `Hole` (= `<?>` in Core)
+- Matches old pipeline's format: declarations then body
+
 ### SMOKE TEST RESULTS (2026-05-06, after tasks 1-18)
 
 All test files that exist elaborate successfully:
