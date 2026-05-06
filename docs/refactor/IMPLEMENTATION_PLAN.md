@@ -652,81 +652,98 @@ subsumption function (checkValue/checkProducer) as a short-circuit: "types alrea
 agree, no coercion needed." It must NEVER appear in the elaboration walk itself.
 All type comparisons in the walk flow through canUpcast/canNarrow.
 
-### 6. `synthValue`: literals + Identifier + FieldSelect
+### 6. `synthValue`: ONLY atoms (Identifier + Literals)
 
 **File:** Elaborate.lean (inside mutual block)  
-**Cases:**
+**Cases (NOTHING ELSE — no FieldSelect, no StaticCall, no New):**
 ```
-.LiteralInt n       → (.litInt n, .TInt)
-.LiteralBool b      → (.litBool b, .TBool)
-.LiteralString s    → (.litString s, .TString)
-.Identifier id      → lookup Γ(id.text):
-                        .variable ty → (.var id.text, ty)
-                        .function sig → (.var id.text, sig.returnType)
-                        _ → (.var id.text, .TCore "Any")
-.FieldSelect obj field → synthValue obj to get (objVal, objTy):
-                        if objTy is UserDefined className →
-                          lookupFieldType className field.text → fieldTy
-                          (.fieldAccess objVal field.text, fieldTy)
-                        else → (.fieldAccess objVal field.text, .TCore "Any")
+synthValue expr := match expr.val with
+  | .LiteralInt n   → pure (.litInt n, .TInt)
+  | .LiteralBool b  → pure (.litBool b, .TBool)
+  | .LiteralString s → pure (.litString s, .TString)
+  | .Identifier id  → lookup Γ(id.text):
+                        .variable ty → pure (.var id.text, eraseType ty)
+                        _ → pure (.var id.text, .TCore "Any")
+  | _ → throw "synthValue called on non-atom"
 ```
-**Why:** ARCHITECTURE.md §"What SYNTHESIZES" table, row by row.
+**Why:** ARCHITECTURE.md §"Elaboration = CBV→FGCBV Embedding". synthValue handles
+ONLY atoms. Everything else is a producer. No FieldSelect (may read heap), no
+StaticCall (effectful), no New (allocation).
 
-### 7. `synthValue`: StaticCall + New
+### 7. `coerceValue`: apply subsumption to a bound value (atom)
 
-**File:** Elaborate.lean (inside mutual block)  
-**Cases:**
-```
-.StaticCall callee args → lookup FuncSig from Γ(callee.text):
-                          retTy = sig.returnType (or .TCore "Any" if unknown)
-                          argVals = args.map (fun a => synthValue a |>.1)
-                          (.staticCall callee.text argVals, retTy)
-.New classId           → (.var classId.text, .UserDefined classId)
-```
-**Why:** ARCHITECTURE.md §"What SYNTHESIZES" — StaticCall synths return type from Γ.
-Note: args are NOT checked here. Arg checking happens in synthProducer (producer context).
-
-### 8. `checkValue`: synth → compare → coerce or error
-
-**File:** Elaborate.lean (inside mutual block)  
+**File:** Elaborate.lean  
 **Logic:**
 ```
-checkValue expr expected :=
-  let (val, actual) ← synthValue expr
-  if typesEqual actual expected then return val
+coerceValue (val : FGLValue) (actual : LowType) (expected : LowType) : FGLValue :=
+  if lowTypesEqual actual expected then val  -- reflexivity
   match canUpcast actual expected with
-  | some coerce => return (coerce val)
-  | none =>
-    if typesEqual actual (.TCore "Any") && typesEqual expected (.TCore "Any") then return val
-    throw (ElabError.typeError s!"Cannot coerce {actual} to {expected}")
+  | some coerce => coerce val
+  | none => val  -- narrowing handled at producer level, not here
 ```
-**Why:** ARCHITECTURE.md §"Subsumption (coercion insertion)" — subsumption rule from
-Dunfield & Krishnaswami §4.4. NOT silent drop — error on unrelated types.
+**Why:** Coercion operates on BOUND values (atoms). This is the subsumption check
+at the point where a bound variable meets an expected type. No error throw here —
+if canUpcast fails, the caller handles it (narrowing is producer-level).
 
-### 9. `synthProducer`: StaticCall (CHECK args + hasErrorOutput)
+### 8. `elaborateExpr`: the CBV→FGCBV embedding for a single expression
 
 **File:** Elaborate.lean (inside mutual block)  
-**Logic:**
+**Logic (THE key function — applies the embedding):**
+```
+-- Elaborate any Laurel expression as a producer, returning (producer, resultType).
+-- This IS the CBV→FGCBV embedding: ⟦e⟧ = producer that yields a value.
+-- For atoms: produce (val)  [trivial binding]
+-- For compounds: full producer elaboration
+elaborateExpr (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :=
+  match expr.val with
+  | .LiteralInt _ | .LiteralBool _ | .LiteralString _ | .Identifier _ =>
+    -- Atom: trivially a producer that returns the value
+    let (val, ty) ← synthValue expr
+    pure (.returnValue val, ty)
+  | _ =>
+    -- Compound: delegate to synthProducer
+    synthProducer expr
+```
+**Why:** ARCHITECTURE.md §"The embedding": every subexpression elaborated as producer.
+Atoms short-circuit (no real letProd needed). Compounds go through full producer path.
+
+### 9. `synthProducer`: StaticCall (elaborate args, bind each, coerce, call)
+
+**File:** Elaborate.lean (inside mutual block)  
+**Logic (THE CBV→FGCBV embedding for function application):**
 ```
 .StaticCall callee args →
-  -- Special case: PAnd/POr → short-circuit (Task 14)
   if callee.text == "PAnd" || callee.text == "POr" then
     shortCircuitDesugar callee.text args
   else
     let sig ← lookupFuncSig callee.text
-    let checkedArgs ← match sig with
-      | some s => List.zip args s.params |>.mapM (fun (arg, (_, paramTy)) => checkValue arg paramTy)
-      | none => args.mapM (fun a => synthValue a |>.map (·.1))
-    let retTy := sig.map (·.returnType) |>.getD (.TCore "Any")
-    if sig.map (·.hasErrorOutput) |>.getD false then
+    let paramTypes := match sig with
+      | some s => s.params.map (fun (_, ty) => eraseType ty)
+      | none => args.map (fun _ => LowType.TCore "Any")
+    -- ⟦a₁⟧ to x₁. ⟦a₂⟧ to x₂. ... f(coerce(x₁,T₁), ...) to z.
+    let mut bindings : List (String × LowType × FGLProducer) := []
+    let mut coercedArgs : List FGLValue := []
+    for (arg, paramTy) in args.zip paramTypes do
+      let (argProd, argTy) ← elaborateExpr arg
+      let argVar ← freshVar "arg"
+      bindings := bindings ++ [(argVar, argTy, argProd)]
+      coercedArgs := coercedArgs ++ [coerceValue (.var argVar) argTy paramTy]
+    -- The call itself
+    let retTy := match sig with
+      | some s => eraseType s.returnType
+      | none => .TCore "Any"
+    let callProd := if (sig.map (·.hasErrorOutput)).getD false then
       let rv ← freshVar "result"
       let ev ← freshVar "err"
-      return (.callWithError callee.text checkedArgs rv ev retTy (.TCore "Error") (.returnValue (.var rv)), retTy)
+      .callWithError callee.text coercedArgs rv ev retTy (.TCore "Error") (.returnValue (.var rv))
     else
-      return (.call callee.text checkedArgs, retTy)
+      .call callee.text coercedArgs
+    -- Wrap in letProd chain (right-to-left nesting):
+    let result := bindings.foldr (fun (name, ty, prod) acc => .letProd name ty prod acc) callProd
+    pure (result, retTy)
 ```
-**Why:** ARCHITECTURE.md §"How Elaboration Works" point 1 — look up f in Γ, check args,
-emit prodCallWithError if hasErrorOutput.
+**Why:** ARCHITECTURE.md §"Elaboration = CBV→FGCBV Embedding":
+`⟦f(a₁,...,aₙ)⟧ = ⟦a₁⟧ to x₁. ... ⟦aₙ⟧ to xₙ. f(coerce(x₁), ...) to z.`
 
 ### 10. `synthProducer`: Assign
 

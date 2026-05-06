@@ -398,43 +398,96 @@ In practice, we can SHORT-CIRCUIT atoms: if the expression is an atom, skip the
 bind and use the value directly. This is an optimization, not a semantic change.
 The embedding is still uniform — atoms just don't need a real letProd.
 
-**What synthValue handles (ONLY atoms):**
+**The Rules:**
 
-| Construct | Synthesized type | Source |
+Value synthesis (atoms only):
+```
+───────────────        ─────────────────
+Γ ⊢_v n ⇒ int         Γ ⊢_v x ⇒ Γ(x)
+```
+
+Value checking (subsumption — the ONLY value checking rule):
+```
+Γ ⊢_v e ⇒ A    A <: B
+───────────────────────
+Γ ⊢_v e ⇐ B
+```
+
+Producer synthesis:
+```
+vᵢ ⇐ paramTyᵢ                          v ⇐ Γ(x)
+─────────────────────────────────        ─────────────────────────
+Γ ⊢_p f(v₁,...,vₙ) ⇒ returnType(f)     Γ ⊢_p (x := v) ⇒ TVoid
+
+─────────────────────────                v ⇐ bool
+Γ ⊢_p (new Foo) ⇒ Composite             ─────────────────────────
+                                         Γ ⊢_p (assert v) ⇒ TVoid
+
+v ⇐ bool                                v ⇐ bool    Γ ⊢_p M ⇐ TVoid
+─────────────────────────                ─────────────────────────────
+Γ ⊢_p (assume v) ⇒ TVoid                Γ ⊢_p (while v do M) ⇒ TVoid
+```
+
+Producer checking:
+```
+v ⇐ bool    Γ ⊢_p M ⇐ C    Γ ⊢_p N ⇐ C
+──────────────────────────────────────────
+Γ ⊢_p (if v then M else N) ⇐ C
+
+v ⇐ T    Γ,x:T ⊢_p body ⇐ C
+──────────────────────────────
+Γ ⊢_p (var x:T := v; body) ⇐ C
+
+Γ ⊢_p M ⇒ A    Γ,x:A ⊢_p N ⇐ C
+──────────────────────────────────
+Γ ⊢_p (M to x. N) ⇐ C
+
+v ⇐ procReturnType
+───────────────────────────
+Γ ⊢_p (return v) ⇐ procReturnType
+```
+
+Producer subsumption (narrowing — the fallback when no checking rule matches):
+```
+Γ ⊢_p e ⇒ A    A ▷ B
+─────────────────────
+Γ ⊢_p e ⇐ B
+```
+
+**Mode correctness invariants:**
+- Synth: output type determined by inputs (Γ, form, or fixed TVoid)
+- Check: expected type is INPUT from context, never conjured
+- No type equality anywhere — TVoid in while body is a CHECK (semantic constraint)
+- `M to x. N`: M SYNTHS (learn A for binding), N CHECKS against C from context
+- Subsumption is the FALLBACK (fires only when no other checking rule applies)
+
+**Summary: which forms synthesize vs check:**
+
+| Form | Synth/Check | Result type |
 |---|---|---|
-| `Identifier "x"` | Γ(x) | Variable's declared type |
-| `LiteralInt n` | int | Literal form |
-| `LiteralBool b` | bool | Literal form |
-| `LiteralString s` | str | Literal form |
+| `f(v₁,...,vₙ)` | Synth | returnType(f) from Γ |
+| `new Foo` | Synth | Composite |
+| `x := v` | Synth | TVoid |
+| `assert v` / `assume v` | Synth | TVoid |
+| `while v do M` | Synth | TVoid (body checks against TVoid) |
+| `if v then M else N` | Check | C from context |
+| `var x:T := v; body` | Check | C from context (flows into body) |
+| `M to x. N` | Check | C from context (M synths, N checks) |
+| `return v` | Check | procReturnType from context |
 
-That's it. No FieldSelect (may read heap), no StaticCall, no New.
+**Where coercions fire (subsumption at CHECK boundaries):**
 
-**What synthProducer handles (everything else):**
+Coercions fire when a synthesized value meets an expected type at a CHECK position.
+Per the embedding, every subexpression is bound first (`⟦e⟧ to x.`), then `x` is
+used at a CHECK position. The coercion wraps `x`:
 
-| Construct | Synthesized type | Key actions |
+| CHECK position | Expected type | Source |
 |---|---|---|
-| `StaticCall "f" [args]` | returnType from Γ | CHECK args against params |
-| `New "ClassName"` | Composite | Heap allocation (MkComposite) |
-| `Assign [target] value` | TVoid | CHECK RHS against Γ(target) |
-| `LocalVariable x T init` | TVoid | CHECK init against T, extend Γ |
-| `IfThenElse/While` | branch type / TVoid | Narrow condition to bool |
-| `Assert/Assume` | TVoid | Narrow condition to bool |
-| `Block` | tail type | Sequence, extend Γ at binders |
-| `Exit/Return` | TVoid | Return checks against proc retType |
-
-**Where coercions are inserted (on BOUND values, not raw expressions):**
-
-| After binding... | Coerce against | Source |
-|---|---|---|
-| Each arg of `f(...)` bound to `xᵢ` | `FuncSig.params[i]` | Γ's signature |
-| RHS of `x := e` bound to `tmp` | Γ(x) | Extended Γ |
-| Init of `var x: T := e` bound to `tmp` | T | Annotation |
-| Return value bound to `tmp` | procedure return type | Proc signature |
-| Condition bound to `tmp` | bool | Semantics (narrow) |
-
-Note: coercions operate on VALUES (bound variables), not expressions. The
-embedding ensures everything is bound before coercion. `canUpcast`/`canNarrow`
-take the bound value's type and the expected type, produce the coercion.
+| Arg `xᵢ` in `f(x₁,...,xₙ)` | paramTy from FuncSig | Γ |
+| RHS `tmp` in `x := tmp` | Γ(x) | Extended Γ |
+| Init `tmp` in `var x:T := tmp` | T | Annotation |
+| Return value `tmp` in `return tmp` | procReturnType | Proc signature |
+| Condition `tmp` in `if tmp ...` | bool | Semantics |
 
 **MODE CORRECTNESS PRINCIPLE: No equality on HighTypes.**
 
