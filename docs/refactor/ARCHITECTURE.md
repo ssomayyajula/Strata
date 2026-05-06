@@ -275,32 +275,66 @@ synth(expr) → (FGLExpr, Type)        -- bottom-up: what type does this have?
 check(expr, expectedType) → FGLExpr  -- top-down: make it have this type
 ```
 
-### The Bidirectional Recipe
+### The Bidirectional Recipe (Our Specific Instantiation)
 
-**Golden rule: Push types IN via checking wherever you have an expected type.
-Coercions only appear at subsumption boundaries — where checking falls back to
-synthesis because the types don't match directly.**
+FineGrainLaurel is implicitly polarized: it is FGCBV viewed as a fragment of CBPV
+where the only computation type is `↑A` (a producer of value type A). This means:
+- Positive types (values): int, bool, str, Any, Composite, ListAny, DictStrAny
+- The only negative type: `↑A` for any positive A (= a producer that yields A)
 
-| Construct | Mode | Where coercions go |
+The bidirectional discipline follows from this polarization, adapted to our system
+where Python annotations drive the checking context:
+
+**What SYNTHESIZES (type known from structure or Γ):**
+
+| Construct | Synthesized type | Source of type |
 |---|---|---|
-| `f(arg)`, param type `T` | Synth `f` → get sig. CHECK `arg <= T` | At arg if arg synths type ≠ T |
-| `x : T = e` | CHECK `e <= T` | At `e` if `e` synths type ≠ T |
-| `return e`, ret type `R` | CHECK `e <= R` | At `e` if `e` synths type ≠ R |
-| `x` (variable lookup) | SYNTH from Γ | Never — just returns declared type |
-| Literal `5` | SYNTH → `int` | Never at the literal itself |
-| `if c then a else b`, expected `T` | CHECK `a <= T`, CHECK `b <= T` | At branches if needed |
+| `Identifier "x"` | Γ(x) | Variable's declared type in Γ |
+| `LiteralInt n` | `int` | Literal form determines type |
+| `LiteralBool b` | `bool` | Literal form |
+| `LiteralString s` | `str` | Literal form |
+| `StaticCall "f" [args]` | `FuncSig.returnType` | Γ's signature for f |
+| `FieldSelect obj "field"` | field type from classFields | Γ's class definition |
+| `New "ClassName"` | `UserDefined ClassName` | Γ's class entry |
 
-**Subsumption (the coercion insertion rule):**
-```
-Γ ⊢ e ⇒ A    A ≠ B    A ~ B (consistent)
-──────────────────────────────────────────
-Γ ⊢ e ⇐ B    ~~>  coerce(A, B, e)
-```
+These are all ELIMINATION forms or atoms — they produce known types without
+needing external context.
 
-For our system with `Any`:
-- `int` checked against `Any` → insert `from_int` (upcast, infallible)
-- `Any` checked against `bool` → insert `Any_to_bool` (downcast, may throw)
-- `int` checked against `int` → no coercion (direct match)
+**What CHECKS (expected type from annotation propagates inward):**
+
+| Construct | Expected type | Source of expected type |
+|---|---|---|
+| Function arg in `f(arg)` | `FuncSig.params[i]` | Γ's signature for f |
+| RHS of `x := expr` | type of x | Γ (from scope hoisting / LocalVariable) |
+| RHS of `var x: T := expr` | T | The annotation on the declaration |
+| `return expr` | procedure's return type | Procedure signature |
+| Condition in `assert/if/while` | `bool` | Language semantics (conditions must be bool) |
+| Branches of `if c then a else b` | enclosing expected type | Propagates from context |
+
+**The Python annotations ARE the checking context.** Translation preserved them as
+precise types on LocalVariable declarations, procedure inputs/outputs. Elaboration
+uses these as the CHECK targets. The coercions are "what the annotations demand":
+- `var x: int := PAdd(a, b)` → PAdd returns Any, annotation says int → narrow `Any ▷ int`
+- `def foo(x: int)` calling `foo(expr)` → check expr against int from sig
+
+**Subsumption (coercion insertion):**
+
+When CHECK finds synth(e) = A and expected = B with A ≠ B:
+- If A <: B (subtyping): insert upcast (value→value, stays in ⊢_v)
+- If A ▷ B (narrowing): insert downcast (value→producer, jumps to ⊢_p)
+- If neither: type error (should not happen on well-typed Translation output)
+
+```
+-- Subtyping (value-level, infallible):
+Γ ⊢_v e ⇒ A    A <: B
+─────────────────────────
+Γ ⊢_v upcast(e) ⇐ B           (e.g., valFromInt(e) : Value)
+
+-- Narrowing (producer-level, fallible):
+Γ ⊢_v e ⇒ A    A ▷ B
+─────────────────────────
+Γ ⊢_p narrow(e) : B            (e.g., Any_to_bool(e) : Producer)
+```
 
 **Critical: coercions go at the USE SITE (argument position, return position),
 NOT at the definition site.** An `int` literal assigned to an `int` variable
@@ -311,8 +345,8 @@ Example:
 ```
 var x: int;
 x := 5;                              -- CHECK 5 <= int. int = int. No coercion.
-prod := PAdd(x, y);                  -- CHECK x <= Any. int ≠ Any. Insert from_int(x).
-assert Any_to_bool(PEq(prod, ...));  -- CHECK PEq(...) <= bool. Any ≠ bool. Insert Any_to_bool.
+prod := PAdd(x, y);                  -- CHECK x <= Any. int ≠ Any. Upcast: from_int(x).
+assert Any_to_bool(PEq(prod, ...));  -- CHECK PEq(...) <= bool. Any ≠ bool. Narrow: Any_to_bool.
 ```
 
 ---
