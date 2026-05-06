@@ -274,15 +274,16 @@ is plain FGCBV (Levy 2003) — not enriched FGCBV. The only computation type is
 explicit effect passing follows Egger et al. 2014, but our target is simpler
 (no linear computation types).
 
-| Implicit effect in Laurel | Explicit implementation in FGL | Mechanism |
+| Implicit in Laurel | Explicit in FGL | Mechanism |
 |---|---|---|
-| Error (procedure may throw) | Error monad: `A × Error` | `prodCallWithError` (true let-binding) |
-| Heap (field read/write, allocation) | State monad: heap threaded as parameter | Signature rewriting + `readField`/`updateField` |
-| Coercion (type mismatch at boundary) | Value-level witnesses | `from_int(v)`, `Any_to_bool(v)` (inline) |
+| Error (procedure may throw) | Error-passing: `A × Error` | `prodCallWithError` (true let-binding) |
+| Heap (field read/write, allocation) | State-passing: heap threaded as parameter | Signature rewriting + `readField`/`updateField` |
+| Type mismatch at boundary | Partial function calls | `from_int(v)`, `Any_to_bool(v)` (inline values) |
 
-These are ALL the same operation — effect-passing translation — applied to
-different effects. They're not three separate mechanisms. They're one mechanism
-(make implicit effects explicit) with three instances.
+Errors and heap are genuine effects made explicit via effect-passing translation.
+Coercions are not effects — they're just value-level function calls inserted at
+type boundaries by subsumption. They happen to be partial (narrowing has
+preconditions), but they're bog-standard function application, not effect-passing.
 
 **Elaboration is language-independent.** It knows about Laurel's type system and
 FineGrainLaurel's requirements — nothing about Python specifically. If we translate
@@ -919,45 +920,30 @@ Our elaboration produces *derivations* — each name introduction (`prodLetProd`
 `prodVarDecl`) binds the name structurally. Names are correct by construction. There is
 nothing to re-resolve because the derivation tree IS the resolution.
 
-### Operations vs Co-Operations (Bauer 2018)
+### Effect-Passing: Local vs Global
 
-Not all effects are the same. Following Bauer's algebraic effects framework
-("What is algebraic about algebraic effects and handlers?", 2018):
+All three effects are handled by the same methodology (effect-passing translation).
+The difference is SCOPE — whether the effect can be resolved locally or requires
+global program analysis:
 
-- **Operations** are things the computation invokes — the environment handles them.
-  (coercions, exceptions, let-bindings)
-- **Co-operations** are things the environment provides — the computation threads them.
-  (heap state, resource handles)
+| Effect | Scope | What elaboration does |
+|---|---|---|
+| Coercions | Local | Insert witness at CHECK boundary (inline) |
+| Exceptions (error output) | Local | Insert `prodCallWithError` at call site |
+| Heap (state) | **Global** | Discover locally, propagate through call graph, rewrite signatures |
 
-Heap parameterization is precisely: operations on heap (field read, field write, New)
-in Laurel become **co-operations** in FineGrainLaurel — the heap is threaded as an
-explicit parameter rather than being implicitly available. This is what "heap
-parameterization" IS: turning heap operations into co-operations.
+Local effects are resolved during the bidirectional walk: encounter a boundary,
+insert the appropriate node, move on.
 
-| Effect | Kind | What elaboration does | Scope |
-|---|---|---|---|
-| Coercions (from_int, Any_to_bool) | Operation | Insert call at boundary | Local |
-| Exceptions (error output) | Operation | Insert prodCallWithError | Local |
-| ANF (sequencing) | Operation | Insert let-binding | Local |
-| Short-circuit (eval order) | Operation | Desugar to if-then-else | Local |
-| **Heap (state)** | **Co-operation** | **Thread through signatures** | **Global** |
-
-Operations are local: the bidirectional walk encounters a boundary, inserts a node,
-moves on. Co-operations are globally propagated: the walk *discovers* that a procedure
-touches state (locally), then the consequence (adding Heap to signatures) propagates
-through the entire call graph.
-
-**Both live in Elaboration.** The bidirectional walk handles both — the trigger is
-local in both cases. The difference is what gets emitted:
-
-- **Operations:** insert a node at the point
-- **Co-operations:** mark the procedure as state-touching, propagate through callers
+The heap effect requires global analysis because it's TRANSITIVE: if procedure A
+calls procedure B, and B touches the heap, then A must also receive a heap parameter
+(even if A doesn't directly touch the heap). This requires a fixpoint computation
+on the call graph AFTER the local walk.
 
 Implementation: elaboration has two sub-phases:
-1. **Local walk** (bidirectional synth/check): inserts operations + discovers co-operations
-2. **Global propagation** (fixpoint on call graph): threads Heap through marked procedures
-
-This is analogous to type inference: constraints are collected locally, then solved globally.
+1. **Local walk** (bidirectional synth/check): inserts coercions + error bindings,
+   discovers heap-touching procedures
+2. **Global propagation** (fixpoint on call graph): state-passing translation for heap
 
 ---
 
@@ -1006,8 +992,8 @@ should be a precondition on Resolution output, not a post-hoc pass.
 In FGCBV/CBPV, the effect monad for our system is `T(A) = Heap → ((A + E) × Heap)`.
 A computation takes the current heap, may modify it, and produces either a value of
 type A (success) or an error of type E (failure), along with the updated heap. This
-combines the state monad (heap threading, co-operation) with the exception monad
-(error sum, operation) in a single `T`. Standard treatment: Levy 2004 Ch.5, 
+combines the state monad (heap threading via state-passing) with the exception monad
+(error sum via error-passing) in a single `T`. Standard treatment: Levy 2004 Ch.5, 
 Plotkin & Pretnar 2009.
 
 **The fundamental operations are:**
@@ -1656,11 +1642,8 @@ that's outside our scope. We work with what Core knows.
 - **Plotkin, G. & Pretnar, M.** (2009). "Handlers of Algebraic Effects." *ESOP*.
   — Algebraic effects with handlers. Our `prodCallWithError` is a specific handler for the exception effect.
 
-- **Bauer, A.** (2018). "What is algebraic about algebraic effects and handlers?" *arXiv:1807.05923*.
-  — Operations vs co-operations. Operations are invoked by computation (coercions, exceptions); co-operations are provided by the environment (heap state). Heap parameterization is precisely: turning heap operations into co-operations in FineGrainLaurel.
-
-- **Ahman, D. & Uustalu, T.** (2019). "Decomposing Comonad Morphisms." *CALCO*.
-  — Comodels for state effects. The heap as co-algebraic structure (state-passing arises from a comodel, not a model).
+- **Egger, J., Møgelberg, R.E. & Simpson, A.** (2014). "The enriched effect calculus: syntax and semantics." *J. Logic and Computation*.
+  — Effect-passing translation from impure CBV to FGCBV. Our elaboration follows this methodology (translate implicit effects to explicit effect calculus), though our target is plain FGCBV (no linear computation types).
 
 ### Adequacy
 
@@ -1672,10 +1655,10 @@ that's outside our scope. We work with what Core knows.
 - **Sarkar, D., Waddell, O. & Dybvig, R.K.** (2004). "A Nanopass Infrastructure for Compiler Education." *ICFP*.
   — The nanopass methodology. Each pass does one thing; representations between passes enforce invariants.
 
-### Let-Floating / Projection
+### Compilation
 
-- **Peyton Jones, S., Partain, W. & Santos, A.** (1996). "Let-floating: moving bindings to give faster programs." *ICFP*.
-  — Let float-out: inner bindings float to enclosing scope. Our FGCBV→CBV projection uses this (monadic bind associativity as let-floating). Soundness requires freshness of floated names.
+- **Harper, R. & Morrisett, G.** (1995). "Compiling Polymorphism Using Intensional Type Analysis." *POPL*.
+  — Type-directed compilation. Our elaboration translates between two type systems (HighType → LowType) guided by the types, following this methodology.
 
 ### Metadata / Comonads
 

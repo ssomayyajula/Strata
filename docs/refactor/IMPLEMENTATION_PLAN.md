@@ -267,5 +267,5 @@ grep -n "canUpcast\|canNarrow\|typesEqual\|lowTypesEqual" Elaborate.lean | grep 
 | eraseType (HighType→LowType) | Type-directed compilation | Harper & Morrisett 1995 |
 | Γ extended at binders | Standard type theory | Context grows under binders |
 | Projection = cata | Forgetful functor | FGCBV → CBV |
-| Heap as co-operation | Bauer 2018 | Discover locally, propagate globally |
+| Heap as state-passing | Egger et al. 2014 | Discover locally, propagate globally |
 | Metadata via smart constructors | Standard compiler practice | mkLaurel only |
