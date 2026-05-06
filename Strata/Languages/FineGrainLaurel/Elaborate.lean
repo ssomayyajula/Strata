@@ -7,6 +7,7 @@ module
 
 import Strata.Languages.FineGrainLaurel.FineGrainLaurel
 public import Strata.Languages.Laurel.Laurel
+public import Strata.Languages.Laurel.HeapParameterizationConstants
 public import Strata.Languages.Python.NameResolution
 
 /-! ## Elaboration: Laurel → FineGrainLaurel → Laurel (projected)
@@ -596,6 +597,191 @@ partial def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLPr
 
 end -- mutual (projectValue, splitProducer, projectBody)
 
+/-! ## Tasks 19-20: Heap Co-Operations (ARCHITECTURE.md §"Operations vs Co-Operations")
+
+Per ARCHITECTURE.md: "Heap parameterization is precisely: turning heap operations
+into co-operations in FineGrainLaurel — the heap is threaded as an explicit
+parameter rather than being implicitly available."
+
+Per IMPLEMENTATION_PLAN.md §Tasks 19-20:
+- Phase 1: Analysis — collect reads/writes/callees per procedure
+- Phase 2: Fixpoint propagation — transitive closure on call graph
+- Phase 3: Signature rewriting — add Heap to inputs/outputs
+- Type infrastructure — add Composite, Box, Field, Heap, TypeTag to program.types
+-/
+
+/-! ### Task 19: Heap Analysis (collect reads/writes/callees per procedure body)
+
+Per IMPLEMENTATION_PLAN.md §Task 19:
+- `.FieldSelect target _` → `readsHeap := true`
+- `.New _` → `writesHeap := true`
+- `.Assign [target] _` where `target.val` is `.FieldSelect _ _` → `writesHeap := true`
+- `.StaticCall callee _` → record callee in `callees`
+
+Reference: `HeapParameterization.lean` lines 48-80 does the same analysis.
+-/
+
+/-- Heap analysis result for a single procedure.
+    Per IMPLEMENTATION_PLAN.md §Task 19. -/
+structure HeapAnalysis where
+  readsHeap : Bool := false
+  writesHeap : Bool := false
+  callees : List String := []
+
+/-- Collect heap reads/writes/callees from a Laurel expression tree.
+    Per IMPLEMENTATION_PLAN.md §Task 19 — walk procedure body collecting co-op evidence. -/
+partial def collectHeapInfo (expr : StmtExprMd) : StateM HeapAnalysis Unit := do
+  match expr.val with
+  | .FieldSelect target _ =>
+      modify fun s => { s with readsHeap := true }
+      collectHeapInfo target
+  | .New _ =>
+      modify fun s => { s with writesHeap := true }
+  | .StaticCall callee args =>
+      modify fun s => { s with callees := callee.text :: s.callees }
+      args.forM collectHeapInfo
+  | .Assign targets value =>
+      for target in targets do
+        match target.val with
+        | .FieldSelect _ _ => modify fun s => { s with writesHeap := true }
+        | _ => pure ()
+        collectHeapInfo target
+      collectHeapInfo value
+  | .IfThenElse c t e =>
+      collectHeapInfo c
+      collectHeapInfo t
+      match e with | some x => collectHeapInfo x | none => pure ()
+  | .Block stmts _ => stmts.forM collectHeapInfo
+  | .LocalVariable _ _ initOpt =>
+      match initOpt with | some x => collectHeapInfo x | none => pure ()
+  | .While c _invs _ b =>
+      collectHeapInfo c
+      collectHeapInfo b
+  | .Return v => match v with | some x => collectHeapInfo x | none => pure ()
+  | .Assert c => collectHeapInfo c
+  | .Assume c => collectHeapInfo c
+  | _ => pure ()
+
+/-- Analyze a single procedure for heap interactions.
+    Per IMPLEMENTATION_PLAN.md §Task 19. -/
+def analyzeHeap (proc : Strata.Laurel.Procedure) : HeapAnalysis :=
+  match proc.body with
+  | .Transparent bodyExpr => (collectHeapInfo bodyExpr).run {} |>.2
+  | _ => {}
+
+/-- Build heap analysis map for all procedures.
+    Per IMPLEMENTATION_PLAN.md §Task 19. -/
+def buildHeapAnalysis (procs : List Strata.Laurel.Procedure) : Std.HashMap String HeapAnalysis :=
+  procs.foldl (fun acc proc =>
+    acc.insert proc.name.text (analyzeHeap proc)) {}
+
+/-! ### Task 20: Fixpoint Propagation + Signature Rewriting
+
+Per IMPLEMENTATION_PLAN.md §Task 20:
+- Phase 2a: Propagation via fixpoint on call graph
+- Phase 2b: Signature rewriting (add Heap to inputs/outputs)
+- Phase 2c: Call-site rewriting (prepend heap arg at call sites)
+- Type infrastructure (add Composite, Box, Field, Heap, TypeTag to program.types)
+-/
+
+/-- Fixpoint propagation of heap reads/writes through the call graph.
+    Per IMPLEMENTATION_PLAN.md §Task 20 Phase 2a:
+    "If proc A calls proc B, and B reads/writes heap, then A reads/writes heap too."
+    Uses fuel-bounded iteration. -/
+def propagateHeapAnalysis (analysis : Std.HashMap String HeapAnalysis) : Std.HashMap String HeapAnalysis :=
+  let fuel := analysis.size + 1
+  let rec go (fuel : Nat) (current : Std.HashMap String HeapAnalysis) : Std.HashMap String HeapAnalysis :=
+    match fuel with
+    | 0 => current
+    | fuel' + 1 =>
+      let (next, changed) := current.fold (init := (current, false)) fun (acc, changed) procName info =>
+        let (newReads, newWrites) := info.callees.foldl (fun (r, w) callee =>
+          match current[callee]? with
+          | some calleeInfo => (r || calleeInfo.readsHeap, w || calleeInfo.writesHeap)
+          | none => (r, w)) (info.readsHeap, info.writesHeap)
+        if newReads != info.readsHeap || newWrites != info.writesHeap then
+          (acc.insert procName { info with readsHeap := newReads, writesHeap := newWrites }, true)
+        else (acc, changed)
+      if changed then go fuel' next else next
+  go fuel analysis
+
+/-- Rewrite a procedure's signature to add heap parameters.
+    Per IMPLEMENTATION_PLAN.md §Task 20 Phase 2b:
+    - writesHeap: add `$heap` to BOTH inputs AND outputs
+    - readsHeap only: add `$heap` to inputs only -/
+def rewriteProcSignature (proc : Strata.Laurel.Procedure) (info : HeapAnalysis) : Strata.Laurel.Procedure :=
+  if info.writesHeap then
+    let heapInParam : Strata.Laurel.Parameter := { name := "$heap_in", type := ⟨.THeap, #[]⟩ }
+    let heapOutParam : Strata.Laurel.Parameter := { name := "$heap", type := ⟨.THeap, #[]⟩ }
+    { proc with
+      inputs := heapInParam :: proc.inputs
+      outputs := heapOutParam :: proc.outputs }
+  else if info.readsHeap then
+    let heapParam : Strata.Laurel.Parameter := { name := "$heap", type := ⟨.THeap, #[]⟩ }
+    { proc with inputs := heapParam :: proc.inputs }
+  else proc
+
+/-- Rewrite all procedure signatures based on heap analysis.
+    Per IMPLEMENTATION_PLAN.md §Task 20 Phase 2b. -/
+def rewriteSignatures (procs : List Strata.Laurel.Procedure)
+    (analysis : Std.HashMap String HeapAnalysis) : List Strata.Laurel.Procedure :=
+  procs.map fun proc =>
+    match analysis[proc.name.text]? with
+    | some info => rewriteProcSignature proc info
+    | none => proc
+
+/-- Add heap type infrastructure declarations to program.types.
+    Per IMPLEMENTATION_PLAN.md §Task 20 "Type infrastructure declarations":
+    Core needs Composite, Box, Field, Heap, TypeTag registered BEFORE it sees
+    the prelude's `from_Composite` constructor on `Any`.
+
+    Uses `heapConstants.types` (from HeapParameterizationConstants.lean) which provides:
+    - Composite datatype: MkComposite(ref: int)
+    - Heap datatype: MkHeap(data: Map Composite Map Field Box, nextReference: int)
+    Plus minimal Field/Box/TypeTag datatypes for Core. -/
+def addHeapTypeInfrastructure (program : Strata.Laurel.Program)
+    (analysis : Std.HashMap String HeapAnalysis) : Strata.Laurel.Program :=
+  -- Collect all field names from composite types in the program
+  let fieldNames := program.types.foldl (fun acc td =>
+    match td with
+    | .Composite ct => acc ++ ct.fields.map (fun f => Identifier.mk (ct.name.text ++ "." ++ f.name.text) none)
+    | _ => acc) ([] : List Identifier)
+  -- Field datatype: enum of all qualified field names
+  let fieldDatatype : Strata.Laurel.TypeDefinition :=
+    .Datatype { name := "Field", typeArgs := [], constructors := fieldNames.map fun n => { name := n, args := [] } }
+  -- TypeTag datatype: enum of all composite type names
+  let typeTagNames := program.types.filterMap fun td =>
+    match td with
+    | .Composite ct => some ct.name
+    | _ => none
+  let typeTagDatatype : Strata.Laurel.TypeDefinition :=
+    .Datatype { name := "TypeTag", typeArgs := [], constructors := typeTagNames.map fun n => { name := n, args := [] } }
+  -- Box datatype: minimal set of constructors for field types that appear
+  -- For now, include all primitive box constructors that the prelude/runtime may need
+  let boxConstructors : List Strata.Laurel.DatatypeConstructor := [
+    { name := "BoxInt", args := [{ name := "intVal", type := ⟨.TInt, #[]⟩ }] },
+    { name := "BoxBool", args := [{ name := "boolVal", type := ⟨.TBool, #[]⟩ }] },
+    { name := "BoxFloat64", args := [{ name := "float64Val", type := ⟨.TFloat64, #[]⟩ }] },
+    { name := "BoxString", args := [{ name := "stringVal", type := ⟨.TString, #[]⟩ }] },
+    { name := "BoxComposite", args := [{ name := "compositeVal", type := ⟨.UserDefined (Identifier.mk "Composite" none), #[]⟩ }] },
+    { name := "BoxAny", args := [{ name := "anyVal", type := ⟨.TCore "Any", #[]⟩ }] }
+  ]
+  let boxDatatype : Strata.Laurel.TypeDefinition :=
+    .Datatype { name := "Box", typeArgs := [], constructors := boxConstructors }
+  -- heapConstants provides Composite + Heap + NotSupportedYet datatypes
+  -- plus readField/updateField/increment procedures
+  let heapTypeDefs := heapConstants.types
+  let heapProcs := heapConstants.staticProcedures
+  -- Rewrite heap procedures' signatures if they reference heap-touching procs
+  let rewrittenProcs := rewriteSignatures program.staticProcedures analysis
+  -- NOTE: heapProcs (readField, updateField, increment) are included because
+  -- the old pipeline's combinePySpecLaurel + translateWithLaurel expects them.
+  -- They will be type-checked by Core only if referenced from user code.
+  { program with
+    types := heapTypeDefs ++ [fieldDatatype, boxDatatype, typeTagDatatype] ++ program.types
+    staticProcedures := heapProcs ++ rewrittenProcs
+  }
+
 /-! ## Task 18: fullElaborate (IMPLEMENTATION_PLAN.md §"Task 18")
 
 For each proc in program.staticProcedures:
@@ -610,9 +796,18 @@ For each proc in program.staticProcedures:
 
 /-- Entry point: fullElaborate (called by PySpecPipeline).
     Per IMPLEMENTATION_PLAN.md §"Task 18": elaborate each proc body, project back to Laurel.
-    currentProcReturnType from proc.outputs. Graceful degradation on ElabError. -/
+    currentProcReturnType from proc.outputs. Graceful degradation on ElabError.
+
+    Per IMPLEMENTATION_PLAN.md §Tasks 19-20 (integrated):
+    1. Run elaboration (existing: synthProducer + project)
+    2. Run heap analysis on the elaborated program
+    3. Run fixpoint propagation
+    4. Rewrite signatures for heap-touching procs
+    5. Add type infrastructure declarations to program.types
+    6. Return the final program -/
 def fullElaborate (typeEnv : Strata.Python.Resolution.TypeEnv)
     (program : Strata.Laurel.Program) : Except String Strata.Laurel.Program := do
+  -- Step 1: Elaborate each procedure body (bidirectional walk + projection)
   let mut procs : List Strata.Laurel.Procedure := []
   for proc in program.staticProcedures do
     match proc.body with
@@ -629,7 +824,13 @@ def fullElaborate (typeEnv : Strata.Python.Resolution.TypeEnv)
         -- Graceful degradation: return proc unchanged on elaboration error
         procs := procs ++ [proc]
     | _ => procs := procs ++ [proc]
-  pure { program with staticProcedures := procs }
+  let elaboratedProgram := { program with staticProcedures := procs }
+  -- Steps 2-3: Heap analysis + fixpoint propagation (IMPLEMENTATION_PLAN.md §Tasks 19-20)
+  let heapAnalysisRaw := buildHeapAnalysis elaboratedProgram.staticProcedures
+  let heapAnalysis := propagateHeapAnalysis heapAnalysisRaw
+  -- Steps 4-5: Signature rewriting + type infrastructure (IMPLEMENTATION_PLAN.md §Task 20)
+  let finalProgram := addHeapTypeInfrastructure elaboratedProgram heapAnalysis
+  pure finalProgram
 
 end -- public section
 
