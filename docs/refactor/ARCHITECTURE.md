@@ -560,6 +560,50 @@ has its own rules (if, var-bind, M-to-x, return) plus narrowing as fallback.
 To use a narrowed result as a value (e.g., for an if-condition), bind the
 narrowing producer: `n(v) to x. (use x as Value(B))`
 
+### The Complete Coercion Table (validated against PythonRuntimeLaurelPart.lean)
+
+**Subtyping (A <: B ~~> c : Value(A) → Value(B), infallible):**
+
+| A | B | Witness `c` | Source |
+|---|---|---|---|
+| int | Any | `from_int` | Prelude: `from_int (as_int : int)` on Any |
+| bool | Any | `from_bool` | Prelude: `from_bool (as_bool : bool)` on Any |
+| str | Any | `from_str` | Prelude: `from_str (as_string : string)` on Any |
+| real | Any | `from_float` | Prelude: `from_float (as_float : real)` on Any |
+| Composite | Any | `from_Composite` | Prelude: `from_Composite (as_Composite: Composite)` on Any |
+| ListAny | Any | `from_ListAny` | Prelude: `from_ListAny (as_ListAny : ListAny)` on Any |
+| DictStrAny | Any | `from_DictStrAny` | Prelude: `from_DictStrAny (as_Dict: DictStrAny)` on Any |
+| TVoid | Any | `from_None` | Prelude: `from_None ()` on Any |
+| Any | Box | `Box..Any` | Generated: `Box..Any(AnyVal : Any)` — single Box constructor |
+
+**Narrowing (A ▷ B ~~> n : Value(A) → Producer(B), fallible):**
+
+| A | B | Witness `n` | Source |
+|---|---|---|---|
+| Any | bool | `Any_to_bool` | Prelude: explicit function (truthiness, not just unwrap) |
+| Any | int | `Any..as_int!` | DDM-generated partial accessor |
+| Any | str | `Any..as_string!` | DDM-generated partial accessor |
+| Any | real | `Any..as_float!` | DDM-generated partial accessor (note: `real` not `float64`) |
+| Any | Composite | `Any..as_Composite!` | DDM-generated partial accessor |
+| Any | ListAny | `Any..as_ListAny!` | DDM-generated partial accessor |
+| Any | DictStrAny | `Any..as_Dict!` | DDM-generated partial accessor |
+| Box | Any | `Box..AnyVal!` | DDM-generated (infallible — single constructor, always succeeds) |
+
+**Note on Box:** The old pipeline generates `Box` with a SINGLE constructor
+`Box..Any(AnyVal: Any)`. All fields stored as `Any`. This means:
+- Field write: `updateField(heap, obj, field, Box..Any(from_T(val)))` — upcast to Any, wrap in Box
+- Field read: `Box..AnyVal!(readField(heap, obj, field))` → `Any`, then narrow `Any ▷ T`
+- `Box..AnyVal!` is technically infallible (single constructor) — could be modeled as subtype
+
+**Note on float:** The prelude uses `real` (not `float64`) for the float field on Any.
+Our `HighType.TFloat64` maps to `real` in Core. The narrowing accessor is `Any..as_float!`.
+
+**FieldSelect (on Composite objects):**
+- `FieldSelect obj field` synthesizes type `Box` (value-level, pure given heap)
+- Implementation: `readField(heap, obj, field)` — pure StaticCall returning `Box`
+- To use the field value as type T: `Box..AnyVal!(readField(...))` then `Any ▷ T`
+- This is two subsumption steps chained: `Box → Any → T`
+
 **Implementation:** Subsumption is ONE function with three cases:
 1. Reflexivity (A = A via table): no coercion (short-circuit)
 2. Upcast (A <: B via canUpcast): wrap value, stay in value
@@ -1031,6 +1075,48 @@ program but with explicit coercions and let-bindings that weren't in the input.
 The embedding makes effects explicit. The forgetting flattens them back into
 imperative sequential code. The net effect: coercions inserted, sequencing made
 explicit, type errors caught.
+
+### Projection: Two-Pass (Declaration Hoisting)
+
+Core's Laurel→Core translator expects a specific format: all variable declarations
+at the TOP of a procedure body block, then only assignments/control flow below.
+No inline `LocalVariable` nodes in the middle of the body.
+
+This is standard compiler structure (like stack frame layout): declarations are
+separated from uses. The embedding produces many intermediate bindings (one per
+`letProd`). Projection must HOIST them.
+
+**Two-pass projection:**
+
+Pass 1 — **Collect declarations:** Walk the FGL producer tree, gather every
+`letProd` binding (name + type). These become `LocalVariable name type Hole`
+declarations at the top of the block.
+
+Pass 2 — **Emit assignments:** Walk again, emit `Assign [name] expr` for each
+binding (not `LocalVariable`). Control flow nodes (if, while, assert) emitted inline.
+
+**Output format:**
+```
+Block [
+  -- Hoisted declarations (all letProd bindings):
+  LocalVariable "arg$0" Any Hole;
+  LocalVariable "tmp$1" int Hole;
+  LocalVariable "narrowed$2" bool Hole;
+  ...
+  -- Body (assignments + control flow):
+  arg$0 := from_int(x);
+  tmp$1 := PAdd(arg$0, ...);
+  narrowed$2 := Any..as_int!(tmp$1);
+  ...
+]
+```
+
+This matches Core's expectations:
+- `Hole` for uninitialized vars (= `<?>` in Core)
+- No inline LocalVariable in the body
+- Variables always declared before use (hoisted to top)
+
+The `_uninit` placeholder goes away — all vars get `Hole`.
 
 ### Why This Matters
 
