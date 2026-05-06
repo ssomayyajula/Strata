@@ -296,25 +296,18 @@ mutual
 /-- Translate a Python expression to Laurel. One case per constructor. -/
 partial def translateExpr (e : Python.expr SourceRange) : TransM StmtExprMd := do
   match e with
-  -- Literals: wrapped in from_* for the dynamic Any-typed pipeline.
-  -- All values in Laurel must be type Any; bare literals would cause
-  -- Core type-checking failures (int != Any). This matches the working
-  -- pipeline's wrapLiterals pass.
-  | .Constant sr (.ConPos _ n) _ => do
-      let lit ← mkExpr sr (.LiteralInt n.val)
-      mkExpr sr (.StaticCall "from_int" [lit])
-  | .Constant sr (.ConNeg _ n) _ => do
-      let lit ← mkExpr sr (.LiteralInt (-n.val))
-      mkExpr sr (.StaticCall "from_int" [lit])
-  | .Constant sr (.ConString _ s) _ => do
-      let lit ← mkExpr sr (.LiteralString s.val)
-      mkExpr sr (.StaticCall "from_str" [lit])
-  | .Constant sr (.ConTrue _) _ => do
-      let lit ← mkExpr sr (.LiteralBool true)
-      mkExpr sr (.StaticCall "from_bool" [lit])
-  | .Constant sr (.ConFalse _) _ => do
-      let lit ← mkExpr sr (.LiteralBool false)
-      mkExpr sr (.StaticCall "from_bool" [lit])
+  -- Literals: emit bare (no coercions). Elaboration inserts from_int/from_str/from_bool
+  -- at type boundaries where needed (per ARCHITECTURE.md: Translation does NOT wrap).
+  | .Constant sr (.ConPos _ n) _ =>
+      mkExpr sr (.LiteralInt n.val)
+  | .Constant sr (.ConNeg _ n) _ =>
+      mkExpr sr (.LiteralInt (-n.val))
+  | .Constant sr (.ConString _ s) _ =>
+      mkExpr sr (.LiteralString s.val)
+  | .Constant sr (.ConTrue _) _ =>
+      mkExpr sr (.LiteralBool true)
+  | .Constant sr (.ConFalse _) _ =>
+      mkExpr sr (.LiteralBool false)
   | .Constant sr (.ConNone _) _ =>
       mkExpr sr (.StaticCall "from_None" [])
   | .Constant sr (.ConFloat _ f) _ => do
@@ -598,15 +591,13 @@ partial def translateExpr (e : Python.expr SourceRange) : TransM StmtExprMd := d
       mkExpr sr (.IfThenElse testExpr bodyExpr (some elseExpr))
 
   -- F-string: f"{x} is {y}" -> string concatenation via PAdd (dynamic string concat)
-  -- Empty string seed must be wrapped in from_str to be type Any (PAdd expects Any args)
+  -- Bare literals emitted; elaboration handles coercions at PAdd boundaries.
   | .JoinedStr sr values => do
-      if values.val.isEmpty then do
-        let lit ← mkExpr sr (.LiteralString "")
-        mkExpr sr (.StaticCall "from_str" [lit])
+      if values.val.isEmpty then
+        mkExpr sr (.LiteralString "")
       else
         let parts ← values.val.toList.mapM translateExpr
-        let emptyLit ← mkExpr sr (.LiteralString "")
-        let mut result ← mkExpr sr (.StaticCall "from_str" [emptyLit])
+        let mut result ← mkExpr sr (.LiteralString "")
         for part in parts do
           result ← mkExpr sr (.StaticCall "PAdd" [result, part])
         pure result
@@ -792,10 +783,9 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
       pure [assignExpr]
 
   -- If statement
-  -- Condition wrapped with Any_to_bool (Core requires bool conditions)
+  -- Condition emitted bare; elaboration inserts Any_to_bool at type boundary.
   | .If _ test body orelse => do
       let condExpr ← translateExpr test
-      let condBool ← mkExpr sr (.StaticCall "Any_to_bool" [condExpr])
       let bodyStmts ← translateStmtList body.val.toList
       let bodyBlock ← mkExpr sr (.Block bodyStmts none)
       let elseBlock ← if orelse.val.isEmpty then
@@ -804,21 +794,20 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
         let elseStmts ← translateStmtList orelse.val.toList
         let eb ← mkExpr sr (.Block elseStmts none)
         pure (some eb)
-      let ifExpr ← mkExpr sr (.IfThenElse condBool bodyBlock elseBlock)
+      let ifExpr ← mkExpr sr (.IfThenElse condExpr bodyBlock elseBlock)
       pure [ifExpr]
 
   -- While loop
-  -- Condition wrapped with Any_to_bool (Core requires bool conditions)
+  -- Condition emitted bare; elaboration inserts Any_to_bool at type boundary.
   -- Emits labeled blocks for break/continue:
   --   breakLabel: { while (cond) { continueLabel: { <body> } } }
   | .While _ test body _orelse => do
       let (breakLabel, continueLabel) ← pushLoopLabel "loop"
       let condExpr ← translateExpr test
-      let condBool ← mkExpr sr (.StaticCall "Any_to_bool" [condExpr])
       let bodyStmts ← translateStmtList body.val.toList
       -- Inner block: continue label wraps the body
       let continueBlock ← mkExpr sr (.Block bodyStmts (some continueLabel))
-      let whileExpr ← mkExpr sr (.While condBool [] none continueBlock)
+      let whileExpr ← mkExpr sr (.While condExpr [] none continueBlock)
       -- Outer block: break label wraps the while
       let breakBlock ← mkExpr sr (.Block [whileExpr] (some breakLabel))
       popLoopLabel
@@ -848,8 +837,7 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
             for elt in elts.val.toList do
               let tgtExpr ← translateExpr elt
               let idxLit ← mkExpr sr (.LiteralInt idx)
-              let idxWrapped ← mkExpr sr (.StaticCall "from_int" [idxLit])
-              let getExpr ← mkExpr sr (.StaticCall "Any_get" [tmpRef, idxWrapped])
+              let getExpr ← mkExpr sr (.StaticCall "Any_get" [tmpRef, idxLit])
               let assignExpr ← mkExpr sr (.Assign [tgtExpr] getExpr)
               assigns := assigns ++ [assignExpr]
               idx := idx + 1
@@ -860,10 +848,10 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
             let holeExpr ← mkExpr sr (.Hole (deterministic := false))
             let havoc ← mkExpr sr (.Assign [targetExpr] holeExpr)
             pure ([havoc], targetExpr)
-      -- Assume: Any_to_bool(PIn(target, iter)) — models that target is drawn from iter
+      -- Assume: PIn(target, iter) — models that target is drawn from iter
+      -- Elaboration inserts Any_to_bool at the Assume boundary if needed.
       let inExpr ← mkExpr sr (.StaticCall "PIn" [assumeTarget, iterExpr])
-      let assumeCond ← mkExpr sr (.StaticCall "Any_to_bool" [inExpr])
-      let assume ← mkExpr sr (.Assume assumeCond)
+      let assume ← mkExpr sr (.Assume inExpr)
       -- Inner block: continue label wraps havoc + assume + body
       let continueBlock ← mkExpr sr (.Block (havocStmts ++ [assume] ++ bodyStmts) (some continueLabel))
       -- Outer block: break label wraps the continue block
@@ -905,11 +893,10 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
           pure [exitBody]
 
   -- Assert statement
-  -- Condition wrapped with Any_to_bool (Core requires bool for assertions)
+  -- Condition emitted bare; elaboration inserts Any_to_bool at type boundary.
   | .Assert _ test _msg => do
       let condExpr ← translateExpr test
-      let condBool ← mkExpr sr (.StaticCall "Any_to_bool" [condExpr])
-      let assertExpr ← mkExpr sr (.Assert condBool)
+      let assertExpr ← mkExpr sr (.Assert condExpr)
       pure [assertExpr]
 
   -- Expression statement (e.g., standalone function call)

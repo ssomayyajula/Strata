@@ -433,17 +433,26 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
   | .LocalVariable name ty init => do
     match init with
     | some initExpr => do
-      let checkedInit ← checkValue initExpr ty.val
-      pure (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val) checkedInit
-        (.prodReturnValue () (.valVar () (mkAnn name.text))), ty.val)
+      -- If init is a simple value (literal, identifier), check it directly.
+      -- If init is a producer (call, etc.), synthesize it as a producer and
+      -- bind with prodLetProd so the result can be used as the init value.
+      if isEffectful initExpr then
+        -- Producer init: synth as producer, bind result
+        let (initProd, _initTy) ← synthProducer initExpr
+        let tmp ← freshVar "init"
+        pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL ty.val) initProd
+          (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val)
+            (.valVar () (mkAnn tmp))
+            (.prodReturnValue () (.valVar () (mkAnn name.text)))), ty.val)
+      else
+        let checkedInit ← checkValue initExpr ty.val
+        pure (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val) checkedInit
+          (.prodReturnValue () (.valVar () (mkAnn name.text))), ty.val)
     | none => do
-      -- Declaration without initialization -- use a literal placeholder
-      let defaultVal := match ty.val with
-        | .TInt => Value.valLiteralInt () (mkAnn 0)
-        | .TBool => Value.valLiteralBool () (mkAnn false)
-        | .TString => Value.valLiteralString () (mkAnn "")
-        | _ => Value.valVar () (mkAnn "$uninitialized")
-      pure (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val) defaultVal
+      -- Declaration without initialization: use $uninit sentinel.
+      -- Projection recognizes this and emits LocalVariable name ty none.
+      pure (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val)
+        (.valVar () (mkAnn "$uninit"))
         (.prodReturnValue () (.valVar () (mkAnn name.text))), ty.val)
 
   -- Return
@@ -549,18 +558,21 @@ partial def synthTargetValue (target : StmtExprMd) : ElabM FValue := do
     let (val, _) ← synthValue target
     pure val
 
-/-- Helper: elaborate a block of statements into nested prodLetProd.
-    Block [s1, s2, s3] → synthProducer(s1) to _. synthProducer(s2) to _. synthProducer(s3)
-    Implementation: foldr over statement list. -/
+/-- Helper: elaborate a block of statements into a prodBlock (flat sequencing).
+    Block [s1, s2, s3] → prodBlock [synthProducer(s1), synthProducer(s2), synthProducer(s3)]
+    Preserves flat block structure required by downstream Laurel-to-Core translation. -/
 partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FProducer × HighType) := do
   match stmts with
   | [] => pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TVoid)
   | [single] => synthProducer single
-  | stmt :: rest => do
-    let (stmtProd, _stmtTy) ← synthProducer stmt
-    let (restProd, restTy) ← elaborateBlock rest
-    let tmp ← freshVar "seq"
-    pure (.prodLetProd () (mkAnn tmp) (.coreType () (mkAnn "Any")) stmtProd restProd, restTy)
+  | _ => do
+    let mut prods : Array FProducer := #[]
+    let mut lastTy : HighType := .TVoid
+    for stmt in stmts do
+      let (prod, ty) ← synthProducer stmt
+      prods := prods.push prod
+      lastTy := ty
+    pure (.prodBlock () (mkAnn prods), lastTy)
 
 end -- mutual
 
@@ -655,9 +667,16 @@ partial def projectProducer : FProducer → StmtExprMd
     let assignStmt := mkMd (.Assign [targetExpr] valExpr)
     mkMd (.Block [assignStmt, bodyExpr] none)
   | .prodVarDecl _ name ty init body =>
-    let initExpr := projectValue init
     let bodyExpr := projectProducer body
-    let varDecl := mkMd (.LocalVariable (mkId name.val) (projectType ty) (some initExpr))
+    -- Recognize $uninit sentinel: project as LocalVariable without initializer
+    let varDecl := match init with
+      | .valVar _ sentinel =>
+        if sentinel.val == "$uninit" then
+          mkMd (.LocalVariable (mkId name.val) (projectType ty) none)
+        else
+          mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
+      | _ =>
+        mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
     mkMd (.Block [varDecl, bodyExpr] none)
   | .prodIfThenElse _ cond thenBr elseBr =>
     let condExpr := projectValue cond

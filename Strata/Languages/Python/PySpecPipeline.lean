@@ -472,18 +472,19 @@ public def pyAnalyzeLaurelV2
     | .ok (program, _state) => pure program
 
   -- Step 4: Run Elaboration (Phase 1: bidirectional walk for coercions)
-  -- SKIPPED for now: Translation already wraps literals in from_int/from_str/from_bool
-  -- and inserts Any_to_bool for conditions. Running the bidirectional walk would
-  -- cause incorrect coercion insertion (e.g., Any_to_bool(NoError())) because the
-  -- synth/check doesn't yet understand Error constructors and other non-Any types.
-  -- The bidirectional elaboration will be enabled once Translation produces "HighLaurel"
-  -- (no coercions) per the architecture.
-  --
+  -- Translation now emits bare types (no from_int/from_str/Any_to_bool).
+  -- Elaboration inserts coercions via the bidirectional synth/check walk,
+  -- then projects FGL back to Laurel for downstream lowering.
+  let elaboratedProgram ← profileStep profile "Elaborate (Phase 1: coercions)" do
+    match FineGrainLaurel.elaborateProgram typeEnv laurelProgram with
+    | .error e => throw (.internal s!"Elaboration failed: {e}")
+    | .ok prog => pure prog
+
   -- Step 5: The full lowering (heap param, type hierarchy, holes, etc.) is handled by
   -- translateCombinedLaurel (called by the CLI command) which runs translateWithLaurel.
 
-  -- Step 5: Combine with Python runtime Laurel part
+  -- Step 6: Combine with Python runtime Laurel part
   profileStep profile "Combine with runtime" do
-    return combinePySpecLaurel Python.pythonRuntimeLaurelPart laurelProgram
+    return combinePySpecLaurel Python.pythonRuntimeLaurelPart elaboratedProgram
 
 end Strata
