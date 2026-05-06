@@ -1,8 +1,12 @@
 # Standard Agent Preamble
 
 You are implementing part of a formally-grounded compiler pipeline. Your code must
-be mechanically derived from the specification. There is no room for creativity,
-heuristics, or shortcuts.
+be mechanically derived from the ARCHITECTURE.md and IMPLEMENTATION_PLAN.md. There 
+is no room for creativity, heuristics, or shortcuts.
+
+**EVERY message you write must reference the ARCHITECTURE.md and IMPLEMENTATION_PLAN.md.**
+If you're not citing them, you're not following them. Cite the specific section that
+justifies what you're doing.
 
 ## YOUR GOD
 
