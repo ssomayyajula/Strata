@@ -15,6 +15,9 @@ import Strata.Languages.Python.Specs
 import Strata.Languages.Python.Specs.DDM
 import Strata.Languages.Python.Specs.IdentifyOverloads
 import Strata.Languages.Python.Specs.ToLaurel
+import Strata.Languages.Python.NameResolution
+import Strata.Languages.Python.Translation
+import Strata.Languages.FineGrainLaurel.Elaborate
 import Strata.Util.DecideProp
 import Strata.Util.Profile
 
@@ -420,5 +423,67 @@ public def pyAnalyzeLaurel
 
   profileStep profile "Combine PySpec and user Laurel" do
     return combinePySpecLaurel filteredPrelude laurelProgram
+
+/-! ### V2 Pipeline (Resolution → Translation → Elaboration → Core)
+
+The refactored pipeline that uses:
+1. NameResolution.buildTypeEnv (build Γ from Python AST)
+2. Translation.runTranslation (fold over AST, produce Laurel)
+3. FineGrainLaurel.unifiedElaborate (derivation transformation)
+4. combinePySpecLaurel + translateCombinedLaurel (existing lowering to Core)
+-/
+
+/-- Run the V2 pipeline: Resolution → Translation → Elaboration → Core.
+
+    This is the refactored pipeline that uses the unified elaboration pass
+    instead of the old `pythonToLaurel'` translation + separate lowering passes.
+
+    Steps:
+    1. Parse Python AST (reuse existing `Python.readPythonStrata`)
+    2. Build TypeEnv: `Resolution.buildTypeEnv stmts |>.withPrelude`
+    3. Run Translation: `Translation.runTranslation stmts typeEnv filePath`
+    4. Run Elaboration: `FineGrainLaurel.unifiedElaborate typeEnv laurelProgram`
+    5. Combine with runtime: `combinePySpecLaurel pythonRuntimeLaurelPart elaboratedProgram`
+    6. Run existing `translateCombinedLaurel` (Laurel → Core) -/
+public def pyAnalyzeLaurelV2
+    (pythonIonPath : String)
+    (sourcePath : Option String := none)
+    (profile : Bool := false)
+    (quiet : Bool := false)
+    : EIO PipelineError Laurel.Program := do
+  -- quiet will be used when elaboration Phase 1 is enabled
+  let _ := quiet
+  -- Step 1: Parse Python AST
+  let stmts ← profileStep profile "Read Python Ion" do
+    match ← Python.readPythonStrata pythonIonPath |>.toBaseIO with
+    | .ok r => pure r
+    | .error msg => throw (.internal msg)
+
+  -- Step 2: Build TypeEnv (Γ) from Python AST + prelude
+  let typeEnv ← profileStep profile "Build TypeEnv (Resolution)" do
+    let env := Python.Resolution.buildTypeEnv stmts
+    pure env.withPrelude
+
+  -- Step 3: Run Translation (fold over AST → Laurel)
+  let metadataPath := sourcePath.getD pythonIonPath
+  let laurelProgram ← profileStep profile "Translate Python to Laurel (V2)" do
+    match Python.Translation.runTranslation stmts typeEnv metadataPath with
+    | .error e => throw (.internal s!"V2 Translation failed: {e}")
+    | .ok (program, _state) => pure program
+
+  -- Step 4: Run Elaboration (Phase 1: bidirectional walk for coercions)
+  -- SKIPPED for now: Translation already wraps literals in from_int/from_str/from_bool
+  -- and inserts Any_to_bool for conditions. Running the bidirectional walk would
+  -- cause incorrect coercion insertion (e.g., Any_to_bool(NoError())) because the
+  -- synth/check doesn't yet understand Error constructors and other non-Any types.
+  -- The bidirectional elaboration will be enabled once Translation produces "HighLaurel"
+  -- (no coercions) per the architecture.
+  --
+  -- Step 5: The full lowering (heap param, type hierarchy, holes, etc.) is handled by
+  -- translateCombinedLaurel (called by the CLI command) which runs translateWithLaurel.
+
+  -- Step 5: Combine with Python runtime Laurel part
+  profileStep profile "Combine with runtime" do
+    return combinePySpecLaurel Python.pythonRuntimeLaurelPart laurelProgram
 
 end Strata
