@@ -349,6 +349,36 @@ prod := PAdd(x, y);                  -- CHECK x <= Any. int ≠ Any. Upcast: fro
 assert Any_to_bool(PEq(prod, ...));  -- CHECK PEq(...) <= bool. Any ≠ bool. Narrow: Any_to_bool.
 ```
 
+### Short-Circuit Desugaring in FGL
+
+`PAnd(a, b)` where `b` is effectful gets desugared to IfThenElse. The correct
+FGL output (ALL types must align):
+
+```
+-- PAnd(a, b) where a: Any, b is effectful, PAnd returns Any
+-- Desugar to: if Any_to_bool(a) then b else from_bool(false)
+
+prodLetProd "cond" bool
+  (prodCall "Any_to_bool" [valVar "a"])     -- narrow a from Any to bool (PRODUCER)
+  (prodIfThenElse (valVar "cond")           -- condition is Value(bool) ✓
+    (elaborate b)                            -- then: Producer(Any) ✓
+    (prodReturnValue (valFromBool (valLiteralBool false))))  -- else: Producer(Any) via upcast ✓
+```
+
+Key points:
+- Condition must be `Value(bool)` → need to bind the `Any_to_bool` (producer) first
+- Both branches must have SAME type → else branch upcasts `false` to `Any`
+- The whole expression has type `Any` (matching PAnd's return type)
+
+For `POr(a, b)`:
+```
+prodLetProd "cond" bool
+  (prodCall "Any_to_bool" [valVar "a"])
+  (prodIfThenElse (valVar "cond")
+    (prodReturnValue (valFromBool (valLiteralBool true)))   -- then: Producer(Any)
+    (elaborate b))                                          -- else: Producer(Any)
+```
+
 ---
 
 ### Elaboration Subsumes the Existing Lowering Passes
