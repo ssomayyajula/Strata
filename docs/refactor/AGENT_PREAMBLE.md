@@ -13,41 +13,57 @@ These two documents are your specification. There is no other specification:
 Read BOTH completely before writing any code. Every line you write must trace back
 to a specific section of these documents. If it doesn't, you're making something up.
 
+## THERE IS ONLY ONE WAY TO DO IT
+
+The types determine the implementation. The architecture determines the types.
+You do NOT make choices. You do NOT ask questions. You TRANSCRIBE the spec into code.
+
+If you find yourself:
+- Choosing between two approaches → you haven't read the spec carefully enough
+- Adding a "peephole optimization" → you're patching over a wrong implementation
+- Writing an if-statement on a type string → you're doing boolean blindness
+- Asking "should I use X or Y?" → the type already tells you which one
+
+The FGL types enforce correctness:
+- Procedure has error effect (hasErrorOutput) → MUST use `prodCallWithError`. No choice.
+- Procedure has no error effect → MUST use `prodCall`. No choice.
+- Expression is a value → MUST be `FGL.Value`. Can't put a Producer there.
+- Expression is effectful → MUST be `FGL.Producer`. Can't pretend it's a Value.
+
 ## ABSOLUTE RULES
 
-1. **The implementation is MECHANICALLY DERIVED from the spec.** You are transcribing,
-   not problem-solving. If you find yourself making a choice, the spec is either
-   incomplete (STOP and report) or you haven't read it carefully enough.
+1. **MECHANICALLY DERIVED from the spec.** You are transcribing, not problem-solving.
 
-2. **No quick fixes.** If something doesn't work, the answer is in the architecture.
-   Not in "what makes the test pass." Not in "what the old pipeline does."
+2. **No quick fixes.** The answer is in the architecture. Not in "what makes the
+   test pass." Not in "what the old pipeline does." Not in a peephole optimization.
 
-3. **No if-statements on types.** Pattern match on the NameInfo/FGL constructors.
-   Boolean blindness = immediate failure. If you write `if isX then ... else ...`
-   you're wrong.
+3. **No if-statements on types.** Pattern match on NameInfo/FGL constructors.
+   Boolean blindness = immediate failure.
 
 4. **FP best practices.** Catamorphisms (one case per constructor). No mutation
    outside the monad. No post-hoc tree rewrites. No filtering heuristics.
 
-5. **No coercions in Translation.** If you see `from_int`, `from_str`, `from_bool`,
-   `Any_to_bool` in Translation.lean, that's a violation. These belong in Elaboration.
+5. **No coercions in Translation.** `from_int`, `from_str`, `from_bool`,
+   `Any_to_bool` in Translation.lean = VIOLATION. These belong in Elaboration.
 
-6. **Elaboration produces FGL types.** Not StmtExprMd. If elaboration returns
-   Laurel nodes directly, that's a violation.
+6. **Elaboration produces FGL types.** Not StmtExprMd. The types enforce polarity.
 
 7. **Projection is let-floating.** splitProducer(M) → (prefix stmts, terminal expr).
-   No heuristics. No filtering. Pure monad associativity.
+   No heuristics. No filtering. Pure monad associativity (Peyton Jones et al. 1996).
 
-8. **Subtyping vs Narrowing.** Two separate relations:
-   - A <: B → value-level upcast (infallible). `int <: Any` via valFromInt.
-   - A ▷ B → producer-level downcast (fallible). `Any ▷ bool` via Any_to_bool.
-   Never confuse them.
+8. **Subtyping vs Narrowing.** Two separate relations, determined by the types:
+   - A <: B (subtyping) → value-level upcast (infallible). `int <: Any` via valFromInt.
+   - A ▷ B (narrowing) → producer-level downcast (fallible). `Any ▷ bool` via Any_to_bool.
+   The type tells you which. You don't decide.
 
-9. **COMMIT after every successful `lake build`.** Never commit broken builds.
-   Format: `[refactor] <what> (<test result>)`
+9. **Error effect = prodCallWithError.** If `FuncSig.hasErrorOutput = true`, the
+   call MUST be `prodCallWithError`. Not `prodCall`. Not a choice. The type says so.
 
-10. **If stuck: STOP.** Write `-- ARCHITECTURE GAP: <description>` and report.
+10. **COMMIT after every successful `lake build`.** Never commit broken builds.
+
+11. **If stuck: STOP.** Write `-- ARCHITECTURE GAP: <description>` and report.
     Do NOT invent a workaround. Do NOT fall back to the old pipeline.
+    Do NOT add peephole optimizations. Do NOT "make the handler smarter."
 
 ## COMPLIANCE CHECKS (run before committing)
 
