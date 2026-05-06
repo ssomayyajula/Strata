@@ -1152,6 +1152,11 @@ that's outside our scope. We work with what Core knows.
 - **Sarkar, D., Waddell, O. & Dybvig, R.K.** (2004). "A Nanopass Infrastructure for Compiler Education." *ICFP*.
   — The nanopass methodology. Each pass does one thing; representations between passes enforce invariants.
 
+### Let-Floating / Projection
+
+- **Peyton Jones, S., Partain, W. & Santos, A.** (1996). "Let-floating: moving bindings to give faster programs." *ICFP*.
+  — Let float-out: inner bindings float to enclosing scope. Our FGCBV→CBV projection uses this (monadic bind associativity as let-floating). Soundness requires freshness of floated names.
+
 ### Metadata / Comonads
 
 - **Uustalu, T. & Vene, V.** (2008). "Comonadic Notions of Computation." *ENTCS*, 203(5).
