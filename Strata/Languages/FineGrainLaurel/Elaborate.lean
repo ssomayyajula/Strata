@@ -775,45 +775,38 @@ partial def projectValue : FValue → StmtExprMd
   | .valFromNone _ =>
     mkMd (.StaticCall (mkId "from_None") [])
 
-/-- Flatten an FGL Producer into a flat list of Laurel statements.
-    This is the core of the FGCBV → CBV projection: continuation-bearing forms
-    (prodLetProd, prodVarDecl, prodAssign, prodSeq) accumulate into a flat list
-    rather than nesting Blocks inside Blocks.
+/-- Split a producer into (prefix statements, terminal expression).
+    The terminal is what the producer "produces" — the value that would be
+    bound by an enclosing prodLetProd. This implements monadic bind
+    reassociation: nested lets become flat statement sequences.
 
-    The key insight: `M to x. N` in FGCBV projects to `[let x = M; ...stmts(N)]`
-    NOT to `Block [let x = M, Block [...stmts(N)]]`. -/
-partial def projectToStmts : FProducer → List StmtExprMd
-  -- Terminal forms: produce a single statement (no continuation to flatten)
-  | .prodReturnValue _ val => [projectValue val]
+    The reassociation law: `let x = (let y = M in N) in K` = `let y = M in let x = N in K`
+    Applied as a syntactic transformation: split into prefix + terminal, thread through. -/
+partial def splitProducer : FProducer → (List StmtExprMd) × StmtExprMd
+  | .prodReturnValue _ val => ([], projectValue val)
 
   | .prodCall _ callee args =>
     if callee.val == "$Hole" then
-      [mkMd (.Hole (deterministic := false))]
+      ([], mkMd (.Hole (deterministic := false)))
     else
-      [mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))]
+      ([], mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue)))
 
-  | .prodIfThenElse _ cond thenBr elseBr =>
-    let condExpr := projectValue cond
-    let thenExpr := projectProducer thenBr
-    let elseExpr := projectProducer elseBr
-    [mkMd (.IfThenElse condExpr thenExpr (some elseExpr))]
-
-  -- Continuation-bearing forms: emit head statement, then flatten the continuation
   | .prodLetProd _ var ty prod body =>
-    let prodExpr := projectProducer prod
-    let varDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some prodExpr))
-    [varDecl] ++ projectToStmts body
+    let (mStmts, mExpr) := splitProducer prod
+    let xDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some mExpr))
+    let (bodyStmts, bodyExpr) := splitProducer body
+    (mStmts ++ [xDecl] ++ bodyStmts, bodyExpr)
 
   | .prodLetValue _ var ty val body =>
     let valExpr := projectValue val
     let varDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some valExpr))
-    [varDecl] ++ projectToStmts body
+    let (bodyStmts, bodyExpr) := splitProducer body
+    ([varDecl] ++ bodyStmts, bodyExpr)
 
   | .prodAssign _ target val body =>
-    let targetExpr := projectValue target
-    let valExpr := projectValue val
-    let assignStmt := mkMd (.Assign [targetExpr] valExpr)
-    [assignStmt] ++ projectToStmts body
+    let assignStmt := mkMd (.Assign [projectValue target] (projectValue val))
+    let (bodyStmts, bodyExpr) := splitProducer body
+    ([assignStmt] ++ bodyStmts, bodyExpr)
 
   | .prodVarDecl _ name ty init body =>
     match init with
@@ -821,90 +814,96 @@ partial def projectToStmts : FProducer → List StmtExprMd
       if sentinel.val == "$uninit" then
         -- Scope-hoisted declaration with no initializer
         let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) none)
-        match body with
-        | .prodReturnValue _ _ =>
-          -- Trivial continuation: just the declaration, no trailing value
-          [decl]
-        | _ =>
-          [decl] ++ projectToStmts body
+        let (bodyStmts, bodyExpr) := splitProducer body
+        ([decl] ++ bodyStmts, bodyExpr)
       else
         let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
-        [decl] ++ projectToStmts body
+        let (bodyStmts, bodyExpr) := splitProducer body
+        ([decl] ++ bodyStmts, bodyExpr)
     | _ =>
       let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
-      [decl] ++ projectToStmts body
+      let (bodyStmts, bodyExpr) := splitProducer body
+      ([decl] ++ bodyStmts, bodyExpr)
 
   | .prodAssert _ cond body =>
-    [mkMd (.Assert (projectValue cond))] ++ projectToStmts body
+    let assertStmt := mkMd (.Assert (projectValue cond))
+    let (bodyStmts, bodyExpr) := splitProducer body
+    ([assertStmt] ++ bodyStmts, bodyExpr)
 
   | .prodAssume _ cond body =>
-    [mkMd (.Assume (projectValue cond))] ++ projectToStmts body
+    let assumeStmt := mkMd (.Assume (projectValue cond))
+    let (bodyStmts, bodyExpr) := splitProducer body
+    ([assumeStmt] ++ bodyStmts, bodyExpr)
+
+  | .prodIfThenElse _ cond thenBr elseBr =>
+    let condExpr := projectValue cond
+    let thenExpr := projectProducer thenBr
+    let elseExpr := projectProducer elseBr
+    ([], mkMd (.IfThenElse condExpr thenExpr (some elseExpr)))
 
   | .prodWhile _ cond _invs body after =>
     let condExpr := projectValue cond
     let bodyExpr := projectProducer body
-    [mkMd (.While condExpr [] none bodyExpr)] ++ projectToStmts after
+    let whileStmt := mkMd (.While condExpr [] none bodyExpr)
+    let (afterStmts, afterExpr) := splitProducer after
+    ([whileStmt] ++ afterStmts, afterExpr)
 
   | .prodNew _ name resultVar ty body =>
     let newExpr := mkMd (.New (mkId name.val))
     let varDecl := mkMd (.LocalVariable (mkId resultVar.val) (projectType ty) (some newExpr))
-    [varDecl] ++ projectToStmts body
+    let (bodyStmts, bodyExpr) := splitProducer body
+    ([varDecl] ++ bodyStmts, bodyExpr)
 
   | .prodCallWithError _ callee args resultVar errorVar resultTy _errorTy body =>
+    let rDecl := mkMd (.LocalVariable (mkId resultVar.val) (projectType resultTy) none)
+    let eDecl := mkMd (.LocalVariable (mkId errorVar.val) (liftType (.TCore "Error")) none)
     let callExpr := mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))
     let resultRef := mkMd (.Identifier (mkId resultVar.val))
     let errorRef := mkMd (.Identifier (mkId errorVar.val))
-    let multiAssign := mkMd (.Assign [resultRef, errorRef] callExpr)
+    let callAssign := mkMd (.Assign [resultRef, errorRef] callExpr)
     let isErrorCall := mkMd (.StaticCall (mkId "isError") [errorRef])
-    let errorCheck := mkMd (.IfThenElse isErrorCall
-      (mkMd (.Return (some errorRef))) none)
-    let varDeclResult := mkMd (.LocalVariable (mkId resultVar.val) (projectType resultTy) none)
-    let varDeclError := mkMd (.LocalVariable (mkId errorVar.val)
-      (liftType (.TCore "Error")) none)
-    [varDeclResult, varDeclError, multiAssign, errorCheck] ++ projectToStmts body
+    let errCheck := mkMd (.IfThenElse isErrorCall (mkMd (.Return (some errorRef))) none)
+    let (bodyStmts, bodyExpr) := splitProducer body
+    ([rDecl, eDecl, callAssign, errCheck] ++ bodyStmts, bodyExpr)
 
   | .prodSeq _ first second =>
-    projectToStmts first ++ projectToStmts second
+    let (ms, _) := splitProducer first
+    let (ns, ne) := splitProducer second
+    (ms ++ ns, ne)
 
   | .prodBlock _ stmts =>
-    stmts.val.toList.flatMap projectToStmts
+    stmts.val.toList.foldl (fun (accStmts, _accExpr) prod =>
+      let (s, e) := splitProducer prod
+      (accStmts ++ s, e)
+    ) ([], mkMd (.Block [] none))
 
 /-- Project an FGL Producer back to Laurel StmtExprMd.
-    This is used in EXPRESSION position (initializers, call targets, etc.) where
-    the result value matters. It keeps trailing value expressions so that Block
-    expressions have a proper result.
-    For STATEMENT position (procedure bodies, continuations), use projectToStmts
-    via projectProducerFlat instead. -/
+    Used in non-top-level positions (IfThenElse branches, while bodies, etc.)
+    where the result value matters. -/
 partial def projectProducer (prod : FProducer) : StmtExprMd :=
-  let stmts := projectToStmts prod
+  let (stmts, terminal) := splitProducer prod
   match stmts with
-  | [] => mkMd (.Block [] none)
-  | [single] => single
-  | multiple => mkMd (.Block multiple none)
+  | [] => terminal
+  | _ => mkMd (.Block (stmts ++ [terminal]) none)
 end
 
 /-! ========================================================================
     FGL ELABORATION ENTRY POINTS (Phase 1)
     ======================================================================== -/
 
-/-- Project an FGL Producer for use as a procedure body (STATEMENT position).
-    Flattens continuation structure into a single top-level Block and filters out
-    trailing trivial values (bare identifiers, literals) that are artifacts of
-    FGL's continuation semantics (e.g., prodReturnValue returning a bound variable). -/
-def projectProducerFlat (prod : FProducer) : StmtExprMd :=
-  let stmts := projectToStmts prod
-  let meaningful := stmts.filter fun s =>
-    match s.val with
-    | .Identifier _ => false
-    | .LiteralBool _ => false
-    | .LiteralInt _ => false
-    | _ => true
-  match meaningful with
-  | [] =>
-    -- All statements were trivial; use last stmt as the expression value
-    match stmts.getLast? with
-    | some last => last
-    | none => mkMd (.Block [] none)
+/-- Project a procedure body: get all statements, wrap in a Block.
+    Filters out trailing trivial terminal values (bare identifiers, literals)
+    that are artifacts of FGL's continuation semantics. -/
+def projectBody (prod : FProducer) : StmtExprMd :=
+  let (stmts, terminal) := splitProducer prod
+  -- Include the terminal only if it's meaningful (not a bare identifier/literal artifact)
+  let allStmts := match terminal.val with
+    | .Identifier _ => stmts
+    | .LiteralBool _ => stmts
+    | .LiteralInt _ => stmts
+    | _ => stmts ++ [terminal]
+  match allStmts with
+  | [] => mkMd (.Block [] none)
   | [single] => single
   | multiple => mkMd (.Block multiple none)
 
@@ -914,10 +913,10 @@ def mkElabEnv (typeEnv : TypeEnv) (returnType : HighType := .TCore "Any")
   { typeEnv := typeEnv, currentReturnType := returnType, localTypes := localTypes }
 
 /-- Elaborate a single procedure body, producing FGL Producer then projecting back.
-    Uses projectProducerFlat for statement-position flattening. -/
+    Uses projectBody for statement-position flattening (splitProducer algorithm). -/
 def elaborateProcBody (env : ElabEnv) (body : StmtExprMd) : Except String StmtExprMd := do
   let ((prod, _), _) ← (synthProducer body).run env |>.run {}
-  pure (projectProducerFlat prod)
+  pure (projectBody prod)
 
 /-- Elaborate a Laurel Procedure, inserting casts and effects. -/
 def elaborateProcedure (typeEnv : TypeEnv) (proc : Laurel.Procedure) : Except String Laurel.Procedure := do
