@@ -87,7 +87,10 @@ This is the SAME pattern as `int <: Any` via `from_int`. Composite is just anoth
 ### Path to Parity
 
 **Priority 1:** Fix 1 genuine regression (test_with_void_enter). Composite↔Any coercion
-at heap boundary. Need `from_Composite` in prelude + elaboration's coerce function.
+at heap boundary. `from_Composite` constructor DONE (commit 924f2700c). Elaboration's
+`canUpcast`/`insertFGLUpcast` handles UserDefined→Any. Free `isSubtype` bypass removed
+(commit 8fdc2cd6b). Remaining: find the specific boundary where coercion isn't being
+inserted and fix the elaboration walk per ARCHITECTURE.md §"The Bidirectional Recipe".
 
 **Priority 2:** Fix 8 inconclusive→crash tests. Elaboration gaps in complex cases
 (multi-function, class methods, loops, with-statements).
@@ -98,11 +101,13 @@ correctness issue.
 
 ### Remaining Tech Debt
 
-| Item | Description | Architecture reference |
-|------|-------------|----------------------|
-| `from_Composite` prelude | Reverted — needs re-addition | §"Subtyping and Narrowing Discipline" |
-| Stub integration | Library stubs not loaded | §"Library Stubs: Eliminating PySpec" |
-| Metadata in projection | Some nodes get `#[]` metadata | §"Metadata: Monad-Comonad Interaction Law" |
+| Item | Status | Architecture reference |
+|------|--------|----------------------|
+| `from_Composite` prelude | ✅ DONE (commit 924f2700c) | §"Composite and Any: The Pointer Injection" |
+| Free isSubtype bypass removed | ✅ DONE (commit 8fdc2cd6b) | §"Subtyping and Narrowing Discipline" |
+| Coercion insertion at all Composite/Any boundaries | 🔄 IN PROGRESS | §"The Bidirectional Recipe" |
+| Stub integration | ❌ Not started | §"Library Stubs: Eliminating PySpec" |
+| Metadata in projection | ❌ Not started | §"Metadata: Monad-Comonad Interaction Law" |
 
 ---
 
