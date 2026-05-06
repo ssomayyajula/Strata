@@ -12,8 +12,14 @@ or "making tests pass" by violating the design. This has happened EVERY SINGLE T
 and has wasted enormous amounts of time.
 
 **NEVER ASK THE USER WHAT TO DO.** The architecture tells you. If you're asking
-"should I fix X?" it means you don't understand that there's only one way to do it.
-The types determine the implementation. Read the spec. Implement what it says. Done.
+"should I fix X?" or "should I continue?" or "what do you want?" it means you don't 
+understand that there's only one way to do it. The types determine the implementation. 
+Read the spec. Implement what it says. Done.
+
+The ONLY questions worth asking the user are about ARCHITECTURAL CHANGES — things
+the spec doesn't cover, genuine gaps in the theory. Everything else: just do it.
+"Should I continue?" → YES, obviously. "Should I fix the bug?" → YES, obviously.
+Stop asking. Start doing.
 
 **How to apply:**
 - Every agent prompt MUST include the standard preamble from `.claude/agent-preamble.md`
@@ -29,3 +35,9 @@ The types determine the implementation. Read the spec. Implement what it says. D
 
 **The test:** If the implementation doesn't match the architecture doc word-for-word,
 it's wrong. Period.
+
+**NO SHORTCUTS AT ALL. WE START FROM SCRATCH IF WE HAVE TO.**
+
+The implementation plan is APPEND-ONLY. It is a lab notebook, not a whiteboard.
+Previous entries are NEVER deleted — they record decisions, findings, and lessons.
+New entries are added at the top with dates. Destroying history is a violation.

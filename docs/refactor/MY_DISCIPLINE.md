@@ -15,21 +15,49 @@ This is not optional. This is not "when I remember." This happens EVERY TIME.
 ## Plan Before Code (applies to ME and to agents)
 
 Before ANY code change — whether I do it directly or an agent does it:
-1. Write a PLAN: what will change, which file/lines, why (cite architecture)
-2. The plan is reviewed against the architecture
+1. Write a PLAN: what will change, which file/lines, why (cite ARCHITECTURE.md and IMPLEMENTATION_PLAN.md)
+2. The plan is reviewed against the ARCHITECTURE.md and IMPLEMENTATION_PLAN.md
 3. Only THEN execute
 
-If I find myself writing code without a plan that traces to the architecture,
-I am doing it wrong. If an agent writes code without stating its plan first,
-it is doing it wrong. Kill it.
+If I find myself writing code without a plan that traces to the ARCHITECTURE.md
+and IMPLEMENTATION_PLAN.md, I am doing it wrong. If an agent writes code without 
+stating its plan first, it is doing it wrong. Kill it.
+
+## EVERY MESSAGE MUST REFERENCE THE ARCHITECTURE AND IMPLEMENTATION PLAN
+
+There are three questions: why, what, and how. Why is proof-relevant what — so really two.
+
+- **ARCHITECTURE.md** = what/why (the specification, the types, the relations, the theory)
+- **IMPLEMENTATION_PLAN.md** = how (the path from here to there, the validation, the process)
+
+It is IMPOSSIBLE to work without both. Every message I write — whether to the user 
+or in an agent prompt — must explicitly reference ARCHITECTURE.md (what/why) and 
+IMPLEMENTATION_PLAN.md (how). If I'm not citing them, I'm not following them.
+
+**THEY MUST BE KEPT IN SYNC.** Any change that affects what/why updates BOTH docs.
+Any change that affects how updates BOTH docs. A change to one without the other is
+INCOMPLETE and a violation. Before committing, verify consistency between them.
 
 ## The Review Agent
 
+TWO jobs:
+
+### Job 1: Code compliance (grep checks on files)
 - Reads both docs (ARCHITECTURE.md + IMPLEMENTATION_PLAN.md)
 - Reads .claude/agent-preamble.md
-- Runs ALL compliance checks
+- Runs ALL compliance checks (grep for violations)
 - Reports violations
-- Does NOT fix anything
+
+### Job 2: Process compliance (read implementation agent's transcript)
+- Reads the implementation agent's JSONL transcript file at:
+  `/Users/somayyas/.claude/projects/-Users-somayyas-workspace-StrataPythonBuildBackendWS-src-Strata/a826d948-a615-4f55-926d-ab77ea1ee118/subagents/agent-<ID>.jsonl`
+- Checks: did the agent state a plan BEFORE writing code?
+- Checks: does the plan cite the architecture?
+- Checks: is it adding heuristics/special cases/peephole optimizations?
+- Checks: is it inventing categories not in the spec?
+- Reports: KILL or CONTINUE recommendation
+
+The review agent does NOT fix anything. It reports.
 
 ## The Implementation Agent
 
