@@ -291,14 +291,9 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × HighType) 
   match expr.val with
   -- Task 9: StaticCall (CHECK args against FuncSig.params via checkValue)
   | .StaticCall callee args =>
-    -- PAnd/POr: stub for now returning plain call (short-circuit comes in task 15)
+    -- Task 15: PAnd/POr → short-circuit desugaring (ARCHITECTURE.md §"Short-Circuit Desugaring in FGL")
     if callee.text == "PAnd" || callee.text == "POr" then
-      let sig ← lookupFuncSig callee.text
-      let argVals ← args.mapM (fun a => do let (v, _) ← synthValue a; pure v)
-      let retTy := match sig with
-        | some s => s.returnType
-        | none => .TCore "Any"
-      pure (.call callee.text argVals, retTy)
+      shortCircuitDesugar callee.text args
     else
       let sig ← lookupFuncSig callee.text
       let checkedArgs ← match sig with
@@ -452,6 +447,45 @@ partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FGLP
   | none =>
     throw (ElabError.typeError s!"Cannot narrow {repr actual} to {repr expected}")
 
+-- Task 15: shortCircuitDesugar (ARCHITECTURE.md §"Short-Circuit Desugaring in FGL")
+-- PAnd(a, b): Python semantics = return a if FALSY, else evaluate and return b
+-- POr(a, b): Python semantics = return a if TRUTHY, else evaluate and return b
+-- callWithError IS the binding for the narrowed bool (no extra letProd around it).
+
+/-- Short-circuit desugaring for PAnd/POr.
+    Per ARCHITECTURE.md §"Short-Circuit Desugaring in FGL":
+    PAnd: `e to x. callWithError Any_to_bool [x] cond ... (if cond then elaborate b else returnValue x)`
+    POr: `e to x. callWithError Any_to_bool [x] cond ... (if cond then returnValue x else elaborate b)` -/
+partial def shortCircuitDesugar (op : String) (args : List StmtExprMd) : ElabM (FGLProducer × HighType) := do
+  match args with
+  | [a, b] =>
+    let xVar ← freshVar "sc"
+    let condVar ← freshVar "cond"
+    let (aProd, _) ← synthProducer a
+    let (bProd, _) ← synthProducer b
+    if op == "PAnd" then
+      -- PAnd: truthy → evaluate b, falsy → return a's value
+      pure (.letProd xVar (.TCore "Any") aProd
+        (.callWithError "Any_to_bool" [.var xVar] condVar (condVar ++ "_err")
+          .TBool (.TCore "Error")
+          (.ifThenElse (.var condVar)
+            bProd
+            (.returnValue (.var xVar)))),
+        .TCore "Any")
+    else
+      -- POr: truthy → return a's value, falsy → evaluate b
+      pure (.letProd xVar (.TCore "Any") aProd
+        (.callWithError "Any_to_bool" [.var xVar] condVar (condVar ++ "_err")
+          .TBool (.TCore "Error")
+          (.ifThenElse (.var condVar)
+            (.returnValue (.var xVar))
+            bProd)),
+        .TCore "Any")
+  | _ =>
+    -- Fallback: shouldn't happen (PAnd/POr always have exactly 2 args)
+    let argVals ← args.mapM (fun a => do let (v, _) ← synthValue a; pure v)
+    pure (.call op argVals, .TCore "Any")
+
 -- Task 13: elaborateBlock (ARCHITECTURE.md §"Blocks as Nested Lets")
 -- Per ARCHITECTURE.md §"Blocks as Nested Lets (CBV → FGCBV)":
 -- foldr over stmts. Each elaborated via synthProducer, sequenced via sequenceProducers.
@@ -469,16 +503,133 @@ partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FGLProducer × Hig
 
 end -- mutual
 
-/-! ## Stub: fullElaborate (pass-through)
+/-! ## Tasks 16-17: projectValue + splitProducer + projectBody (mutually recursive)
 
-Pass-through stub so the build doesn't break while tasks 6+ are implemented.
-Called by PySpecPipeline.lean. -/
+Per ARCHITECTURE.md §"Projection (FineGrainLaurel → Laurel)":
+- projectValue: FGLValue → StmtExprMd (one case per constructor)
+- splitProducer: FGLProducer → (List StmtExprMd × StmtExprMd) (bind reassociation)
+- projectBody: FGLProducer → StmtExprMd (split + wrap in Block)
+ALL output via `mkLaurel md` (ARCHITECTURE.md §"Metadata: Smart Constructors").
+-/
+
+mutual
+
+/-- Project an FGLValue to a Laurel StmtExprMd.
+    Per ARCHITECTURE.md §"Projection" — forgetful functor, one case per constructor.
+    All output via mkLaurel md (ARCHITECTURE.md §"Metadata: Smart Constructors"). -/
+partial def projectValue (md : Imperative.MetaData Core.Expression) : FGLValue → StmtExprMd
+  | .litInt n => mkLaurel md (.LiteralInt n)
+  | .litBool b => mkLaurel md (.LiteralBool b)
+  | .litString s => mkLaurel md (.LiteralString s)
+  | .var name => mkLaurel md (.Identifier (Identifier.mk name none))
+  | .fromInt v => mkLaurel md (.StaticCall (Identifier.mk "from_int" none) [projectValue md v])
+  | .fromStr v => mkLaurel md (.StaticCall (Identifier.mk "from_str" none) [projectValue md v])
+  | .fromBool v => mkLaurel md (.StaticCall (Identifier.mk "from_bool" none) [projectValue md v])
+  | .fromFloat v => mkLaurel md (.StaticCall (Identifier.mk "from_float" none) [projectValue md v])
+  | .fromComposite v => mkLaurel md (.StaticCall (Identifier.mk "from_Composite" none) [projectValue md v])
+  | .fromListAny v => mkLaurel md (.StaticCall (Identifier.mk "from_ListAny" none) [projectValue md v])
+  | .fromDictStrAny v => mkLaurel md (.StaticCall (Identifier.mk "from_DictStrAny" none) [projectValue md v])
+  | .fromNone => mkLaurel md (.StaticCall (Identifier.mk "from_None" none) [])
+  | .fieldAccess obj f => mkLaurel md (.FieldSelect (projectValue md obj) (Identifier.mk f none))
+  | .staticCall name args => mkLaurel md (.StaticCall (Identifier.mk name none) (args.map (projectValue md)))
+
+/-- Split a producer into (prefix statements, terminal expression).
+    Per ARCHITECTURE.md §"Implementation: Projection as Bind Reassociation":
+    THE monad law: `(m >>= f) >>= g = m >>= (λx. f x >>= g)`.
+    The letProd case IS the monad law applied as a syntactic transformation. -/
+partial def splitProducer (md : Imperative.MetaData Core.Expression) : FGLProducer → (List StmtExprMd × StmtExprMd)
+  | .returnValue v => ([], projectValue md v)
+  | .call name args =>
+      ([], mkLaurel md (.StaticCall (Identifier.mk name none) (args.map (projectValue md))))
+  | .letProd x ty inner body =>
+      let (innerStmts, innerExpr) := splitProducer md inner
+      let xDecl := mkLaurel md (.LocalVariable (Identifier.mk x none) (mkHighTypeMd md ty) (some innerExpr))
+      let (bodyStmts, bodyExpr) := splitProducer md body
+      (innerStmts ++ [xDecl] ++ bodyStmts, bodyExpr)
+  | .assign target val body =>
+      let stmt := mkLaurel md (.Assign [projectValue md target] (projectValue md val))
+      let (bodyStmts, bodyExpr) := splitProducer md body
+      ([stmt] ++ bodyStmts, bodyExpr)
+  | .varDecl name ty init body =>
+      let decl := mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md ty) (some (projectValue md init)))
+      let (bodyStmts, bodyExpr) := splitProducer md body
+      ([decl] ++ bodyStmts, bodyExpr)
+  | .ifThenElse cond thn els =>
+      ([], mkLaurel md (.IfThenElse (projectValue md cond) (projectBody md thn) (some (projectBody md els))))
+  | .whileLoop cond body after =>
+      let whileStmt := mkLaurel md (.While (projectValue md cond) [] none (projectBody md body))
+      let (afterStmts, afterExpr) := splitProducer md after
+      ([whileStmt] ++ afterStmts, afterExpr)
+  | .assert cond body =>
+      let stmt := mkLaurel md (.Assert (projectValue md cond))
+      let (bodyStmts, bodyExpr) := splitProducer md body
+      ([stmt] ++ bodyStmts, bodyExpr)
+  | .assume cond body =>
+      let stmt := mkLaurel md (.Assume (projectValue md cond))
+      let (bodyStmts, bodyExpr) := splitProducer md body
+      ([stmt] ++ bodyStmts, bodyExpr)
+  | .callWithError callee args rv ev rTy eTy body =>
+      let callExpr := mkLaurel md (.StaticCall (Identifier.mk callee none) (args.map (projectValue md)))
+      let rvDecl := mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md rTy) (some callExpr))
+      let evDecl := mkLaurel md (.LocalVariable (Identifier.mk ev none) (mkHighTypeMd md eTy) (some (mkLaurel md (.StaticCall (Identifier.mk "NoError" none) []))))
+      let (bodyStmts, bodyExpr) := splitProducer md body
+      ([rvDecl, evDecl] ++ bodyStmts, bodyExpr)
+  | .exit label => ([mkLaurel md (.Exit label)], mkLaurel md (.LiteralBool true))
+  | .labeledBlock label body =>
+      ([mkLaurel md (.Block [projectBody md body] (some label))], mkLaurel md (.LiteralBool true))
+  | .newObj className rv ty body =>
+      let newExpr := mkLaurel md (.New (Identifier.mk className none))
+      let decl := mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md ty) (some newExpr))
+      let (bodyStmts, bodyExpr) := splitProducer md body
+      ([decl] ++ bodyStmts, bodyExpr)
+  | .seq first second =>
+      let (fStmts, _) := splitProducer md first
+      let (sStmts, sExpr) := splitProducer md second
+      (fStmts ++ sStmts, sExpr)
+  | .unit => ([], mkLaurel md (.LiteralBool true))
+
+/-- Project a producer body to a Laurel Block.
+    Per ARCHITECTURE.md §"Projection": projectBody calls splitProducer, wraps in Block. -/
+partial def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) : StmtExprMd :=
+  let (stmts, terminal) := splitProducer md prod
+  mkLaurel md (.Block (stmts ++ [terminal]) none)
+
+end -- mutual (projectValue, splitProducer, projectBody)
+
+/-! ## Task 18: fullElaborate (IMPLEMENTATION_PLAN.md §"Task 18")
+
+For each proc in program.staticProcedures:
+- Match body as .Transparent bodyExpr
+- Get returnType from proc.outputs[0].type.val (or .TCore "Any")
+- Set ElabState { freshCounter := 0, currentProcReturnType := retTy }
+- Run synthProducer bodyExpr with typeEnv in reader
+- Project result via projectBody bodyExpr.md fglProd
+- Rebuild proc with .Transparent projected
+- On ElabError: catch and return the proc unchanged (graceful degradation)
+-/
 
 /-- Entry point: fullElaborate (called by PySpecPipeline).
-    Currently a pass-through stub — returns the input program unchanged. -/
-def fullElaborate (_typeEnv : Strata.Python.Resolution.TypeEnv)
-    (program : Strata.Laurel.Program) : Except String Strata.Laurel.Program :=
-  pure program
+    Per IMPLEMENTATION_PLAN.md §"Task 18": elaborate each proc body, project back to Laurel.
+    currentProcReturnType from proc.outputs. Graceful degradation on ElabError. -/
+def fullElaborate (typeEnv : Strata.Python.Resolution.TypeEnv)
+    (program : Strata.Laurel.Program) : Except String Strata.Laurel.Program := do
+  let mut procs : List Strata.Laurel.Procedure := []
+  for proc in program.staticProcedures do
+    match proc.body with
+    | .Transparent bodyExpr =>
+      let retTy := match proc.outputs with
+        | [p] => p.type.val
+        | _ => .TCore "Any"
+      let initState : ElabState := { freshCounter := 0, currentProcReturnType := retTy }
+      match (synthProducer bodyExpr).run typeEnv |>.run initState with
+      | .ok ((fglProd, _), _) =>
+        let projected := projectBody bodyExpr.md fglProd
+        procs := procs ++ [{ proc with body := .Transparent projected }]
+      | .error _ =>
+        -- Graceful degradation: return proc unchanged on elaboration error
+        procs := procs ++ [proc]
+    | _ => procs := procs ++ [proc]
+  pure { program with staticProcedures := procs }
 
 end -- public section
 
