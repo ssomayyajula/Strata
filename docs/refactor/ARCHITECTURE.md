@@ -501,6 +501,39 @@ returns Box). To get concrete type: `Box → Any` via `Box..AnyVal!`, then
 Smart constructors: `mkLaurel md expr`. Process `.val`, keep `.md`. Synthesized
 nodes inherit metadata from the input node that triggered them.
 
+### Holes (Nondeterminism Effect)
+
+Holes represent unknown/nondeterministic values. They are an elaboration effect —
+elaboration translates them into forms Core can handle.
+
+**Two kinds of Holes:**
+
+- **Deterministic Hole** (`.Hole true`): "some fixed value of this type that we
+  don't know." Used for unsupported constructs. Elaboration translates to a call
+  to a freshly generated uninterpreted function (so SMT can reason about it).
+
+- **Nondeterministic Hole** (`.Hole false`): "could be ANY value of this type."
+  Used for for-loop havoc. Elaboration translates to a `LocalVariable` with no
+  initializer (`none`), which Core emits as `.nondet` (havoced variable).
+
+**Typing:**
+- `Hole(some T)` synthesizes T (type stored in node)
+- `Hole(none)` checks against context (takes whatever type is expected)
+
+**After elaboration, no `.Hole` nodes remain in the output.** Core rejects them.
+The effect-passing translation converts them:
+- Deterministic → `StaticCall "$hole_N" [proc_inputs...]` (uninterpreted function)
+- Nondeterministic → `LocalVariable freshVar ty none` (havoc)
+
+This obsoletes both `inferHoleTypes` and `eliminateHoles` from the old pipeline.
+
+### Heap (only when classes exist)
+
+Heap type infrastructure (Composite, Field, Box, Heap, TypeTag) is ONLY added
+to the program when classes/heap usage exists. For programs without classes,
+no heap declarations are emitted — they would reference undefined types (Field,
+Box) and break Core. `heapConstants.types` is NOT added unconditionally.
+
 ### What Elaboration Does NOT Do
 
 - No Python-specific logic (language-independent)
