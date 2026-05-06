@@ -52,22 +52,27 @@ open Strata.Python.Resolution
 
 public section
 
-/-! ## FGL Abbreviations (Unit-annotated for elaboration output) -/
+/-! ## FGL Abbreviations (MetaData-annotated per ARCHITECTURE.md §Interaction Law) -/
 
-/-- FGL Value with no source annotation (elaboration output). -/
-abbrev FValue := Value Unit
+/-- The FGL annotation type: source metadata from Laurel expressions.
+    Per the Monad-Comonad Interaction Law, every FGL node carries the metadata
+    of the input Laurel expression it was derived from. -/
+abbrev FMd := Laurel.MetaData
 
-/-- FGL Producer with no source annotation (elaboration output). -/
-abbrev FProducer := Producer Unit
+/-- FGL Value carrying source metadata. -/
+abbrev FValue := Value FMd
 
-/-- FGL LaurelType with no source annotation. -/
-abbrev FLaurelType := FineGrainLaurel.LaurelType Unit
+/-- FGL Producer carrying source metadata. -/
+abbrev FProducer := Producer FMd
 
-/-- FGL Invariant with no source annotation. -/
-abbrev FInvariant := Invariant Unit
+/-- FGL LaurelType carrying source metadata. -/
+abbrev FLaurelType := FineGrainLaurel.LaurelType FMd
 
-/-- Make an Ann with unit annotation -/
-def mkAnn (v : β) : Strata.Ann β Unit := ⟨(), v⟩
+/-- FGL Invariant carrying source metadata. -/
+abbrev FInvariant := Invariant FMd
+
+/-- Make an Ann with metadata annotation -/
+def mkAnn (md : FMd) (v : β) : Strata.Ann β FMd := ⟨md, v⟩
 
 /-! ## Elaboration Environment -/
 
@@ -126,24 +131,26 @@ def isConcrete (ty : HighType) : Bool := !isAny ty && !highTypeEq ty .Unknown
 
 /-! ## Converting HighType to FGL LaurelType -/
 
-/-- Convert a HighType to the FGL LaurelType representation. -/
-def highTypeToFGL : HighType → FLaurelType
-  | .TInt => .intType ()
-  | .TBool => .boolType ()
-  | .TFloat64 => .float64Type ()
-  | .TReal => .realType ()
-  | .TString => .stringType ()
-  | .TCore s => .coreType () (mkAnn s)
-  | .UserDefined name => .compositeType () (mkAnn name.text)
-  | .TVoid => .coreType () (mkAnn "Void")
-  | .THeap => .coreType () (mkAnn "Heap")
-  | .Unknown => .coreType () (mkAnn "Any")
-  | .TMap k v => .mapType () (highTypeToFGL k.val) (highTypeToFGL v.val)
-  | .TSet _ => .coreType () (mkAnn "Any")
-  | .TTypedField _ => .coreType () (mkAnn "Any")
-  | .Applied _ _ => .coreType () (mkAnn "Any")
-  | .Pure _ => .coreType () (mkAnn "Any")
-  | .Intersection _ => .coreType () (mkAnn "Any")
+/-- Convert a HighType to the FGL LaurelType representation.
+    Takes `md` (source metadata) per the interaction law: synthesized nodes
+    inherit the parent expression's metadata. -/
+def highTypeToFGL (md : FMd) : HighType → FLaurelType
+  | .TInt => .intType md
+  | .TBool => .boolType md
+  | .TFloat64 => .float64Type md
+  | .TReal => .realType md
+  | .TString => .stringType md
+  | .TCore s => .coreType md (mkAnn md s)
+  | .UserDefined name => .compositeType md (mkAnn md name.text)
+  | .TVoid => .coreType md (mkAnn md "Void")
+  | .THeap => .coreType md (mkAnn md "Heap")
+  | .Unknown => .coreType md (mkAnn md "Any")
+  | .TMap k v => .mapType md (highTypeToFGL md k.val) (highTypeToFGL md v.val)
+  | .TSet _ => .coreType md (mkAnn md "Any")
+  | .TTypedField _ => .coreType md (mkAnn md "Any")
+  | .Applied _ _ => .coreType md (mkAnn md "Any")
+  | .Pure _ => .coreType md (mkAnn md "Any")
+  | .Intersection _ => .coreType md (mkAnn md "Any")
 
 /-! ## Subtyping and Coercion Logic -/
 
@@ -170,18 +177,19 @@ def canNarrow (source target : HighType) : Bool :=
   isAny source && isConcrete target
 
 /-- Insert upcast coercion (concrete → Any): a Value-level operation.
-    Wraps the value in the appropriate valFrom* constructor. -/
-def insertFGLUpcast (val : FValue) (sourceTy : HighType) : FValue :=
+    Wraps the value in the appropriate valFrom* constructor.
+    Takes `md` per the interaction law: coercion inherits parent metadata. -/
+def insertFGLUpcast (md : FMd) (val : FValue) (sourceTy : HighType) : FValue :=
   match sourceTy with
-  | .TInt => .valFromInt () val
-  | .TBool => .valFromBool () val
-  | .TString => .valFromStr () val
-  | .TFloat64 => .valFromFloat () val
-  | .TReal => .valFromFloat () val
-  | .UserDefined _ => .valFromComposite () val
-  | .TVoid => .valFromNone ()
-  | .TCore "ListAny" => .valFromListAny () val
-  | .TCore "DictStrAny" => .valFromDictStrAny () val
+  | .TInt => .valFromInt md val
+  | .TBool => .valFromBool md val
+  | .TString => .valFromStr md val
+  | .TFloat64 => .valFromFloat md val
+  | .TReal => .valFromFloat md val
+  | .UserDefined _ => .valFromComposite md val
+  | .TVoid => .valFromNone md
+  | .TCore "ListAny" => .valFromListAny md val
+  | .TCore "DictStrAny" => .valFromDictStrAny md val
   | _ => val  -- unknown concrete types: pass through without coercion
 
 /-- Get the narrowing function name for Any → concrete. -/
@@ -249,41 +257,42 @@ mutual
     Returns (FGL.Value, HighType). -/
 partial def synthValue (expr : StmtExprMd) : ElabM (FValue × HighType) := do
   let env ← read
+  let md := expr.md
   match expr.val with
   | .LiteralInt n =>
-    pure (.valLiteralInt () (mkAnn n.toNat), .TInt)
+    pure (.valLiteralInt md (mkAnn md n.toNat), .TInt)
 
   | .LiteralBool b =>
-    pure (.valLiteralBool () (mkAnn b), .TBool)
+    pure (.valLiteralBool md (mkAnn md b), .TBool)
 
   | .LiteralString s =>
-    pure (.valLiteralString () (mkAnn s), .TString)
+    pure (.valLiteralString md (mkAnn md s), .TString)
 
   | .LiteralDecimal d =>
-    pure (.valLiteralReal () (mkAnn d), .TReal)
+    pure (.valLiteralReal md (mkAnn md d), .TReal)
 
   | .Identifier name =>
     let ty := lookupNameType env name.text
-    pure (.valVar () (mkAnn name.text), ty)
+    pure (.valVar md (mkAnn md name.text), ty)
 
   | .FieldSelect target field => do
     let (targetVal, receiverTy) ← synthValue target
     let fieldTy := lookupFieldType env receiverTy field.text
-    pure (.valFieldAccess () targetVal (mkAnn field.text), fieldTy)
+    pure (.valFieldAccess md targetVal (mkAnn md field.text), fieldTy)
 
   -- Hole: used for nondeterministic values (e.g., havoc in for-loops)
   -- In value position, Holes represent unknown constants. Project as $Hole variable
   -- which is safe since Holes are always assigned to variables (never used directly).
   | .Hole _det tyOpt =>
     let ty := tyOpt.map (·.val) |>.getD (.TCore "Any")
-    pure (.valVar () (mkAnn "$Hole_val"), ty)
+    pure (.valVar md (mkAnn md "$Hole_val"), ty)
 
   -- PrimitiveOp: value-level operations (comparison, arithmetic at Laurel level).
   -- These are used by downstream passes (e.g., heapParameterization, modifies clauses)
   -- but rarely appear in Translation output. Pass through with Any type.
   -- Use $PrimOp_val sentinel that projects back to a placeholder.
   | .PrimitiveOp _op _args =>
-    pure (.valVar () (mkAnn "$PrimOp_val"), .TCore "Any")
+    pure (.valVar md (mkAnn md "$PrimOp_val"), .TCore "Any")
 
   -- For expressions that are naturally Producers, we must bind them to get a Value.
   -- IMPORTANT: Only call synthProducer for known Producer forms to avoid infinite
@@ -293,12 +302,12 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FValue × HighType) := do
     .Assert .. | .Assume .. | .Exit .. => do
     let (_prod, ty) ← synthProducer expr
     let tmp ← freshVar "v"
-    pure (.valVar () (mkAnn tmp), ty)
+    pure (.valVar md (mkAnn md tmp), ty)
 
   -- Fallback for any other constructors: return as Any-typed variable
   -- This prevents infinite recursion between synthValue and synthProducer
   | _ =>
-    pure (.valVar () (mkAnn "$unknown"), .TCore "Any")
+    pure (.valVar md (mkAnn md "$unknown"), .TCore "Any")
 
 /-- Check a Laurel expression AS a Value against an expected type.
     Inserts upcast (subtyping) coercion if needed. Value→Value only.
@@ -306,12 +315,13 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FValue × HighType) := do
     the caller must use checkProducer instead. -/
 partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FValue := do
   let (val, actual) ← synthValue expr
+  let md := expr.md
   if isSubtype actual expected then
     -- Types match (or are trivially compatible) -- no coercion needed
     pure val
   else if canUpcast actual expected then
     -- Subtyping: concrete <: Any -- insert valFrom* (stays in value judgment)
-    pure (insertFGLUpcast val actual)
+    pure (insertFGLUpcast md val actual)
   else if canNarrow actual expected then
     -- ARCHITECTURE GAP: narrowing requires producing a Producer, but checkValue
     -- returns Value. The caller should have used checkProducer for this case.
@@ -327,6 +337,7 @@ partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FValue 
     Returns (FGL.Producer, HighType). -/
 partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) := do
   let env ← read
+  let md := expr.md
   match expr.val with
 
   -- Calls: the primary Producer form
@@ -350,13 +361,13 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
         let xVar ← freshVar "scX"
         let condVar ← freshVar "scCond"
         let (rightProd, _) ← synthProducer right
-        let narrowCall := Producer.prodCall () (mkAnn "Any_to_bool")
-                            (mkAnn #[Value.valVar () (mkAnn xVar)])
-        pure (.prodLetProd () (mkAnn xVar) (.coreType () (mkAnn "Any")) leftProd
-          (.prodLetProd () (mkAnn condVar) (.boolType ()) narrowCall
-            (.prodIfThenElse () (.valVar () (mkAnn condVar))
+        let narrowCall := Producer.prodCall md (mkAnn md "Any_to_bool")
+                            (mkAnn md #[Value.valVar md (mkAnn md xVar)])
+        pure (.prodLetProd md (mkAnn md xVar) (.coreType md (mkAnn md "Any")) leftProd
+          (.prodLetProd md (mkAnn md condVar) (.boolType md) narrowCall
+            (.prodIfThenElse md (.valVar md (mkAnn md condVar))
               rightProd
-              (.prodReturnValue () (.valVar () (mkAnn xVar))))), .TCore "Any")
+              (.prodReturnValue md (.valVar md (mkAnn md xVar))))), .TCore "Any")
     | "POr", [left, right] =>
         -- Architecture-specified FGL form for POr (always desugars):
         -- prodLetProd "x" Any (elaborate a)
@@ -368,12 +379,12 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
         let xVar ← freshVar "scX"
         let condVar ← freshVar "scCond"
         let (rightProd, _) ← synthProducer right
-        let narrowCall := Producer.prodCall () (mkAnn "Any_to_bool")
-                            (mkAnn #[Value.valVar () (mkAnn xVar)])
-        pure (.prodLetProd () (mkAnn xVar) (.coreType () (mkAnn "Any")) leftProd
-          (.prodLetProd () (mkAnn condVar) (.boolType ()) narrowCall
-            (.prodIfThenElse () (.valVar () (mkAnn condVar))
-              (.prodReturnValue () (.valVar () (mkAnn xVar)))
+        let narrowCall := Producer.prodCall md (mkAnn md "Any_to_bool")
+                            (mkAnn md #[Value.valVar md (mkAnn md xVar)])
+        pure (.prodLetProd md (mkAnn md xVar) (.coreType md (mkAnn md "Any")) leftProd
+          (.prodLetProd md (mkAnn md condVar) (.boolType md) narrowCall
+            (.prodIfThenElse md (.valVar md (mkAnn md condVar))
+              (.prodReturnValue md (.valVar md (mkAnn md xVar)))
               rightProd)), .TCore "Any")
     | _, _ =>
       synthStaticCall callee args expr
@@ -393,12 +404,12 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
     let call ← if hasError then do
         let resultVar ← freshVar "res"
         let errorVar ← freshVar "err"
-        pure (.prodCallWithError () (mkAnn qualName) (mkAnn allArgs.toArray)
-          (mkAnn resultVar) (mkAnn errorVar)
-          (highTypeToFGL retTy) (.coreType () (mkAnn "Error"))
-          (.prodReturnValue () (.valVar () (mkAnn resultVar))) : FProducer)
+        pure (.prodCallWithError md (mkAnn md qualName) (mkAnn md allArgs.toArray)
+          (mkAnn md resultVar) (mkAnn md errorVar)
+          (highTypeToFGL md retTy) (.coreType md (mkAnn md "Error"))
+          (.prodReturnValue md (.valVar md (mkAnn md resultVar))) : FProducer)
       else
-        pure (.prodCall () (mkAnn qualName) (mkAnn allArgs.toArray) : FProducer)
+        pure (.prodCall md (mkAnn md qualName) (mkAnn md allArgs.toArray) : FProducer)
     pure (call, retTy)
 
   | .New name =>
@@ -406,8 +417,8 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
     -- For now emit a prodCall placeholder
     let ty := HighType.UserDefined name
     let tmp ← freshVar "obj"
-    pure (.prodNew () (mkAnn name.text) (mkAnn tmp) (highTypeToFGL ty)
-      (.prodReturnValue () (.valVar () (mkAnn tmp))), ty)
+    pure (.prodNew md (mkAnn md name.text) (mkAnn md tmp) (highTypeToFGL md ty)
+      (.prodReturnValue md (.valVar md (mkAnn md tmp))), ty)
 
   -- Assign: target := value; continuation
   | .Assign targets value => do
@@ -423,46 +434,46 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
         -- Optimization: if the RHS is a simple value (prodReturnValue), skip let-binding
         match rhsProd with
         | .prodReturnValue _ rhsVal =>
-          pure (.prodAssign () targetVal rhsVal
-            (.prodReturnValue () rhsVal), expectedTy)
+          pure (.prodAssign md targetVal rhsVal
+            (.prodReturnValue md rhsVal), expectedTy)
         | _ =>
           let tmp ← freshVar "rhs"
-          pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL rhsTy) rhsProd
-            (.prodAssign () targetVal (.valVar () (mkAnn tmp))
-              (.prodReturnValue () (.valVar () (mkAnn tmp)))), expectedTy)
+          pure (.prodLetProd md (mkAnn md tmp) (highTypeToFGL md rhsTy) rhsProd
+            (.prodAssign md targetVal (.valVar md (mkAnn md tmp))
+              (.prodReturnValue md (.valVar md (mkAnn md tmp)))), expectedTy)
       else if canUpcast rhsTy expectedTy then
         -- RHS is concrete, target is Any.
         -- Optimization: if RHS is a simple value, directly upcast without let-binding
         match rhsProd with
         | .prodReturnValue _ rhsVal =>
-          let upcasted := insertFGLUpcast rhsVal rhsTy
-          pure (.prodAssign () targetVal upcasted
-            (.prodReturnValue () upcasted), expectedTy)
+          let upcasted := insertFGLUpcast md rhsVal rhsTy
+          pure (.prodAssign md targetVal upcasted
+            (.prodReturnValue md upcasted), expectedTy)
         | _ =>
           let tmp ← freshVar "rhs"
-          let upcasted := insertFGLUpcast (.valVar () (mkAnn tmp)) rhsTy
-          pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL rhsTy) rhsProd
-            (.prodAssign () targetVal upcasted
-              (.prodReturnValue () upcasted)), expectedTy)
+          let upcasted := insertFGLUpcast md (.valVar md (mkAnn md tmp)) rhsTy
+          pure (.prodLetProd md (mkAnn md tmp) (highTypeToFGL md rhsTy) rhsProd
+            (.prodAssign md targetVal upcasted
+              (.prodReturnValue md upcasted)), expectedTy)
       else if canNarrow rhsTy expectedTy then
         -- RHS is Any, target is concrete -- fallible downcast per ARCHITECTURE.md §Exception Monad
         let tmp ← freshVar "rhs"
         let narrowed ← freshVar "narrowed"
         let errorVar ← freshVar "err"
-        let narrowProd := Producer.prodCallWithError () (mkAnn (narrowFuncName expectedTy))
-                            (mkAnn #[Value.valVar () (mkAnn tmp)])
-                            (mkAnn narrowed) (mkAnn errorVar)
-                            (highTypeToFGL expectedTy) (.coreType () (mkAnn "Error"))
-                            (.prodAssign () targetVal (.valVar () (mkAnn narrowed))
-                              (.prodReturnValue () (.valVar () (mkAnn narrowed))))
-        pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL rhsTy) rhsProd
+        let narrowProd := Producer.prodCallWithError md (mkAnn md (narrowFuncName expectedTy))
+                            (mkAnn md #[Value.valVar md (mkAnn md tmp)])
+                            (mkAnn md narrowed) (mkAnn md errorVar)
+                            (highTypeToFGL md expectedTy) (.coreType md (mkAnn md "Error"))
+                            (.prodAssign md targetVal (.valVar md (mkAnn md narrowed))
+                              (.prodReturnValue md (.valVar md (mkAnn md narrowed))))
+        pure (.prodLetProd md (mkAnn md tmp) (highTypeToFGL md rhsTy) rhsProd
           narrowProd, expectedTy)
       else
         -- Default: bind and assign without coercion
         let tmp ← freshVar "rhs"
-        pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL rhsTy) rhsProd
-          (.prodAssign () targetVal (.valVar () (mkAnn tmp))
-            (.prodReturnValue () (.valVar () (mkAnn tmp)))), rhsTy)
+        pure (.prodLetProd md (mkAnn md tmp) (highTypeToFGL md rhsTy) rhsProd
+          (.prodAssign md targetVal (.valVar md (mkAnn md tmp))
+            (.prodReturnValue md (.valVar md (mkAnn md tmp)))), rhsTy)
     | _ => do
       -- Multi-target assign (tuple unpacking) -- emit as plain prodCall for now
       -- ARCHITECTURE GAP: full tuple unpacking
@@ -471,9 +482,9 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
 
   -- Block: nested prodLetProd via foldr. Preserve label for break/continue.
   | .Block stmts label => do
-    let (blockProd, blockTy) ← elaborateBlock stmts
+    let (blockProd, blockTy) ← elaborateBlock stmts md
     match label with
-    | some lbl => pure (.prodLabeledBlock () (mkAnn lbl) blockProd, blockTy)
+    | some lbl => pure (.prodLabeledBlock md (mkAnn md lbl) blockProd, blockTy)
     | none => pure (blockProd, blockTy)
 
   -- IfThenElse: condition must be bool, branches are producers
@@ -483,18 +494,18 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
     let (thenProd, thenTy) ← synthProducer thenBr
     let (elseProd, _) ← match elseBr with
       | some e => synthProducer e
-      | none => pure (.prodReturnValue () (.valLiteralBool () (mkAnn false)), .TVoid)
-    pure (.prodLetProd () (mkAnn condTmp) (.boolType ()) condProd
-      (.prodIfThenElse () (.valVar () (mkAnn condTmp)) thenProd elseProd), thenTy)
+      | none => pure (.prodReturnValue md (.valLiteralBool md (mkAnn md false)), .TVoid)
+    pure (.prodLetProd md (mkAnn md condTmp) (.boolType md) condProd
+      (.prodIfThenElse md (.valVar md (mkAnn md condTmp)) thenProd elseProd), thenTy)
 
   -- While loop
   | .While cond _invs _decreases body => do
     let condProd ← checkProducer cond .TBool
     let condTmp ← freshVar "whileCond"
     let (bodyProd, _) ← synthProducer body
-    pure (.prodLetProd () (mkAnn condTmp) (.boolType ()) condProd
-      (.prodWhile () (.valVar () (mkAnn condTmp)) (mkAnn #[]) bodyProd
-        (.prodReturnValue () (.valLiteralBool () (mkAnn true)))), .TVoid)
+    pure (.prodLetProd md (mkAnn md condTmp) (.boolType md) condProd
+      (.prodWhile md (.valVar md (mkAnn md condTmp)) (mkAnn md #[]) bodyProd
+        (.prodReturnValue md (.valLiteralBool md (mkAnn md true)))), .TVoid)
 
   -- LocalVariable: var x: T := init; continuation
   | .LocalVariable name ty init => do
@@ -505,45 +516,45 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
       -- Types dispatch: even a simple value will elaborate to prodReturnValue.
       let (initProd, _initTy) ← synthProducer initExpr
       let tmp ← freshVar "init"
-      pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL ty.val) initProd
-        (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val)
-          (.valVar () (mkAnn tmp))
-          (.prodReturnValue () (.valVar () (mkAnn name.text)))), ty.val)
+      pure (.prodLetProd md (mkAnn md tmp) (highTypeToFGL md ty.val) initProd
+        (.prodVarDecl md (mkAnn md name.text) (highTypeToFGL md ty.val)
+          (.valVar md (mkAnn md tmp))
+          (.prodReturnValue md (.valVar md (mkAnn md name.text)))), ty.val)
     | none => do
       -- Declaration without initialization: use $uninit sentinel.
       -- Projection recognizes this and emits LocalVariable name ty none.
-      pure (.prodVarDecl () (mkAnn name.text) (highTypeToFGL ty.val)
-        (.valVar () (mkAnn "$uninit"))
-        (.prodReturnValue () (.valVar () (mkAnn name.text))), ty.val)
+      pure (.prodVarDecl md (mkAnn md name.text) (highTypeToFGL md ty.val)
+        (.valVar md (mkAnn md "$uninit"))
+        (.prodReturnValue md (.valVar md (mkAnn md name.text))), ty.val)
 
   -- Return
   | .Return value => do
     match value with
     | some v => do
       let retVal ← checkValue v env.currentReturnType
-      pure (.prodReturnValue () retVal, env.currentReturnType)
+      pure (.prodReturnValue md retVal, env.currentReturnType)
     | none =>
-      pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TVoid)
+      pure (.prodReturnValue md (.valLiteralBool md (mkAnn md true)), .TVoid)
 
   -- Assert
   | .Assert cond => do
     let condProd ← checkProducer cond .TBool
     let condTmp ← freshVar "assertCond"
-    pure (.prodLetProd () (mkAnn condTmp) (.boolType ()) condProd
-      (.prodAssert () (.valVar () (mkAnn condTmp))
-        (.prodReturnValue () (.valLiteralBool () (mkAnn true)))), .TVoid)
+    pure (.prodLetProd md (mkAnn md condTmp) (.boolType md) condProd
+      (.prodAssert md (.valVar md (mkAnn md condTmp))
+        (.prodReturnValue md (.valLiteralBool md (mkAnn md true)))), .TVoid)
 
   -- Assume
   | .Assume cond => do
     let condProd ← checkProducer cond .TBool
     let condTmp ← freshVar "assumeCond"
-    pure (.prodLetProd () (mkAnn condTmp) (.boolType ()) condProd
-      (.prodAssume () (.valVar () (mkAnn condTmp))
-        (.prodReturnValue () (.valLiteralBool () (mkAnn true)))), .TVoid)
+    pure (.prodLetProd md (mkAnn md condTmp) (.boolType md) condProd
+      (.prodAssume md (.valVar md (mkAnn md condTmp))
+        (.prodReturnValue md (.valLiteralBool md (mkAnn md true)))), .TVoid)
 
   -- Exit (break/continue label) — per ARCHITECTURE.md §"Break/Continue Labels"
   | .Exit label =>
-    pure (.prodExit () (mkAnn label), .TVoid)
+    pure (.prodExit md (mkAnn md label), .TVoid)
 
   -- Hole: nondeterministic/deterministic values - pass through unchanged.
   -- The Hole is preserved as a StaticCall to a special sentinel that projectProducer
@@ -561,7 +572,7 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
     -- But since we need to return FGL types, use prodCall "$Hole" which projects to StaticCall "$Hole".
     -- Better: we know Hole is handled by downstream holeElimination, so project it as a Hole.
     -- Use a valVar that matches the special Hole pattern. Downstream phases expect Holes.
-    pure (.prodCall () (mkAnn "$Hole") (mkAnn #[]), ty)
+    pure (.prodCall md (mkAnn md "$Hole") (mkAnn md #[]), ty)
 
   -- PrimitiveOp: direct value-level operations (comparison, arithmetic at Laurel level)
   | .PrimitiveOp _op args => do
@@ -570,44 +581,45 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
       let (argVal, _) ← synthValue arg
       checkedArgs := checkedArgs ++ [argVal]
     -- PrimitiveOps return bool or Any depending on the operation
-    pure (.prodReturnValue () (.valVar () (mkAnn "$primop")), .TCore "Any")
+    pure (.prodReturnValue md (.valVar md (mkAnn md "$primop")), .TCore "Any")
 
   -- Forall/Exists: quantifiers used in specifications
   | .Forall _param _trigger _body =>
-    pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TBool)
+    pure (.prodReturnValue md (.valLiteralBool md (mkAnn md true)), .TBool)
 
   | .Exists _param _trigger _body =>
-    pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TBool)
+    pure (.prodReturnValue md (.valLiteralBool md (mkAnn md true)), .TBool)
 
   -- Values in producer position: wrap with prodReturnValue
   | _ => do
     let (val, ty) ← synthValue expr
-    pure (.prodReturnValue () val, ty)
+    pure (.prodReturnValue md val, ty)
 
 /-- Check a Laurel expression AS a Producer against an expected type.
     Handles narrowing (Any → concrete) which produces a Producer (may fail). -/
 partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FProducer := do
   let (prod, actual) ← synthProducer expr
+  let md := expr.md
   if isSubtype actual expected then
     -- Types match -- no coercion
     pure prod
   else if canUpcast actual expected then
     -- Upcast: concrete → Any. Bind the producer, upcast the result value.
     let tmp ← freshVar "up"
-    let upcasted := insertFGLUpcast (.valVar () (mkAnn tmp)) actual
-    pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL actual) prod
-      (.prodReturnValue () upcasted))
+    let upcasted := insertFGLUpcast md (.valVar md (mkAnn md tmp)) actual
+    pure (.prodLetProd md (mkAnn md tmp) (highTypeToFGL md actual) prod
+      (.prodReturnValue md upcasted))
   else if canNarrow actual expected then
     -- Narrowing: Any → concrete. Fallible downcast per ARCHITECTURE.md §Exception Monad.
     let tmp ← freshVar "narrow"
     let resultVar ← freshVar "res"
     let errorVar ← freshVar "err"
-    let narrowCall := Producer.prodCallWithError () (mkAnn (narrowFuncName expected))
-                        (mkAnn #[Value.valVar () (mkAnn tmp)])
-                        (mkAnn resultVar) (mkAnn errorVar)
-                        (highTypeToFGL expected) (.coreType () (mkAnn "Error"))
-                        (.prodReturnValue () (.valVar () (mkAnn resultVar)))
-    pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL actual) prod narrowCall)
+    let narrowCall := Producer.prodCallWithError md (mkAnn md (narrowFuncName expected))
+                        (mkAnn md #[Value.valVar md (mkAnn md tmp)])
+                        (mkAnn md resultVar) (mkAnn md errorVar)
+                        (highTypeToFGL md expected) (.coreType md (mkAnn md "Error"))
+                        (.prodReturnValue md (.valVar md (mkAnn md resultVar)))
+    pure (.prodLetProd md (mkAnn md tmp) (highTypeToFGL md actual) prod narrowCall)
   else
     -- Types unrelated -- return unchanged
     pure prod
@@ -617,8 +629,9 @@ partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FPro
     Each effectful argument is bound to a fresh variable via prodLetProd, then the
     variable is passed to the call. -/
 partial def synthStaticCall (callee : Identifier) (args : List StmtExprMd)
-    (_expr : StmtExprMd) : ElabM (FProducer × HighType) := do
+    (expr : StmtExprMd) : ElabM (FProducer × HighType) := do
   let env ← read
+  let md := expr.md
   let sig := lookupFuncSig env callee.text
   let paramTypes := sig.map (·.params) |>.getD []
   let retTy := sig.map (·.returnType) |>.getD (.TCore "Any")
@@ -637,26 +650,26 @@ partial def synthStaticCall (callee : Identifier) (args : List StmtExprMd)
     let tmp ← freshVar "arg"
     bindings := bindings ++ [(tmp, argTy, argProd)]
     -- Check if the bound variable needs coercion to match expected type
-    let argVal : FValue := .valVar () (mkAnn tmp)
+    let argVal : FValue := .valVar md (mkAnn md tmp)
     if isSubtype argTy expectedTy || highTypeEq argTy expectedTy then
       checkedArgs := checkedArgs ++ [argVal]
     else if canUpcast argTy expectedTy then
-      checkedArgs := checkedArgs ++ [insertFGLUpcast argVal argTy]
+      checkedArgs := checkedArgs ++ [insertFGLUpcast md argVal argTy]
     else
       checkedArgs := checkedArgs ++ [argVal]
   -- Build the call
   let call ← if hasError then do
       let resultVar ← freshVar "res"
       let errorVar ← freshVar "err"
-      pure (.prodCallWithError () (mkAnn callee.text) (mkAnn checkedArgs.toArray)
-        (mkAnn resultVar) (mkAnn errorVar)
-        (highTypeToFGL retTy) (.coreType () (mkAnn "Error"))
-        (.prodReturnValue () (.valVar () (mkAnn resultVar))) : FProducer)
+      pure (.prodCallWithError md (mkAnn md callee.text) (mkAnn md checkedArgs.toArray)
+        (mkAnn md resultVar) (mkAnn md errorVar)
+        (highTypeToFGL md retTy) (.coreType md (mkAnn md "Error"))
+        (.prodReturnValue md (.valVar md (mkAnn md resultVar))) : FProducer)
     else
-      pure (.prodCall () (mkAnn callee.text) (mkAnn checkedArgs.toArray) : FProducer)
+      pure (.prodCall md (mkAnn md callee.text) (mkAnn md checkedArgs.toArray) : FProducer)
   -- Wrap the call in any let-bindings for effectful arguments
   let result := bindings.foldr (init := call) fun (name, ty, prod) body =>
-    .prodLetProd () (mkAnn name) (highTypeToFGL ty) prod body
+    .prodLetProd md (mkAnn md name) (highTypeToFGL md ty) prod body
   pure (result, retTy)
 
 /-- Helper: check a list of arguments against expected parameter types. -/
@@ -675,11 +688,12 @@ partial def checkArgs (args : List StmtExprMd)
 
 /-- Helper: synthesize a target value (for assignments). -/
 partial def synthTargetValue (target : StmtExprMd) : ElabM FValue := do
+  let md := target.md
   match target.val with
-  | .Identifier name => pure (.valVar () (mkAnn name.text))
+  | .Identifier name => pure (.valVar md (mkAnn md name.text))
   | .FieldSelect obj field => do
     let (objVal, _) ← synthValue obj
-    pure (.valFieldAccess () objVal (mkAnn field.text))
+    pure (.valFieldAccess md objVal (mkAnn md field.text))
   | _ => do
     let (val, _) ← synthValue target
     pure val
@@ -692,9 +706,9 @@ partial def synthTargetValue (target : StmtExprMd) : ElabM FValue := do
     are added to localTypes in the ElabEnv for subsequent statements. This ensures
     that later references to the variable get the correct type rather than defaulting
     to Any. -/
-partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FProducer × HighType) := do
+partial def elaborateBlock (stmts : List StmtExprMd) (md : FMd := #[]) : ElabM (FProducer × HighType) := do
   match stmts with
-  | [] => pure (.prodReturnValue () (.valLiteralBool () (mkAnn true)), .TVoid)
+  | [] => pure (.prodReturnValue md (.valLiteralBool md (mkAnn md true)), .TVoid)
   | [single] => synthProducer single
   | _ => do
     let mut prods : Array FProducer := #[]
@@ -722,7 +736,7 @@ partial def elaborateBlock (stmts : List StmtExprMd) : ElabM (FProducer × HighT
             extraLocals := extraLocals.insert name.text lastTy
         | _ => pure ()
       | _ => pure ()
-    pure (.prodBlock () (mkAnn prods), lastTy)
+    pure (.prodBlock md (mkAnn md prods), lastTy)
 
 end -- mutual
 
@@ -734,7 +748,11 @@ end -- mutual
     regular Laurel nodes. The projection is total and meaning-preserving.
     ======================================================================== -/
 
-/-- Helper to wrap a StmtExpr into StmtExprMd with empty metadata -/
+/-- Helper to wrap a StmtExpr into StmtExprMd with metadata from the FGL annotation.
+    Per ARCHITECTURE.md §Interaction Law: projection extracts the annotation. -/
+private def mkMdWith (md : FMd) (e : StmtExpr) : StmtExprMd := ⟨e, md⟩
+
+/-- Helper to wrap a StmtExpr into StmtExprMd with empty metadata (for synthesized nodes). -/
 private def mkMd (e : StmtExpr) : StmtExprMd := ⟨e, #[]⟩
 
 /-- Helper to make an Identifier from a String -/
@@ -752,53 +770,54 @@ def projectType : FLaurelType → HighTypeMd
   | .mapType _ k v => liftType (.TMap (projectType k) (projectType v))
 
 mutual
-/-- Project an FGL Value back to Laurel StmtExprMd. -/
+/-- Project an FGL Value back to Laurel StmtExprMd.
+    Extracts the annotation (source metadata) and propagates it to the output node. -/
 partial def projectValue : FValue → StmtExprMd
-  | .valLiteralInt _ n => mkMd (.LiteralInt n.val)
-  | .valLiteralBool _ b => mkMd (.LiteralBool b.val)
-  | .valLiteralReal _ d => mkMd (.LiteralDecimal d.val)
-  | .valLiteralString _ s => mkMd (.LiteralString s.val)
-  | .valVar _ name =>
+  | .valLiteralInt ann n => mkMdWith ann (.LiteralInt n.val)
+  | .valLiteralBool ann b => mkMdWith ann (.LiteralBool b.val)
+  | .valLiteralReal ann d => mkMdWith ann (.LiteralDecimal d.val)
+  | .valLiteralString ann s => mkMdWith ann (.LiteralString s.val)
+  | .valVar ann name =>
     -- Recognize $Hole_val sentinel: project back to a proper Hole node
     if name.val == "$Hole_val" then
-      mkMd (.Hole (deterministic := false))
+      mkMdWith ann (.Hole (deterministic := false))
     else
-      mkMd (.Identifier (mkId name.val))
-  | .valAdd _ l r => mkMd (.PrimitiveOp .Add [projectValue l, projectValue r])
-  | .valSub _ l r => mkMd (.PrimitiveOp .Sub [projectValue l, projectValue r])
-  | .valMul _ l r => mkMd (.PrimitiveOp .Mul [projectValue l, projectValue r])
-  | .valDiv _ l r => mkMd (.PrimitiveOp .Div [projectValue l, projectValue r])
-  | .valMod _ l r => mkMd (.PrimitiveOp .Mod [projectValue l, projectValue r])
-  | .valEq _ l r => mkMd (.PrimitiveOp .Eq [projectValue l, projectValue r])
-  | .valNeq _ l r => mkMd (.PrimitiveOp .Neq [projectValue l, projectValue r])
-  | .valLt _ l r => mkMd (.PrimitiveOp .Lt [projectValue l, projectValue r])
-  | .valLe _ l r => mkMd (.PrimitiveOp .Leq [projectValue l, projectValue r])
-  | .valGt _ l r => mkMd (.PrimitiveOp .Gt [projectValue l, projectValue r])
-  | .valGe _ l r => mkMd (.PrimitiveOp .Geq [projectValue l, projectValue r])
-  | .valAnd _ l r => mkMd (.PrimitiveOp .And [projectValue l, projectValue r])
-  | .valOr _ l r => mkMd (.PrimitiveOp .Or [projectValue l, projectValue r])
-  | .valNot _ inner => mkMd (.PrimitiveOp .Not [projectValue inner])
-  | .valNeg _ inner => mkMd (.PrimitiveOp .Neg [projectValue inner])
-  | .valFieldAccess _ obj field =>
-    mkMd (.FieldSelect (projectValue obj) (mkId field.val))
+      mkMdWith ann (.Identifier (mkId name.val))
+  | .valAdd ann l r => mkMdWith ann (.PrimitiveOp .Add [projectValue l, projectValue r])
+  | .valSub ann l r => mkMdWith ann (.PrimitiveOp .Sub [projectValue l, projectValue r])
+  | .valMul ann l r => mkMdWith ann (.PrimitiveOp .Mul [projectValue l, projectValue r])
+  | .valDiv ann l r => mkMdWith ann (.PrimitiveOp .Div [projectValue l, projectValue r])
+  | .valMod ann l r => mkMdWith ann (.PrimitiveOp .Mod [projectValue l, projectValue r])
+  | .valEq ann l r => mkMdWith ann (.PrimitiveOp .Eq [projectValue l, projectValue r])
+  | .valNeq ann l r => mkMdWith ann (.PrimitiveOp .Neq [projectValue l, projectValue r])
+  | .valLt ann l r => mkMdWith ann (.PrimitiveOp .Lt [projectValue l, projectValue r])
+  | .valLe ann l r => mkMdWith ann (.PrimitiveOp .Leq [projectValue l, projectValue r])
+  | .valGt ann l r => mkMdWith ann (.PrimitiveOp .Gt [projectValue l, projectValue r])
+  | .valGe ann l r => mkMdWith ann (.PrimitiveOp .Geq [projectValue l, projectValue r])
+  | .valAnd ann l r => mkMdWith ann (.PrimitiveOp .And [projectValue l, projectValue r])
+  | .valOr ann l r => mkMdWith ann (.PrimitiveOp .Or [projectValue l, projectValue r])
+  | .valNot ann inner => mkMdWith ann (.PrimitiveOp .Not [projectValue inner])
+  | .valNeg ann inner => mkMdWith ann (.PrimitiveOp .Neg [projectValue inner])
+  | .valFieldAccess ann obj field =>
+    mkMdWith ann (.FieldSelect (projectValue obj) (mkId field.val))
   | .valParens _ inner => projectValue inner
   -- Upcast coercions: project as StaticCall with the coercion function name
-  | .valFromInt _ inner =>
-    mkMd (.StaticCall (mkId "from_int") [projectValue inner])
-  | .valFromStr _ inner =>
-    mkMd (.StaticCall (mkId "from_str") [projectValue inner])
-  | .valFromBool _ inner =>
-    mkMd (.StaticCall (mkId "from_bool") [projectValue inner])
-  | .valFromFloat _ inner =>
-    mkMd (.StaticCall (mkId "from_float") [projectValue inner])
-  | .valFromComposite _ inner =>
-    mkMd (.StaticCall (mkId "from_Composite") [projectValue inner])
-  | .valFromListAny _ inner =>
-    mkMd (.StaticCall (mkId "from_ListAny") [projectValue inner])
-  | .valFromDictStrAny _ inner =>
-    mkMd (.StaticCall (mkId "from_DictStrAny") [projectValue inner])
-  | .valFromNone _ =>
-    mkMd (.StaticCall (mkId "from_None") [])
+  | .valFromInt ann inner =>
+    mkMdWith ann (.StaticCall (mkId "from_int") [projectValue inner])
+  | .valFromStr ann inner =>
+    mkMdWith ann (.StaticCall (mkId "from_str") [projectValue inner])
+  | .valFromBool ann inner =>
+    mkMdWith ann (.StaticCall (mkId "from_bool") [projectValue inner])
+  | .valFromFloat ann inner =>
+    mkMdWith ann (.StaticCall (mkId "from_float") [projectValue inner])
+  | .valFromComposite ann inner =>
+    mkMdWith ann (.StaticCall (mkId "from_Composite") [projectValue inner])
+  | .valFromListAny ann inner =>
+    mkMdWith ann (.StaticCall (mkId "from_ListAny") [projectValue inner])
+  | .valFromDictStrAny ann inner =>
+    mkMdWith ann (.StaticCall (mkId "from_DictStrAny") [projectValue inner])
+  | .valFromNone ann =>
+    mkMdWith ann (.StaticCall (mkId "from_None") [])
 
 /-- Split a producer into (prefix statements, terminal expression).
     The terminal is what the producer "produces" — the value that would be
@@ -810,107 +829,107 @@ partial def projectValue : FValue → StmtExprMd
 partial def splitProducer : FProducer → (List StmtExprMd) × StmtExprMd
   | .prodReturnValue _ val => ([], projectValue val)
 
-  | .prodCall _ callee args =>
+  | .prodCall ann callee args =>
     if callee.val == "$Hole" then
-      ([], mkMd (.Hole (deterministic := false)))
+      ([], mkMdWith ann (.Hole (deterministic := false)))
     else
-      ([], mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue)))
+      ([], mkMdWith ann (.StaticCall (mkId callee.val) (args.val.toList.map projectValue)))
 
-  | .prodLetProd _ var ty prod body =>
+  | .prodLetProd ann var ty prod body =>
     let (mStmts, mExpr) := splitProducer prod
-    let xDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some mExpr))
+    let xDecl := mkMdWith ann (.LocalVariable (mkId var.val) (projectType ty) (some mExpr))
     let (bodyStmts, bodyExpr) := splitProducer body
     (mStmts ++ [xDecl] ++ bodyStmts, bodyExpr)
 
-  | .prodLetValue _ var ty val body =>
+  | .prodLetValue ann var ty val body =>
     let valExpr := projectValue val
-    let varDecl := mkMd (.LocalVariable (mkId var.val) (projectType ty) (some valExpr))
+    let varDecl := mkMdWith ann (.LocalVariable (mkId var.val) (projectType ty) (some valExpr))
     let (bodyStmts, bodyExpr) := splitProducer body
     ([varDecl] ++ bodyStmts, bodyExpr)
 
-  | .prodAssign _ target val body =>
-    let assignStmt := mkMd (.Assign [projectValue target] (projectValue val))
+  | .prodAssign ann target val body =>
+    let assignStmt := mkMdWith ann (.Assign [projectValue target] (projectValue val))
     let (bodyStmts, bodyExpr) := splitProducer body
     ([assignStmt] ++ bodyStmts, bodyExpr)
 
-  | .prodVarDecl _ name ty init body =>
+  | .prodVarDecl ann name ty init body =>
     match init with
     | .valVar _ sentinel =>
       if sentinel.val == "$uninit" then
         -- Scope-hoisted declaration with no initializer
-        let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) none)
+        let decl := mkMdWith ann (.LocalVariable (mkId name.val) (projectType ty) none)
         let (bodyStmts, bodyExpr) := splitProducer body
         ([decl] ++ bodyStmts, bodyExpr)
       else
-        let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
+        let decl := mkMdWith ann (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
         let (bodyStmts, bodyExpr) := splitProducer body
         ([decl] ++ bodyStmts, bodyExpr)
     | _ =>
-      let decl := mkMd (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
+      let decl := mkMdWith ann (.LocalVariable (mkId name.val) (projectType ty) (some (projectValue init)))
       let (bodyStmts, bodyExpr) := splitProducer body
       ([decl] ++ bodyStmts, bodyExpr)
 
-  | .prodAssert _ cond body =>
-    let assertStmt := mkMd (.Assert (projectValue cond))
+  | .prodAssert ann cond body =>
+    let assertStmt := mkMdWith ann (.Assert (projectValue cond))
     let (bodyStmts, bodyExpr) := splitProducer body
     ([assertStmt] ++ bodyStmts, bodyExpr)
 
-  | .prodAssume _ cond body =>
-    let assumeStmt := mkMd (.Assume (projectValue cond))
+  | .prodAssume ann cond body =>
+    let assumeStmt := mkMdWith ann (.Assume (projectValue cond))
     let (bodyStmts, bodyExpr) := splitProducer body
     ([assumeStmt] ++ bodyStmts, bodyExpr)
 
-  | .prodIfThenElse _ cond thenBr elseBr =>
+  | .prodIfThenElse ann cond thenBr elseBr =>
     let condExpr := projectValue cond
     let thenExpr := projectProducer thenBr
     let elseExpr := projectProducer elseBr
-    ([], mkMd (.IfThenElse condExpr thenExpr (some elseExpr)))
+    ([], mkMdWith ann (.IfThenElse condExpr thenExpr (some elseExpr)))
 
-  | .prodWhile _ cond _invs body after =>
+  | .prodWhile ann cond _invs body after =>
     let condExpr := projectValue cond
     let bodyExpr := projectProducer body
-    let whileStmt := mkMd (.While condExpr [] none bodyExpr)
+    let whileStmt := mkMdWith ann (.While condExpr [] none bodyExpr)
     let (afterStmts, afterExpr) := splitProducer after
     ([whileStmt] ++ afterStmts, afterExpr)
 
-  | .prodNew _ name resultVar ty body =>
-    let newExpr := mkMd (.New (mkId name.val))
-    let varDecl := mkMd (.LocalVariable (mkId resultVar.val) (projectType ty) (some newExpr))
+  | .prodNew ann name resultVar ty body =>
+    let newExpr := mkMdWith ann (.New (mkId name.val))
+    let varDecl := mkMdWith ann (.LocalVariable (mkId resultVar.val) (projectType ty) (some newExpr))
     let (bodyStmts, bodyExpr) := splitProducer body
     ([varDecl] ++ bodyStmts, bodyExpr)
 
-  | .prodCallWithError _ callee args resultVar errorVar resultTy _errorTy body =>
-    let rDecl := mkMd (.LocalVariable (mkId resultVar.val) (projectType resultTy) none)
-    let eDecl := mkMd (.LocalVariable (mkId errorVar.val) (liftType (.TCore "Error")) none)
-    let callExpr := mkMd (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))
-    let resultRef := mkMd (.Identifier (mkId resultVar.val))
-    let errorRef := mkMd (.Identifier (mkId errorVar.val))
-    let callAssign := mkMd (.Assign [resultRef, errorRef] callExpr)
-    let isErrorCall := mkMd (.StaticCall (mkId "isError") [errorRef])
+  | .prodCallWithError ann callee args resultVar errorVar resultTy _errorTy body =>
+    let rDecl := mkMdWith ann (.LocalVariable (mkId resultVar.val) (projectType resultTy) none)
+    let eDecl := mkMdWith ann (.LocalVariable (mkId errorVar.val) (liftType (.TCore "Error")) none)
+    let callExpr := mkMdWith ann (.StaticCall (mkId callee.val) (args.val.toList.map projectValue))
+    let resultRef := mkMdWith ann (.Identifier (mkId resultVar.val))
+    let errorRef := mkMdWith ann (.Identifier (mkId errorVar.val))
+    let callAssign := mkMdWith ann (.Assign [resultRef, errorRef] callExpr)
+    let isErrorCall := mkMdWith ann (.StaticCall (mkId "isError") [errorRef])
     -- Error propagation: wrap in exception() to produce Any (the common return type).
     -- exception : Error → Any is the prelude's error-wrapping constructor.
-    let exceptionWrapped := mkMd (.StaticCall (mkId "exception") [errorRef])
-    let errCheck := mkMd (.IfThenElse isErrorCall (mkMd (.Return (some exceptionWrapped))) none)
+    let exceptionWrapped := mkMdWith ann (.StaticCall (mkId "exception") [errorRef])
+    let errCheck := mkMdWith ann (.IfThenElse isErrorCall (mkMdWith ann (.Return (some exceptionWrapped))) none)
     let (bodyStmts, bodyExpr) := splitProducer body
     ([rDecl, eDecl, callAssign, errCheck] ++ bodyStmts, bodyExpr)
 
-  | .prodExit _ label =>
-    ([], mkMd (.Exit label.val))
+  | .prodExit ann label =>
+    ([], mkMdWith ann (.Exit label.val))
 
-  | .prodLabeledBlock _ label body =>
+  | .prodLabeledBlock ann label body =>
     let bodyExpr := projectProducer body
-    ([], mkMd (.Block [bodyExpr] (some label.val)))
+    ([], mkMdWith ann (.Block [bodyExpr] (some label.val)))
 
   | .prodSeq _ first second =>
     let (ms, _) := splitProducer first
     let (ns, ne) := splitProducer second
     (ms ++ ns, ne)
 
-  | .prodBlock _ stmts =>
+  | .prodBlock ann stmts =>
     stmts.val.toList.foldl (fun (accStmts, _accExpr) prod =>
       let (s, e) := splitProducer prod
       (accStmts ++ s, e)
-    ) ([], mkMd (.Block [] none))
+    ) ([], mkMdWith ann (.Block [] none))
 
 /-- Project an FGL Producer back to Laurel StmtExprMd.
     Used in non-top-level positions (IfThenElse branches, while bodies, etc.)
