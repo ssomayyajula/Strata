@@ -445,15 +445,18 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
             (.prodAssign () targetVal upcasted
               (.prodReturnValue () upcasted)), expectedTy)
       else if canNarrow rhsTy expectedTy then
-        -- RHS is Any, target is concrete -- bind RHS, then narrow
+        -- RHS is Any, target is concrete -- fallible downcast per ARCHITECTURE.md §Exception Monad
         let tmp ← freshVar "rhs"
         let narrowed ← freshVar "narrowed"
-        let narrowProd := Producer.prodCall () (mkAnn (narrowFuncName expectedTy))
+        let errorVar ← freshVar "err"
+        let narrowProd := Producer.prodCallWithError () (mkAnn (narrowFuncName expectedTy))
                             (mkAnn #[Value.valVar () (mkAnn tmp)])
+                            (mkAnn narrowed) (mkAnn errorVar)
+                            (highTypeToFGL expectedTy) (.coreType () (mkAnn "Error"))
+                            (.prodAssign () targetVal (.valVar () (mkAnn narrowed))
+                              (.prodReturnValue () (.valVar () (mkAnn narrowed))))
         pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL rhsTy) rhsProd
-          (.prodLetProd () (mkAnn narrowed) (highTypeToFGL expectedTy) narrowProd
-            (.prodAssign () targetVal (.valVar () (mkAnn narrowed))
-              (.prodReturnValue () (.valVar () (mkAnn narrowed))))), expectedTy)
+          narrowProd, expectedTy)
       else
         -- Default: bind and assign without coercion
         let tmp ← freshVar "rhs"
@@ -595,10 +598,15 @@ partial def checkProducer (expr : StmtExprMd) (expected : HighType) : ElabM FPro
     pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL actual) prod
       (.prodReturnValue () upcasted))
   else if canNarrow actual expected then
-    -- Narrowing: Any → concrete. Bind the producer, then call narrowing function.
+    -- Narrowing: Any → concrete. Fallible downcast per ARCHITECTURE.md §Exception Monad.
     let tmp ← freshVar "narrow"
-    let narrowCall := Producer.prodCall () (mkAnn (narrowFuncName expected))
+    let resultVar ← freshVar "res"
+    let errorVar ← freshVar "err"
+    let narrowCall := Producer.prodCallWithError () (mkAnn (narrowFuncName expected))
                         (mkAnn #[Value.valVar () (mkAnn tmp)])
+                        (mkAnn resultVar) (mkAnn errorVar)
+                        (highTypeToFGL expected) (.coreType () (mkAnn "Error"))
+                        (.prodReturnValue () (.valVar () (mkAnn resultVar)))
     pure (.prodLetProd () (mkAnn tmp) (highTypeToFGL actual) prod narrowCall)
   else
     -- Types unrelated -- return unchanged
