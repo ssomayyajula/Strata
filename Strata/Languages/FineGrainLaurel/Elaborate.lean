@@ -181,7 +181,9 @@ def insertFGLUpcast (val : FValue) (sourceTy : HighType) : FValue :=
   | .TReal => .valFromFloat () val
   | .UserDefined _ => .valFromComposite () val
   | .TVoid => .valFromNone ()
-  | _ => .valFromInt () val  -- fallback for unknown concrete types
+  | .TCore "ListAny" => .valFromListAny () val
+  | .TCore "DictStrAny" => .valFromDictStrAny () val
+  | _ => val  -- unknown concrete types: pass through without coercion
 
 /-- Get the narrowing function name for Any → concrete. -/
 def narrowFuncName : HighType → String
@@ -189,6 +191,9 @@ def narrowFuncName : HighType → String
   | .TInt => "Any..as_int!"
   | .TString => "Any..as_string!"
   | .TFloat64 => "Any..as_float!"
+  | .TCore "ListAny" => "Any..as_ListAny!"
+  | .TCore "DictStrAny" => "Any..as_Dict!"
+  | .TCore "Error" => "Any..get_error!"
   | .UserDefined _ => "Any..as_Composite!"
   | _ => "Any_to_bool"
 
@@ -343,21 +348,53 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FProducer × HighType) :=
   -- Calls: the primary Producer form
   | .StaticCall callee args => do
     -- Short-circuit desugaring: PAnd/POr with effectful second operand
+    -- Per ARCHITECTURE.md §"Short-Circuit Desugaring in FGL":
+    --   PAnd(a, b): evaluate a → x, narrow x to bool (cond),
+    --              if truthy → elaborate b, if falsy → return x
+    --   POr(a, b):  evaluate a → x, narrow x to bool (cond),
+    --              if truthy → return x, if falsy → elaborate b
+    -- Both branches produce Any (Python and/or return VALUES not booleans).
     match callee.text, args with
     | "PAnd", [left, right] =>
       if isEffectful right then
-        let desugared : StmtExprMd :=
-          { val := .IfThenElse left right (some { val := .LiteralBool false, md := expr.md }),
-            md := expr.md }
-        synthProducer desugared
+        -- Architecture-specified FGL form for PAnd:
+        -- prodLetProd "x" Any (elaborate a)
+        --   (prodLetProd "cond" bool (prodCall "Any_to_bool" [valVar "x"])
+        --     (prodIfThenElse (valVar "cond")
+        --       (elaborate b)
+        --       (prodReturnValue (valVar "x"))))
+        let (leftProd, _) ← synthProducer left
+        let xVar ← freshVar "scX"
+        let condVar ← freshVar "scCond"
+        let (rightProd, _) ← synthProducer right
+        let narrowCall := Producer.prodCall () (mkAnn "Any_to_bool")
+                            (mkAnn #[Value.valVar () (mkAnn xVar)])
+        pure (.prodLetProd () (mkAnn xVar) (.coreType () (mkAnn "Any")) leftProd
+          (.prodLetProd () (mkAnn condVar) (.boolType ()) narrowCall
+            (.prodIfThenElse () (.valVar () (mkAnn condVar))
+              rightProd
+              (.prodReturnValue () (.valVar () (mkAnn xVar))))), .TCore "Any")
       else
         synthStaticCall callee args expr
     | "POr", [left, right] =>
       if isEffectful right then
-        let desugared : StmtExprMd :=
-          { val := .IfThenElse left { val := .LiteralBool true, md := expr.md } (some right),
-            md := expr.md }
-        synthProducer desugared
+        -- Architecture-specified FGL form for POr:
+        -- prodLetProd "x" Any (elaborate a)
+        --   (prodLetProd "cond" bool (prodCall "Any_to_bool" [valVar "x"])
+        --     (prodIfThenElse (valVar "cond")
+        --       (prodReturnValue (valVar "x"))
+        --       (elaborate b)))
+        let (leftProd, _) ← synthProducer left
+        let xVar ← freshVar "scX"
+        let condVar ← freshVar "scCond"
+        let (rightProd, _) ← synthProducer right
+        let narrowCall := Producer.prodCall () (mkAnn "Any_to_bool")
+                            (mkAnn #[Value.valVar () (mkAnn xVar)])
+        pure (.prodLetProd () (mkAnn xVar) (.coreType () (mkAnn "Any")) leftProd
+          (.prodLetProd () (mkAnn condVar) (.boolType ()) narrowCall
+            (.prodIfThenElse () (.valVar () (mkAnn condVar))
+              (.prodReturnValue () (.valVar () (mkAnn xVar)))
+              rightProd)), .TCore "Any")
       else
         synthStaticCall callee args expr
     | _, _ =>
@@ -873,7 +910,10 @@ partial def splitProducer : FProducer → (List StmtExprMd) × StmtExprMd
     let errorRef := mkMd (.Identifier (mkId errorVar.val))
     let callAssign := mkMd (.Assign [resultRef, errorRef] callExpr)
     let isErrorCall := mkMd (.StaticCall (mkId "isError") [errorRef])
-    let errCheck := mkMd (.IfThenElse isErrorCall (mkMd (.Return (some errorRef))) none)
+    -- Error propagation: wrap in exception() to produce Any (the common return type).
+    -- exception : Error → Any is the prelude's error-wrapping constructor.
+    let exceptionWrapped := mkMd (.StaticCall (mkId "exception") [errorRef])
+    let errCheck := mkMd (.IfThenElse isErrorCall (mkMd (.Return (some exceptionWrapped))) none)
     let (bodyStmts, bodyExpr) := splitProducer body
     ([rDecl, eDecl, callAssign, errCheck] ++ bodyStmts, bodyExpr)
 

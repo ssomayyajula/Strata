@@ -597,14 +597,15 @@ def preludeSignatures : List (String × FuncSig) := [
   ("Any_to_bool", { name := "Any_to_bool", params := [("value", .TCore "Any")], defaults := [none], returnType := .TBool, hasErrorOutput := false, hasKwargs := false }),
   ("Any..as_int!", { name := "Any..as_int!", params := [("value", .TCore "Any")], defaults := [none], returnType := .TInt, hasErrorOutput := false, hasKwargs := false }),
   ("Any..as_string!", { name := "Any..as_string!", params := [("value", .TCore "Any")], defaults := [none], returnType := .TString, hasErrorOutput := false, hasKwargs := false }),
-  -- Collection constructors: use .Unknown for ListAny/DictStrAny typed params so
-  -- elaboration does NOT insert coercions (these types are opaque to the coercion system)
-  ("ListAny_nil", { name := "ListAny_nil", params := [], defaults := [], returnType := .Unknown, hasErrorOutput := false, hasKwargs := false }),
-  ("ListAny_cons", { name := "ListAny_cons", params := [("head", .TCore "Any"), ("tail", .Unknown)], defaults := [none, none], returnType := .Unknown, hasErrorOutput := false, hasKwargs := false }),
-  ("DictStrAny_empty", { name := "DictStrAny_empty", params := [], defaults := [], returnType := .Unknown, hasErrorOutput := false, hasKwargs := false }),
-  ("DictStrAny_cons", { name := "DictStrAny_cons", params := [("key", .TString), ("val", .TCore "Any"), ("tail", .Unknown)], defaults := [none, none, none], returnType := .Unknown, hasErrorOutput := false, hasKwargs := false }),
-  ("from_ListAny", { name := "from_ListAny", params := [("list", .Unknown)], defaults := [none], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
-  ("from_DictStrAny", { name := "from_DictStrAny", params := [("dict", .Unknown)], defaults := [none], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
+  -- Collection constructors: use .TCore "ListAny"/.TCore "DictStrAny" for correct
+  -- type annotations in ANF bindings. Elaboration's isSubtype treats same-named
+  -- TCore types as equal, so no spurious coercions are inserted between ListAny values.
+  ("ListAny_nil", { name := "ListAny_nil", params := [], defaults := [], returnType := .TCore "ListAny", hasErrorOutput := false, hasKwargs := false }),
+  ("ListAny_cons", { name := "ListAny_cons", params := [("head", .TCore "Any"), ("tail", .TCore "ListAny")], defaults := [none, none], returnType := .TCore "ListAny", hasErrorOutput := false, hasKwargs := false }),
+  ("DictStrAny_empty", { name := "DictStrAny_empty", params := [], defaults := [], returnType := .TCore "DictStrAny", hasErrorOutput := false, hasKwargs := false }),
+  ("DictStrAny_cons", { name := "DictStrAny_cons", params := [("key", .TString), ("val", .TCore "Any"), ("tail", .TCore "DictStrAny")], defaults := [none, none, none], returnType := .TCore "DictStrAny", hasErrorOutput := false, hasKwargs := false }),
+  ("from_ListAny", { name := "from_ListAny", params := [("list", .TCore "ListAny")], defaults := [none], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
+  ("from_DictStrAny", { name := "from_DictStrAny", params := [("dict", .TCore "DictStrAny")], defaults := [none], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
   ("from_None", { name := "from_None", params := [], defaults := [], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
   -- Legacy collection constructors (for backward compatibility)
   ("List_new", { name := "List_new", params := [], defaults := [], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
@@ -618,6 +619,18 @@ def preludeSignatures : List (String × FuncSig) := [
   ("StrConcat", { name := "StrConcat", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
   ("ToString", { name := "ToString", params := [("value", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
   ("to_string_any", { name := "to_string_any", params := [("value", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
+  -- Error handling: isError checks Error values, exception wraps Error into Any.
+  -- Error constructors all take a string message and produce Error.
+  ("isError", { name := "isError", params := [("e", .TCore "Error")], defaults := [none], returnType := .TBool, hasErrorOutput := false, hasKwargs := false }),
+  ("NoError", { name := "NoError", params := [], defaults := [], returnType := .TCore "Error", hasErrorOutput := false, hasKwargs := false }),
+  ("exception", { name := "exception", params := [("e", .TCore "Error")], defaults := [none], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
+  ("TypeError", { name := "TypeError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasErrorOutput := false, hasKwargs := false }),
+  ("AttributeError", { name := "AttributeError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasErrorOutput := false, hasKwargs := false }),
+  ("AssertionError", { name := "AssertionError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasErrorOutput := false, hasKwargs := false }),
+  ("UnimplementedError", { name := "UnimplementedError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasErrorOutput := false, hasKwargs := false }),
+  ("UndefinedError", { name := "UndefinedError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasErrorOutput := false, hasKwargs := false }),
+  ("IndexError", { name := "IndexError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasErrorOutput := false, hasKwargs := false }),
+  ("RePatternError", { name := "RePatternError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasErrorOutput := false, hasKwargs := false }),
   -- Special
   ("None", { name := "None", params := [], defaults := [], returnType := .TCore "Any", hasErrorOutput := false, hasKwargs := false }),
   ("hasNext", { name := "hasNext", params := [("iter", .TCore "Any")], defaults := [none], returnType := .TBool, hasErrorOutput := false, hasKwargs := false }),
