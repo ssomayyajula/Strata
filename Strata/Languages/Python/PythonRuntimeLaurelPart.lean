@@ -80,6 +80,7 @@ datatype Any {
   from_ListAny (as_ListAny : ListAny),
   from_ClassInstance (classname : string, instance_attributes: DictStrAny),
   from_Slice(start: int, stop: OptionInt),
+  from_Composite (as_Composite: Composite),
   exception (get_error: Error)
 }
 
