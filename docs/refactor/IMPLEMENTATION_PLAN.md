@@ -1111,6 +1111,95 @@ Reference: existing `HeapParameterization.lean` (400+ lines) does exactly this i
 old pipeline. We replicate its output but produce it from the elaboration framework
 rather than as a separate pass.
 
+### 22. Introduce LowType + eraseType (ARCHITECTURE.md §"Two Type Systems")
+
+**File:** Elaborate.lean  
+**Code:**
+```lean
+inductive LowType where
+  | TInt | TBool | TString | TFloat64 | TVoid
+  | TCore (name : String)  -- "Any", "Composite", "Heap", "Error", "ListAny", etc.
+  deriving Inhabited, Repr
+
+def eraseType : HighType → LowType
+  | .TInt => .TInt
+  | .TBool => .TBool
+  | .TString => .TString
+  | .TFloat64 => .TFloat64
+  | .TVoid => .TVoid
+  | .TCore name => .TCore name
+  | .UserDefined _ => .TCore "Composite"
+```
+**Why:** Type-directed compilation (Harper & Morrisett 1995). FGL operates in the
+erased world. UserDefined is unrepresentable in LowType. Lean enforces the boundary.
+
+### 23. Update FGLProducer/FGLValue to use LowType
+
+**File:** Elaborate.lean  
+**Change:** Every `HighType` reference in FGLValue/FGLProducer constructors becomes `LowType`:
+- `letProd (var : String) (ty : LowType) ...`
+- `varDecl (name : String) (ty : LowType) ...`
+- `callWithError ... (resultTy : LowType) (errorTy : LowType) ...`
+- `newObj ... (ty : LowType) ...`
+
+### 24. Update synthValue to return LowType
+
+**File:** Elaborate.lean  
+**Change:** `synthValue : StmtExprMd → ElabM (FGLValue × LowType)`
+- LiteralInt → (.litInt n, .TInt)  [LowType.TInt]
+- Identifier → lookupEnv, then `eraseType` the result
+- FieldSelect → `eraseType` the field type
+- StaticCall → `eraseType sig.returnType`
+- New classId → (.var ..., .TCore "Composite")  [NOT UserDefined]
+
+### 25. Update canUpcast/canNarrow to use erased types
+
+**File:** Elaborate.lean  
+**Change:** The CHECK boundary still takes HighType (from annotations) but compares
+against LowType (from synth). Subsumption now crosses the boundary:
+```lean
+-- checkValue synthesizes a LowType, then compares against eraseType(expected)
+def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
+  let (val, actual) ← synthValue expr  -- actual : LowType
+  let expectedLow := eraseType expected
+  if lowTypesEqual actual expectedLow then return val
+  match canUpcast actual expectedLow with
+  | some coerce => return (coerce val)
+  | none => throw ...
+```
+canUpcast and canNarrow now operate on LowType × LowType (both sides erased).
+
+### 26. Update New handling to emit MkComposite
+
+**File:** Elaborate.lean  
+**Change:** synthProducer for `.New classId`:
+```
+.New classId →
+  let refVar ← freshVar "ref"
+  let objVar ← freshVar "obj"
+  -- Emit: ref := Heap..nextReference!(heap); heap := increment(heap);
+  --       obj := MkComposite(ref, ClassName_TypeTag())
+  pure (.letProd refVar (.TCore "int") (.call "Heap..nextReference!" [.var "$heap"])
+    (.letProd objVar (.TCore "Composite") (.call "MkComposite" [.var refVar, .staticCall (classId.text ++ "_TypeTag") []])
+      (.returnValue (.var objVar)))), .TCore "Composite")
+```
+This IS the type erasure for New: `New "Foo"` → `MkComposite(freshRef, Foo_TypeTag)`.
+
+### 27. Update FieldSelect on Composite to emit readField
+
+**File:** Elaborate.lean  
+**Change:** synthValue for `.FieldSelect obj field` when objTy erases to Composite:
+```
+.FieldSelect obj field →
+  let (objVal, objTy) ← synthValue obj
+  if objTy == .TCore "Composite" then
+    -- Heap field access: readField(heap, obj, field)
+    pure (.staticCall "readField" [.var "$heap", objVal, .var (field.text ++ "_Field")], .TCore "Box")
+  else
+    pure (.fieldAccess objVal field.text, objTy)
+```
+And Assign to FieldSelect → updateField(heap, obj, field, BoxT(val)).
+
 ### 21. End-to-end validation
 
 ```bash
@@ -1142,3 +1231,6 @@ Any regression → diagnose against ARCHITECTURE.md, not "what makes test pass."
 | Freshness ensures soundness | Scope widening under α-equivalence | Standard |
 | Metadata via comonad interaction | Monad-comonad distributive law | Uustalu & Vene 2008 |
 | from_Composite pointer-preserving | Sum type injection for heap refs | Architecture §"Composite and Any" |
+| HighType→LowType (type erasure) | Type-directed compilation | Harper & Morrisett 1995 (TIL) |
+| UserDefined→Composite | Representation erasure (newtype unwrapping) | Standard compilation |
+| Elaboration crosses type boundary | Typed translation between systems | Shao & Appel 1995 |

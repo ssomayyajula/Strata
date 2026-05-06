@@ -472,7 +472,7 @@ be unified into the single bidirectional elaboration walk:
 | `desugarShortCircuit` | Evaluation order | FGCBV: all sequencing explicit |
 | `eliminateReturns` | Control flow | FGCBV: normalize to expression form |
 | `heapParameterization` | Heap state effect | Effect type: add Heap to T |
-| `typeHierarchyTransform` | Runtime type tags | Refinement type: type-tag witnesses |
+| `typeHierarchyTransform` | Runtime type tags | Type erasure: UserDefined→Composite (§"Two Type Systems") |
 | `modifiesClausesTransform` | Frame conditions | Refinement type: heap-frame refinement |
 | `constrainedTypeElim` | Type constraints | Refinement type: CHECK against refined type → emit requires/ensures |
 | `eliminateHoles` | Nondeterminism | Effect type: nondeterminism as uninterpreted function |
@@ -996,6 +996,90 @@ category Producer; -- effectful terms (calls, let-bindings, control flow)
 Illegal states are unrepresentable. You cannot put a Producer where a Value is
 expected — Lean's type system rejects it at construction time. No runtime checks,
 no predicates, no `by sorry`.
+
+### Two Type Systems: HighType and LowType (Type-Directed Compilation)
+
+Elaboration is a **typed translation between two type systems** (Harper & Morrisett
+1995, TIL). The source system has class identity. The target system has a uniform
+heap representation. The translation is coherent: every source typing derivation
+maps to a unique target typing derivation.
+
+**HighType** (Translation's output, Elaboration's input):
+```lean
+inductive HighType where
+  | TInt | TBool | TString | TFloat64 | TVoid
+  | TCore (name : String)       -- "Any", "Error", "ListAny", "DictStrAny", etc.
+  | UserDefined (id : Identifier)  -- "Foo", "Bar" — distinct class identities
+```
+
+**LowType** (FGL's type system, Elaboration's output):
+```lean
+inductive LowType where
+  | TInt | TBool | TString | TFloat64 | TVoid
+  | TCore (name : String)       -- "Any", "Error", "Composite", "Heap", "ListAny", etc.
+  -- NO UserDefined. All class instances are Composite.
+```
+
+`UserDefined` is **unrepresentable** in LowType. If elaboration accidentally tries
+to emit a `UserDefined` in FGL output, it's a Lean type error. The type system
+enforces the erasure boundary.
+
+**The type translation (`eraseType`):**
+```lean
+def eraseType : HighType → LowType
+  | .TInt => .TInt
+  | .TBool => .TBool
+  | .TString => .TString
+  | .TFloat64 => .TFloat64
+  | .TVoid => .TVoid
+  | .TCore name => .TCore name
+  | .UserDefined _ => .TCore "Composite"  -- ALL class instances → Composite
+```
+
+This is total (every HighType maps to a LowType) and deterministic (no choices).
+The type tells you what to do. `UserDefined` always becomes `Composite`.
+
+**How this affects elaboration:**
+
+The bidirectional walk operates ACROSS the type boundary:
+- Input: `StmtExprMd` with `HighType` annotations (from Translation)
+- Output: `FGLValue`/`FGLProducer` with `LowType` (in FGL)
+- `synthValue : StmtExprMd → ElabM (FGLValue × LowType)` — synthesizes a target type
+- `checkValue : StmtExprMd → HighType → ElabM FGLValue` — expected type is in source system
+
+The coercion table crosses the boundary:
+```
+canUpcast : HighType → HighType → Option (FGLValue → FGLValue)
+```
+When it sees `UserDefined _ → TCore "Any"`, it emits `from_Composite` — which is
+correct because in the target, the value IS `Composite` (eraseType applied).
+
+**How this affects term translation:**
+
+When elaboration encounters terms whose meaning changes under erasure:
+- `New "Foo"` → `MkComposite(freshRef, Foo_TypeTag())` (allocation in erased world)
+- `var x : Foo` → type becomes `Composite` in FGL output
+- `self : Foo` in method → `self : Composite`
+- `FieldSelect obj field` → `readField(heap, obj, field)` (because obj is Composite)
+- `Assign [FieldSelect obj field] val` → `updateField(heap, obj, field, BoxT(val))`
+
+These are all determined by the type: seeing `UserDefined` in the source triggers
+the erasure-aware elaboration. No boolean predicates. The type drives it.
+
+**What remains in HighType for Resolution/Translation:**
+
+Resolution needs `UserDefined "Foo"` to:
+- Qualify methods: `Foo@method`
+- Look up fields: `classFields["Foo"]`
+- Distinguish classes from functions in Call resolution
+
+Translation needs it to:
+- Emit `New "Foo"` (not yet erased)
+- Emit self-typed parameters
+- Track variable types for method dispatch
+
+After elaboration, `UserDefined` is gone. FGL and everything downstream (projection,
+Core) only see `Composite`.
 
 ### Metadata: Smart Constructors (the ONLY way to build AST nodes)
 
