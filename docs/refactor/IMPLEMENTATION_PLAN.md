@@ -5,6 +5,62 @@ remain as a dated record of decisions, findings, and progress. Like a lab notebo
 
 ---
 
+## 2026-05-06 (after commit f52406a53 — methodology correction)
+
+### Validation is SPEC-DRIVEN, not TEST-DRIVEN
+
+Tests passing is a CONSEQUENCE of correctness, not a target. The validation 
+methodology is: for each section of ARCHITECTURE.md, does the code implement it?
+
+**The correct validation questions (per ARCHITECTURE.md sections):**
+
+§"The Bidirectional Recipe":
+- Does `synthValue` handle every Value-producing Laurel constructor?
+- Does `synthProducer` handle every Producer-producing Laurel constructor?
+- Does `checkValue` insert `valFromX` at every subtyping (A <: B) boundary?
+- Does `checkProducer` insert narrowing at every (A ▷ B) boundary?
+- Are function args CHECKed against param types from Γ?
+- Are conditions CHECKed against bool?
+- Are assignment RHS CHECKed against the variable's declared type?
+
+§"Composite and Any: The Pointer Injection":
+- Does `canUpcast` fire for UserDefined → Any?
+- Does `insertFGLUpcast` emit `valFromComposite`?
+- Does `canNarrow` fire for Any → UserDefined?
+- Does the `from_Composite` constructor exist in the prelude?
+
+§"Short-Circuit Desugaring in FGL":
+- Does PAnd desugar to `e to x. if (truthy x) then f else produce x`?
+- Does POr desugar to `e to x. if (truthy x) then produce x else f`?
+- Do both branches produce the same type (Any)?
+
+§"Implementation: Projection as Bind Reassociation":
+- Does `splitProducer` flatten nested `prodLetProd`?
+- Is the terminal expression separated from prefix statements?
+- Are fresh names used (no capture during scope widening)?
+
+§"Operations vs Co-Operations":
+- Does elaboration discover heap-touching procedures (FieldSelect, field assign, New)?
+- Does the global propagation thread Heap through marked procedures?
+- Are `readField`/`updateField`/`increment` procedures produced?
+
+§"Resolution (Building Γ)":
+- Does buildTypeEnv classify every module-level name?
+- Are function signatures complete (params, defaults, returnType, hasErrorOutput)?
+- Are class fields recorded in classFields?
+
+§"Translation (Producing e)":
+- Is Translation a catamorphism (one case per constructor)?
+- Does it emit NO coercions (no from_int, from_str, Any_to_bool)?
+- Does it read annotations for types (not default to Any)?
+- Does it emit bare literals (not wrapped)?
+
+**Test parity is a CONSEQUENCE of getting these right.** If all the above hold and
+tests still fail, either (a) the architecture has a gap, or (b) the test exercises
+something outside our scope (stubs, PySpec features, etc.).
+
+---
+
 ## 2026-05-06 (after commit 65bf8a608 — investigating remaining 9 crashes)
 
 ### Architectural Finding: `Any` Is Not the Top Type
