@@ -351,33 +351,45 @@ assert Any_to_bool(PEq(prod, ...));  -- CHECK PEq(...) <= bool. Any ≠ bool. Na
 
 ### Short-Circuit Desugaring in FGL
 
-`PAnd(a, b)` where `b` is effectful gets desugared to IfThenElse. The correct
-FGL output (ALL types must align):
+Short-circuit is the CBV→FGCBV embedding of `and`/`or`:
+
+- CBV `or(e, f)`: evaluate e, if truthy return e, else evaluate f
+  FGCBV: `e to x. if (truthy x) then produce x else f`
+  
+- CBV `and(e, f)`: evaluate e, if falsy return e, else evaluate f
+  FGCBV: `e to x. if (truthy x) then f else produce x`
+
+The correct FGL (Python's `and`/`or` return VALUES, not booleans):
 
 ```
--- PAnd(a, b) where a: Any, b is effectful, PAnd returns Any
--- Desugar to: if Any_to_bool(a) then b else from_bool(false)
+-- PAnd(a, b) where a, b : Any, b is effectful
+-- Python semantics: return a if FALSY, else evaluate and return b
 
-prodLetProd "cond" bool
-  (prodCall "Any_to_bool" [valVar "a"])     -- narrow a from Any to bool (PRODUCER)
-  (prodIfThenElse (valVar "cond")           -- condition is Value(bool) ✓
-    (elaborate b)                            -- then: Producer(Any) ✓
-    (prodReturnValue (valFromBool (valLiteralBool false))))  -- else: Producer(Any) via upcast ✓
+prodLetProd "x" Any (elaborate a)              -- evaluate a, bind result to x
+  (prodLetProd "cond" bool                     -- narrow x to bool for condition
+    (prodCall "Any_to_bool" [valVar "x"])
+    (prodIfThenElse (valVar "cond")            -- condition is Value(bool) ✓
+      (elaborate b)                             -- truthy: evaluate b, return it (Any) ✓
+      (prodReturnValue (valVar "x"))))          -- falsy: return a's value (Any) ✓
 ```
-
-Key points:
-- Condition must be `Value(bool)` → need to bind the `Any_to_bool` (producer) first
-- Both branches must have SAME type → else branch upcasts `false` to `Any`
-- The whole expression has type `Any` (matching PAnd's return type)
 
 For `POr(a, b)`:
 ```
-prodLetProd "cond" bool
-  (prodCall "Any_to_bool" [valVar "a"])
-  (prodIfThenElse (valVar "cond")
-    (prodReturnValue (valFromBool (valLiteralBool true)))   -- then: Producer(Any)
-    (elaborate b))                                          -- else: Producer(Any)
+-- Python semantics: return a if TRUTHY, else evaluate and return b
+
+prodLetProd "x" Any (elaborate a)
+  (prodLetProd "cond" bool
+    (prodCall "Any_to_bool" [valVar "x"])
+    (prodIfThenElse (valVar "cond")
+      (prodReturnValue (valVar "x"))            -- truthy: return a's value (Any) ✓
+      (elaborate b)))                           -- falsy: evaluate b, return it (Any) ✓
 ```
+
+Key properties:
+- Condition is `Value(bool)` (narrowing bound via prodLetProd) ✓
+- Both branches produce `Any` (same type) ✓
+- Returns the VALUE not a boolean (Python semantics) ✓
+- Second operand only evaluated when needed (short-circuit) ✓
 
 ---
 
