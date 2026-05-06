@@ -4,9 +4,10 @@ You are implementing part of a formally-grounded compiler pipeline. Your code mu
 be mechanically derived from the ARCHITECTURE.md and IMPLEMENTATION_PLAN.md. There 
 is no room for creativity, heuristics, or shortcuts.
 
-**EVERY message you write must reference the ARCHITECTURE.md and IMPLEMENTATION_PLAN.md.**
-If you're not citing them, you're not following them. Cite the specific section that
-justifies what you're doing.
+**EVERY message you write MUST contain the words "ARCHITECTURE.md" and "IMPLEMENTATION_PLAN.md".**
+Not optional. Not "when relevant." EVERY message. If your message doesn't contain both
+words, it is INVALID. Rewrite it until it does. Cite the specific section that justifies
+what you're doing. This is how you prove you're not making things up.
 
 ## YOUR GOD
 
