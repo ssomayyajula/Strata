@@ -943,7 +943,7 @@ def elaborateProcedure (typeEnv : TypeEnv) (proc : Laurel.Procedure) : Except St
     pure { proc with body := .Transparent elaboratedBody }
   | _ => pure proc
 
-/-- Elaborate an entire Laurel Program (Phase 1 only: bidirectional walk). -/
+/-- Phase 1 of elaboration: bidirectional walk (coercions, short-circuit). -/
 def elaborateProgram (typeEnv : TypeEnv) (program : Laurel.Program) : Except String Laurel.Program := do
   let fullEnv := typeEnv.withPrelude
   let mut staticProcs : List Laurel.Procedure := []
@@ -2016,6 +2016,19 @@ def unifiedElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : UnifiedEla
   let (program, constrainedDiags) := constrainedTypeElimPhase program
 
   { program := program, diagnostics := constrainedDiags }
+
+/-- Full elaboration entry point for the V2 pipeline: Phase 1 (bidirectional walk)
+    followed by Phases 2-7 (heap param, type hierarchy, modifies, holes, constraints).
+
+    Produces a fully-elaborated Laurel.Program with all type infrastructure
+    (Composite, Box, Field, Heap, TypeTag) registered in program.types, which
+    Core's type checker requires for `resolve`. -/
+def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String Laurel.Program := do
+  -- Phase 1: Bidirectional walk (coercions, short-circuit, error handling)
+  let program ← elaborateProgram typeEnv program
+  -- Phases 2-7: Heap/type infrastructure + lowering
+  let result := unifiedElaborate typeEnv program
+  pure result.program
 
 /-! ## Backward Compatibility -/
 

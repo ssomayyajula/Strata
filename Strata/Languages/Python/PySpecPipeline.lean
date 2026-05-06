@@ -478,17 +478,14 @@ public def pyAnalyzeLaurelV2
     | .error e => throw (.internal s!"V2 Translation failed: {e}")
     | .ok (program, _state) => pure program
 
-  -- Step 4: Run Elaboration (Phase 1: bidirectional walk for coercions)
-  -- Translation now emits bare types (no from_int/from_str/Any_to_bool).
-  -- Elaboration inserts coercions via the bidirectional synth/check walk,
-  -- then projects FGL back to Laurel for downstream lowering.
-  let elaboratedProgram ← profileStep profile "Elaborate (Phase 1: coercions)" do
-    match FineGrainLaurel.elaborateProgram typeEnv laurelProgram with
+  -- Step 4: Run full Elaboration (Phase 1: bidirectional walk + Phases 2-7: heap
+  -- parameterization, type hierarchy, modifies clauses, hole inference/elimination,
+  -- constrained type elimination). This produces a Laurel.Program with all type
+  -- infrastructure (Composite, Box, Field, Heap, TypeTag) registered in program.types.
+  let elaboratedProgram ← profileStep profile "Elaborate (full: coercions + type infrastructure)" do
+    match FineGrainLaurel.fullElaborate typeEnv laurelProgram with
     | .error e => throw (.internal s!"Elaboration failed: {e}")
     | .ok prog => pure prog
-
-  -- Step 5: The full lowering (heap param, type hierarchy, holes, etc.) is handled by
-  -- translateCombinedLaurel (called by the CLI command) which runs translateWithLaurel.
 
   -- Step 6: Combine with Python runtime Laurel part
   profileStep profile "Combine with runtime" do
