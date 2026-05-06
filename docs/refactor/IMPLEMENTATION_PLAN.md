@@ -1,119 +1,81 @@
 # Implementation Plan (synced with ARCHITECTURE.md)
 
-**Last updated:** After commit 17737b0d9 (V2 skips old lowering passes)
+**Last updated:** After commit 383da1e58 (fix 3/4 class regressions)
 
-**Current state:** V2 now runs WITHOUT old lowering passes. ALL tests fail.
-This is architecturally correct — it exposes every gap in our elaboration.
-
----
-
-## STATUS
-
-| Phase | Status | Commit |
-|-------|--------|--------|
-| A: Generate FGL types | ✅ Done | 969a6680c |
-| B: Rewrite Elaboration with FGL types | ✅ Done | 2d9455f44 |
-| C: Strip Translation coercions + enable elaboration | ✅ Done | f77e021a2 |
-| Elaboration gap fixes (local types, loops) | ✅ Done | 3864cbbf5 |
-| Projection flattening (let-floating) | ✅ Done | 88bb9af08 |
-| Short-circuit desugaring (architecture-specified) | ✅ Done | b896ec248 |
-| prodCallWithError for hasErrorOutput | ✅ Done | a0ff15674 |
-| E: Remove old lowering passes from V2 | ✅ Done | 17737b0d9 |
-| **F: Core type infrastructure** | ❌ NEXT | — |
-| G: Remaining elaboration gaps | ❌ Blocked by F | — |
-| H: Stub integration | ❌ Not started | — |
+**Current state:** 47/54 tests PASS (21 identical + 26 same-category-pass-different-output).
+1 genuine regression (pass → internal_error). 8 tests crashed that were previously inconclusive.
 
 ---
 
-## WHAT JUST HAPPENED
+## CURRENT TEST BREAKDOWN
 
-Removing the old lowering passes revealed: our elaboration produces Laurel that
-Core cannot translate. The error:
-
-```
-Type (arrow Composite (arrow int string)) is not an instance of a previously registered type!
-```
-
-Core's type system has a REGISTRY of known types. The old `typeHierarchyTransform`
-and `heapParameterization` passes registered these types (Composite, Box, Field, Heap,
-TypeTag, etc.) as part of their transformation. Our elaboration doesn't register them.
-
-Additionally: "BUG: metadata without a filerange" — projection emits nodes with
-empty metadata, violating the interaction law.
+| Category | Count | Action needed |
+|----------|-------|---------------|
+| Pass (identical output) | 21 | None — verified correct |
+| Pass (different output) | 26 | Audit: is V2 output semantically equivalent? |
+| Pass → internal_error | 1 | Fix (test_with_void_enter — Composite/Any at heap boundary) |
+| Inconclusive → internal_error | 8 | Fix (elaboration crashes where old pipeline produced inconclusive) |
+| Inconclusive (both) | ~6 | Not our problem (old pipeline also fails) |
 
 ---
 
-## NEXT: Phase F — Core Type Infrastructure
+## PATH TO PARITY
 
-### The Problem
+### Priority 1: Fix the 1 genuine regression (test_with_void_enter)
 
-Core's `resolve` builds a `SemanticModel` that knows all types. Core's translator
-then looks up types in this model. If a type appears in a procedure signature but
-isn't registered, Core rejects it.
+This test passed on old pipeline but crashes on V2 with "Impossible to unify 
+Composite with Any." This is the Composite↔Any coercion at a heap boundary —
+the exact problem the architecture's `from_Composite` / subtyping discipline addresses.
 
-The old passes registered types by:
-1. `typeHierarchyTransform`: adds `TypeTag` datatype, `Composite` datatype with fields, `ancestorsPerType` constants
-2. `heapParameterization`: adds `Box` datatype, `Field` datatype, `Heap` datatype, `readField`/`updateField`/`increment` procedures
+**Fix:** Ensure elaboration inserts `valFromComposite` when a Composite-typed value
+meets an Any context. The `from_Composite` prelude addition (which was reverted earlier)
+needs to be re-added, and elaboration's coerce function needs the Composite→Any case.
 
-Our elaboration Phase 2 (heap) and Phase 3 (type hierarchy) in Elaborate.lean
-attempt to do this but apparently don't produce the right type registrations.
+### Priority 2: Fix the 8 inconclusive → internal_error tests
 
-### What Needs to Happen
+These tests DIDN'T pass on the old pipeline either (they were inconclusive) but at
+least they didn't CRASH. Our V2 crashes on them. The crashes are elaboration gaps —
+likely the same patterns as the type-checking errors we already fixed, but for more
+complex cases (multi-function calls, class methods, loops, with-statements).
 
-1. **Investigate:** What EXACTLY does Core's `resolve` need in the `Laurel.Program` to
-   register Composite/Box/Field/Heap/TypeTag? Read the existing `typeHierarchyTransform`
-   and `heapParameterization` to see what they ADD to the program's `types` field.
+Tests: test_class_field_use, test_class_methods, test_class_with_methods, 
+test_default_params, test_function_def_calls, test_loops, test_multi_function, 
+test_with_statement
 
-2. **Update architecture:** Add "type infrastructure generation" as a step in elaboration.
-   It's not a separate pass — it's part of what elaboration produces (the datatypes that
-   make the co-operations well-typed).
+**Fix:** Diagnose each, fix elaboration gaps. Target: inconclusive (matching old 
+pipeline) or better.
 
-3. **Implement:** Make elaboration's Phase 2/3 produce the correct type declarations
-   in the output `Laurel.Program.types` field.
+### Priority 3: Audit the 26 "different output" tests
 
-4. **Fix metadata:** Projection must propagate metadata through `splitProducer`.
-   The interaction law is non-negotiable.
+These pass on both pipelines but produce different verification output. Differences
+may be:
+- Benign: different variable names (elaboration generates fresh `narrow$1` etc.)
+- Benign: different assertion naming/ordering
+- Concerning: different verification results (fewer/more VCs proved)
+- Bad: V2 producing weaker verification (missed bugs)
 
-### What to Study
+**Action:** Compare a sample. If V2 finds the same bugs and proves the same properties
+(just with different names), this is fine. If V2 misses something the old pipeline
+catches, that's a correctness issue.
 
-```bash
-# What does typeHierarchyTransform ADD to program.types?
-grep -n "TypeTag\|Composite\|ancestors\|typeTag\|types :=" Strata/Languages/Laurel/TypeHierarchy.lean | head -20
+---
 
-# What does heapParameterization ADD to program.types?
-grep -n "Box\|Field\|Heap\|types :=\|staticProcedures :=" Strata/Languages/Laurel/HeapParameterization.lean | head -20
+## REMAINING TECH DEBT
 
-# What does Core's resolve expect?
-grep -n "register\|Known Types\|registered type" Strata/Languages/Core/ -r | head -10
-```
+| Item | Description | Architecture reference |
+|------|-------------|----------------------|
+| `from_Composite` prelude | Reverted — needs re-addition | §"Subtyping and Narrowing Discipline" |
+| Stub integration | Library stubs not loaded | §"Library Stubs: Eliminating PySpec" |
+| Metadata in projection | Some nodes get `#[]` metadata | §"Metadata: Monad-Comonad Interaction Law" |
 
 ---
 
 ## OPERATIONAL DISCIPLINE (unchanged)
 
-### Rules
-1. Read BOTH docs: ARCHITECTURE.md + this plan
-2. Every implementation agent gets parallel review agent
-3. Plan before code
-4. Standard preamble (`.claude/agent-preamble.md`)
-5. Commit after every successful build
-6. NO heuristics, NO peephole optimizations, NO boolean blindness
-7. If stuck: STOP and report
-
-### Git State
-- Branch: `ssomayyajula/python-fe-refactor`
-- HEAD: `17737b0d9`
-- Build: passes (500 jobs)
-- Old pipeline: works (12 passed on test_arithmetic)
-- V2 pipeline: ALL tests fail (expected — old passes removed, elaboration gaps exposed)
-
----
-
-## THEORETICAL GROUNDING (unchanged, see ARCHITECTURE.md)
-
-- Subtyping (A <: B): value-level, infallible
-- Narrowing (A ▷ B): producer-level, fallible  
-- Projection: let-floating (bind reassociation)
-- FGCBV as CBPV fragment (only computation type is ↑A)
-- Operations vs co-operations (Bauer 2018)
-- Bidirectional recipe: annotations drive checking (Dunfield & Krishnaswami + Lakhani & Pfenning)
+- Architecture + Plan are God
+- Every implementation agent gets parallel review agent
+- Standard preamble for all agents
+- Plan before code
+- Commit after every successful build
+- Kill on architecture violations
+- Never ask the user implementation questions — the spec answers them
