@@ -408,9 +408,9 @@ Value synthesis (atoms only):
 
 Value checking (subsumption — the ONLY value checking rule):
 ```
-Γ ⊢_v e ⇒ A    A <: B
-───────────────────────
-Γ ⊢_v e ⇐ B
+Γ ⊢_v v ⇒ A    A <: B ~~> c
+─────────────────────────────
+Γ ⊢_v c(v) ⇐ B
 ```
 
 Producer synthesis:
@@ -447,12 +447,16 @@ v ⇐ procReturnType
 Γ ⊢_p (return v) ⇐ procReturnType
 ```
 
-Producer subsumption (narrowing — the fallback when no checking rule matches):
+Producer checking fallback (narrowing — when no other producer checking rule matches):
 ```
-Γ ⊢_p e ⇒ A    A ▷ B
-─────────────────────
-Γ ⊢_p e ⇐ B
+Γ ⊢_v v ⇒ A    A ▷ B ~~> n
+─────────────────────────────
+Γ ⊢_p n(v) ⇐ B
 ```
+Narrowing is the producer checking FALLBACK (like subsumption is the value checking
+fallback). It takes a VALUE, applies the narrowing witness `n`, produces a PRODUCER
+that checks against expected type B. Both coercion rules operate on values — the
+difference is what they produce (value vs producer).
 
 **Mode correctness invariants:**
 - Synth: output type determined by inputs (Γ, form, or fixed TVoid)
@@ -519,30 +523,42 @@ uses these as the CHECK targets. The coercions are "what the annotations demand"
 
 **Subsumption (coercion insertion):**
 
-When CHECK finds synth(e) = A and expected = B with A ≠ B:
-- If A <: B (subtyping): insert upcast (value→value, stays in ⊢_v)
-- If A ▷ B (narrowing): insert downcast (value→producer, jumps to ⊢_p)
-- If neither: type error (should not happen on well-typed Translation output)
+Subtyping and narrowing are CONSTRUCTIVE — they produce coercion witnesses:
 
 ```
--- Subtyping (value-level, infallible) — CHECK in value judgment:
-Γ ⊢_v e ⇒ A    A <: B
-─────────────────────────
-Γ ⊢_v e ⇐ B    ~~>  upcast(e)     (e.g., valFromInt(e) : Value(Any))
+-- Subtyping judgment produces a value-level coercion function:
+A <: B ~~> c        where c : Value(A) → Value(B)
+                    (e.g., int <: Any ~~> fromInt)
 
--- Narrowing (producer-level, fallible) — CHECK in producer judgment:
-Γ ⊢_v e ⇒ A    A ▷ B
-─────────────────────────
-Γ ⊢_p e ⇐ B    ~~>  narrow(e)     (e.g., Any_to_bool(e) : Producer(bool))
+-- Narrowing judgment produces a producer-level coercion function:
+A ▷ B ~~> n         where n : Value(A) → Producer(B)
+                    (e.g., Any ▷ bool ~~> Any_to_bool)
 ```
 
-Both are CHECKING rules. The expected type B comes from context. The difference
-is what judgment the conclusion lives in:
-- Upcasting: conclusion is ⊢_v (value in, value out, stays in value judgment)
-- Narrowing: conclusion is ⊢_p (value in, producer out, jumps to producer judgment)
+The subsumption/narrowing rules APPLY these witnesses (both are CHECKING rules):
 
-To get back to a VALUE after narrowing, bind the producer:
-`callWithError "Any_to_bool" [condVal] x ... (use (.var x) as Value(bool))`
+```
+-- Value subsumption (applies upcast witness — value checking fallback):
+Γ ⊢_v v ⇒ A    A <: B ~~> c
+─────────────────────────────
+Γ ⊢_v c(v) ⇐ B                  (value in, value out, B from context)
+
+-- Narrowing (applies downcast witness — producer checking fallback):
+Γ ⊢_v v ⇒ A    A ▷ B ~~> n
+─────────────────────────────
+Γ ⊢_p n(v) ⇐ B                  (value in, producer out, B from context)
+```
+
+Key: BOTH are checking rules (B is INPUT from context). BOTH take a VALUE as input.
+The witness IS the coercion function/procedure. `canUpcast` returns the witness `c`.
+`canNarrow` returns the witness `n`. The coercion table is the collection of all witnesses.
+
+All coercion operates on VALUES. If you need to coerce a producer's result, BIND
+it first (`M to x.`), then apply the witness to `x` (a value). Producer checking
+has its own rules (if, var-bind, M-to-x, return) plus narrowing as fallback.
+
+To use a narrowed result as a value (e.g., for an if-condition), bind the
+narrowing producer: `n(v) to x. (use x as Value(B))`
 
 **Implementation:** Subsumption is ONE function with three cases:
 1. Reflexivity (A = A via table): no coercion (short-circuit)
