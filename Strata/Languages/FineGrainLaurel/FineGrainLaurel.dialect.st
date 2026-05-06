@@ -183,6 +183,24 @@ category Composite;
 op composite (name: Ident, extending: Option Extends, fields: Seq Field, procedures: Seq Procedure): Composite =>
   "composite " name extending "{" fields procedures "}";
 
+// ===========================================================================
+// Value-Level Coercion Operators (Subtyping: infallible, value→value)
+// ===========================================================================
+
+// Upcasts: inject concrete types into Any (pure injections into the sum type)
+op valFromInt (inner: Value): Value => "from_int(" inner ")";
+op valFromStr (inner: Value): Value => "from_str(" inner ")";
+op valFromBool (inner: Value): Value => "from_bool(" inner ")";
+op valFromFloat (inner: Value): Value => "from_float(" inner ")";
+op valFromComposite (inner: Value): Value => "from_Composite(" inner ")";
+op valFromListAny (inner: Value): Value => "from_ListAny(" inner ")";
+op valFromDictStrAny (inner: Value): Value => "from_DictStrAny(" inner ")";
+op valFromNone: Value => "from_None()";
+
+// ===========================================================================
+// Top-level Declarations
+// ===========================================================================
+
 // Top-level commands
 op compositeCommand (composite: Composite): Command => composite;
 op procedureCommand (procedure: Procedure): Command => procedure;

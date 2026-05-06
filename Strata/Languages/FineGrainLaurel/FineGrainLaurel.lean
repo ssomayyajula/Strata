@@ -19,4 +19,6 @@ public section
 
 #load_dialect "./FineGrainLaurel.dialect.st"
 
+#strata_gen FineGrainLaurel
+
 end
