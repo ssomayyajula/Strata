@@ -125,6 +125,50 @@ This is the SAME pattern as `int <: Any` via `from_int`. Composite is just anoth
 
 ---
 
+## 2026-05-06 (after commit 5ad00fa5a — spec-driven audit)
+
+### Audit Results: Elaborate.lean vs ARCHITECTURE.md
+
+| Architecture Section | Verdict | Gap |
+|---------------------|---------|-----|
+| Bidirectional Recipe (checkValue inserts upcasts) | YES | — |
+| Bidirectional Recipe (checkProducer inserts narrowing) | YES | — |
+| Bidirectional Recipe (args CHECKed) | YES | — |
+| Bidirectional Recipe (conditions CHECKed against bool) | YES | — |
+| Bidirectional Recipe (assignment RHS CHECKed) | YES | — |
+| Composite/Any (canUpcast, insertFGLUpcast, from_Composite) | YES | — |
+| Short-circuit (PAnd/POr desugaring) | YES | Conditional on isEffectful (should be unconditional) |
+| Projection (splitProducer, let-floating) | YES | — |
+| Heap co-operations (discover, propagate, thread) | YES | — |
+| prodCallWithError for hasErrorOutput | YES | — |
+| **prodCallWithError for DOWNCASTS** | **NO** | Uses bare prodCall — architecture says casts are fallible |
+| **Exit (break/continue)** | **NO** | Emits trivial value, control flow lost |
+| **Multi-target assign (tuple unpacking)** | **NO** | Not implemented |
+| Language-independent | YES | — |
+
+### Gaps to Fix (per ARCHITECTURE.md)
+
+1. **Downcasts must use `prodCallWithError`** (§"The Single Mechanism"): "a cast IS a
+   fallible producer." `Any_to_bool` can throw TypeError. Must emit `prodCallWithError`
+   not `prodCall`. This is an architecture VIOLATION, not tech debt.
+
+2. **Short-circuit should be unconditional** (§"Short-Circuit Desugaring"): The architecture
+   specifies PAnd/POr desugaring regardless of whether the operand is effectful. Pure operands
+   should also desugar (Python's `and`/`or` return values, not booleans — always).
+
+3. **Exit elaboration** (§"Break/Continue Labels"): Translation emits `Exit label`. Elaboration
+   must preserve this in FGL. Currently emits trivial `prodReturnValue true` — wrong.
+
+4. **Multi-target assign** (§"Translation: tuple unpacking"): Translation emits tuple
+   unpacking as `tmp := rhs; a := Get(tmp, 0); b := Get(tmp, 1)`. Elaboration should
+   handle this (each is a normal Assign). If it's not working, the issue is in how
+   elaboration processes the Block containing these assignments.
+
+5. **Dead code cleanup**: `unifiedElaborate` function has stale comment saying Phase 1
+   is skipped. Remove or fix.
+
+---
+
 ## 2026-05-06 (after commit 383da1e58)
 
 **State:** 47/54 tests PASS (21 identical + 26 same-category-pass-different-output).

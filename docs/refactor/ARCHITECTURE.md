@@ -506,44 +506,56 @@ injects into the `Any` sum, like `int` or `bool`.
 
 ### What Elaboration Does (Language-Independent)
 
-#### The Single Mechanism: prodCallWithError
+#### Exceptions via the Exception Monad (Standard CBPV Treatment)
 
-Elaboration has ONE mechanism for making effects explicit: `prodCallWithError`.
-Every effectful operation — whether it's a cast, a function call, or a method
-invocation — is an instance of the same monadic bind.
+In FGCBV/CBPV, exceptions are modeled by the monad `T(A) = A + E`. A computation
+that may throw produces a sum type: either a value of type A (success) or an error
+of type E (failure). This is standard (Levy 2004, Chapter 5; Plotkin & Pretnar 2009).
 
-**Key insight: a cast IS a fallible producer.** `Any_to_bool(x)` can throw
-`TypeError` if `x` isn't actually a bool. `Any..as_int!(x)` can throw if `x`
-isn't an int. Downcasts are not a separate mechanism from exception-producing
-calls — they ARE exception-producing calls. The only difference is which error
-constructor they raise on failure.
+**The fundamental operations are:**
+1. `prodCall "f" [args]` — call the procedure (returns `A + E` as a sum)
+2. `prodLetProd result ty call body` — bind the result (monadic bind: `M to x. N`)
+3. Case analysis on the sum — `if isError(result) then handle else continue`
 
-This means elaboration's job is uniform: whenever it encounters a producer (call,
-cast, or any effectful operation), it emits `prodCallWithError`:
+There is no special "call with error" primitive. Every procedure call is a 
+`prodCall`. If the procedure has error output (`hasErrorOutput = true`), its return
+type is `A + E` (concretely: it returns both a result and an error value). The
+caller binds and pattern-matches:
 
 ```
 -- A function call that might throw:
-prodCallWithError "f" [args] result err A Error
-  (if isError(err) then prodRaise(err) else <continue>)
-
--- A downcast that might throw TypeError:
-prodCallWithError "Any_to_bool" [x] result err bool Error
-  (if isError(err) then prodRaise(err) else <continue>)
-
--- An upcast (infallible — but SAME form, NoError always):
-prodCallWithError "from_int" [x] result err Any Error
-  <continue with result>  -- err is always NoError, optimizer can eliminate check
+prodLetProd "result" (A × Error)      -- bind the call result (a product of value + error)
+  (prodCall "f" [args])               -- the call itself
+  (prodIfThenElse                     -- case analysis on the error component
+    (isError (snd result))            -- check if error
+    <handle error>                    -- error path
+    <continue with fst result>)       -- success path
 ```
 
-The unification:
+**Key insight: a downcast IS a fallible call.** `Any_to_bool(x)` is just a procedure
+call whose return type is `bool + TypeError`. It's not a separate mechanism — it's
+the same `prodCall` + bind + case pattern:
 
-| Operation | Callee | Can fail? | Error on failure |
-|---|---|---|---|
-| Downcast `Any` → `bool` | `Any_to_bool` | Yes | `TypeError` |
-| Downcast `Any` → `int` | `Any..as_int!` | Yes | `TypeError` |
-| Upcast `int` → `Any` | `from_int` | No (infallible) | Always `NoError` |
-| User function call | `f` | If `hasErrorOutput` | Various |
-| Method call | `Type@method` | If `hasErrorOutput` | Various |
+```
+-- A downcast (just a call that can fail):
+prodLetProd "narrowed" bool
+  (prodCall "Any_to_bool" [valVar "x"])    -- call (may throw TypeError)
+  <continue with valVar "narrowed">        -- if it returns, the result is bool
+```
+
+**Smart constructor `prodCallWithError`:** For convenience, the FGL dialect defines
+`prodCallWithError` as SUGAR that expands to the above pattern (call + bind both
+result and error + case analysis). It is NOT a primitive — it's derived from
+`prodCall` + `prodLetProd` + `prodIfThenElse`. The dialect keeps it for readability
+of the projected output, but the THEORY is just the exception monad.
+
+| Operation | Treatment | Primitive? |
+|---|---|---|
+| Infallible call | `prodCall "f" [args]` + `prodLetProd` | Yes (primitive) |
+| Fallible call | `prodCall "f" [args]` + bind + case on error | Yes (composed from primitives) |
+| Downcast (`Any ▷ T`) | `prodCall "Any_to_T" [val]` + bind + case | Yes (same as fallible call) |
+| Upcast (`T <: Any`) | `valFromT(val)` | Yes (VALUE-level, no call needed) |
+| `prodCallWithError` | Smart constructor = call + bind + case | No (sugar) |
 
 There is no "cast insertion" vs "exception handling" distinction. There is only
 **prodCallWithError** — the monadic bind for the effect monad T(A) = A × Error.
