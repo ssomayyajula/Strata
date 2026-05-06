@@ -49,18 +49,36 @@ Per the bidirectional recipe (ARCHITECTURE.md §"The Bidirectional Recipe"):
 
 ---
 
-## NEXT TASK: Fix Narrowing Coercion Gaps
+## NEXT TASK: Fix Multi-Output Procedure Handling in Elaboration
 
-The elaboration walk must ensure that EVERY position requiring `bool` gets
-`Any_to_bool` inserted when the expression synths as `Any`. Check:
+The killed agent identified the real issue: it's NOT missing narrowing coercions.
+It's that `synthStaticCall` ANF-lifts multi-output procedures (`hasErrorOutput`)
+using plain `prodLetProd` + `prodCall`, which only binds ONE result. Core expects
+ALL outputs to be bound.
 
-1. `synthProducer` for `Assert` — does it `checkProducer cond .TBool`?
-2. `synthProducer` for `While` — does it check the condition against bool?
-3. `synthProducer` for `IfThenElse` — does it check the condition against bool?
-4. `synthStaticCall` for function args — does it `checkValue arg paramType`?
+**The architectural fix (from ARCHITECTURE.md §"The Single Mechanism"):**
+Multi-output procedures MUST use `prodCallWithError` (which binds BOTH result AND
+error). They should NEVER be elaborated as plain `prodCall`.
 
-If any of these are missing the check or the check doesn't trigger narrowing
-correctly, that's the bug.
+**Where in the code:** `synthStaticCall` in Elaborate.lean. When the callee's
+`FuncSig.hasErrorOutput = true`, emit `prodCallWithError` — not `prodCall` wrapped
+in `prodLetProd`.
+
+**The killed agent's mistake:** It tried to fix this with peephole optimizations and
+"smart" assignment handlers. That's heuristics. The correct fix is: use the right
+FGL constructor (`prodCallWithError`) in the first place.
+
+---
+
+## TECH DEBT
+
+| Item | Description | Architecture reference |
+|------|-------------|----------------------|
+| Multi-output ANF | `synthStaticCall` uses `prodCall` for `hasErrorOutput` procedures instead of `prodCallWithError` | §"The Single Mechanism: prodCallWithError" |
+| Narrowing in conditions | Some conditions may still not get `Any_to_bool` in all positions | §"The Bidirectional Recipe" — conditions CHECK against bool |
+| Heap co-operations | Not implemented — procedures touching composites don't get Heap threaded | §"Operations vs Co-Operations" |
+| Stub integration | Library stubs not loaded into Γ | §"Library Stubs: Eliminating PySpec" |
+| `from_Composite` prelude | Reverted — needs re-addition for Composite↔Any boundaries | §"Subtyping and Narrowing Discipline" |
 
 ---
 
