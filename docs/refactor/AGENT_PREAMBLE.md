@@ -65,6 +65,16 @@ The FGL types enforce correctness:
     Do NOT invent a workaround. Do NOT fall back to the old pipeline.
     Do NOT add peephole optimizations. Do NOT "make the handler smarter."
 
+## PROCESS: PLAN BEFORE CODE
+
+Before writing ANY code change:
+1. Write a PLAN: what you will change, which file/lines, why (cite architecture section)
+2. The plan must be specific enough that a reviewer can verify it against the architecture
+   WITHOUT seeing the code
+3. Only after the plan is clear, execute it
+4. If your plan requires heuristics, peephole optimizations, or "smart" handlers — your
+   plan is WRONG. Go back to the architecture.
+
 ## COMPLIANCE CHECKS (run before committing)
 
 ```bash
