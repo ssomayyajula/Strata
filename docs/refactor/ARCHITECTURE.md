@@ -763,6 +763,30 @@ assert assertCond;
 Just the monad law `(m >>= f) >>= g = m >>= (λx. f x >>= g)` applied as a
 syntactic transformation: split into prefix + terminal, thread through.
 
+**Assumption: Laurel has function-level scoping.**
+
+The flattening widens variable scope. In the nested form:
+```
+let x = (let y = N in K) in body
+```
+`y` is scoped ONLY inside `(let y = N in K)` — not visible in `body`.
+
+In the flattened form:
+```
+y := N;
+x := K;
+body;
+```
+`y` is now visible to `body` (it's in the same flat scope).
+
+This is SAFE because Laurel uses function-level scoping: all `LocalVariable`
+declarations at function top are visible throughout the body. Translation already
+hoists all declarations to function top (Python's scoping rule). So widening
+inner let-scopes to function scope is semantics-preserving.
+
+**In a block-scoped target language, this flattening would be UNSOUND** (variable
+capture). We'd need alpha-renaming to ensure freshness. In Laurel, it's fine.
+
 ---
 
 ## Representation Decisions
