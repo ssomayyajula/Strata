@@ -58,17 +58,18 @@ Python AST (user code only)
   ↓ [translate: source-to-source fold, type-directed via Γ]
 e : Laurel.Program (precisely-typed, no casts, no effects)
   ↓ [elaborate: derivation transformation, syntax-directed, language-independent]
-e' : FineGrainLaurel.Program (Value/Producer types enforce polarity, all coercions + effects explicit)
-  ↓ [project: mechanical mapping FGL → Laurel]
-Laurel.Program (coercions/effects as Laurel nodes, ready for Core)
+e' : FineGrainLaurel.Program (coercions explicit as value expressions, error handling explicit as true lets)
+  ↓ [project: trivial cata — forget polarity, all vars as Any]
+Laurel.Program (coercions inline, error bindings as assignments, ready for Core)
   ↓ [Core translation]
 Core
 ```
 
 The stratification is REPRESENTATIONAL: `Laurel.Program` and `FineGrainLaurel.Program`
 are different Lean types. You cannot accidentally pass un-elaborated Laurel to Core —
-the type system prevents it. FineGrainLaurel's separate `Value`/`Producer` inductives
-make illegal states (producer in value position) unrepresentable at construction time.
+the type system prevents it. FineGrainLaurel separates Values (pure expressions
+including coercions) from Producers (effectful procedure calls, control flow, assignment).
+Only procedures with `hasErrorOutput` produce true let-bindings.
 
 ---
 
@@ -254,8 +255,8 @@ If you find a decision point in translation, the design is wrong.
 
 ## Elaboration (Derivation Transformation: Laurel → FineGrainLaurel)
 
-**Input:** Laurel term (potentially ill-typed in FGCBV's sense) + TypeEnv (= **Γ**)  
-**Output:** FineGrainLaurel derivation (fully explicit: polarity, coercions, effects)
+**Input:** Laurel term + TypeEnv (= **Γ**)  
+**Output:** FineGrainLaurel (coercions explicit, error handling explicit)
 
 ### The Unifying Principle
 
@@ -267,22 +268,208 @@ This is the litmus test for what belongs in elaboration vs. resolution/translati
 - "Does this depend on Python's semantics?" → Resolution or translation
 - "Does this depend only on Laurel's type system?" → Elaboration
 
-The method is bidirectional typing (Dunfield & Krishnaswami, ACM Computing Surveys 2021):
+### Two Type Systems (Type-Directed Compilation, Harper & Morrisett 1995)
 
+Elaboration is a typed translation between two type systems:
+
+**HighType** (Translation's output): Has `UserDefined "Foo"` — class identity.
+**LowType** (FGL's type system): Has only `Composite` — uniform heap representation.
+`UserDefined` is unrepresentable in LowType.
+
+```lean
+def eraseType : HighType → LowType
+  | .UserDefined _ => .TCore "Composite"  -- ALL class instances → Composite
+  | .TInt => .TInt  | .TBool => .TBool  | .TString => .TString
+  | .TFloat64 => .TFloat64  | .TVoid => .TVoid  | .TCore n => .TCore n
 ```
-synth(expr) → (FGLExpr, Type)        -- bottom-up: what type does this have?
-check(expr, expectedType) → FGLExpr  -- top-down: make it have this type
+
+### What is a Value vs a Producer?
+
+In FGCBV, the distinction is about **elaboration effects**:
+
+- **Values:** Pure expressions. No elaboration effects. Can be nested freely.
+  Includes: literals, variables, pure function calls (no `hasErrorOutput`),
+  coercions (both upcasts and narrowing — narrowing is partial but that's a
+  verification concern, not a runtime control flow concern).
+
+- **Producers:** Expressions with elaboration effects. Must be bound via `let`.
+  Only: procedure calls with `hasErrorOutput = true` (produce error output),
+  mutation (assignment), control flow (if, while, return, exit).
+
+Pure function calls (arithmetic, coercions, field reads) are VALUES even though
+they may be partial. Partiality is modeled via preconditions (`requires`), not
+via error-value binding. The verifier handles it via SMT, not runtime branching.
+
+### The Typing Rules
+
+**Value synthesis (atoms + pure calls):**
+```
+───────────────        ─────────────────
+Γ ⊢_v n ⇒ int         Γ ⊢_v x ⇒ Γ(x)
+
+vᵢ ⇐ paramTyᵢ    f.hasErrorOutput = false
+────────────────────────────────────────────
+Γ ⊢_v f(v₁,...,vₙ) ⇒ returnType(f)              (pure call — stays nested)
 ```
 
-### The Bidirectional Recipe (Our Specific Instantiation)
+**Value checking (subsumption — the ONLY value checking rule):**
+```
+Γ ⊢_v v ⇒ A    subsume(A, B) = coerce(c)
+──────────────────────────────────────────
+Γ ⊢_v c(v) ⇐ B
+```
 
-FineGrainLaurel is implicitly polarized: it is FGCBV viewed as a fragment of CBPV
-where the only computation type is `↑A` (a producer of value type A). This means:
-- Positive types (values): int, bool, str, Any, Composite, ListAny, DictStrAny
-- The only negative type: `↑A` for any positive A (= a producer that yields A)
+**Producer synthesis:**
+```
+vᵢ ⇐ paramTyᵢ    f.hasErrorOutput = true
+──────────────────────────────────────────────
+Γ ⊢_p f(v₁,...,vₙ) ⇒ returnType(f)              (effectful call — TRUE let)
 
-The bidirectional discipline follows from this polarization, adapted to our system
-where Python annotations drive the checking context:
+─────────────────────────
+Γ ⊢_p (new Foo) ⇒ Composite
+
+v ⇐ Γ(x)
+─────────────────────────
+Γ ⊢_p (x := v) ⇒ TVoid
+
+v ⇐ bool
+─────────────────────────
+Γ ⊢_p (assert v) ⇒ TVoid
+
+v ⇐ bool
+─────────────────────────
+Γ ⊢_p (assume v) ⇒ TVoid
+
+v ⇐ bool    Γ ⊢_p M ⇐ TVoid
+─────────────────────────────
+Γ ⊢_p (while v do M) ⇒ TVoid
+```
+
+**Producer checking:**
+```
+v ⇐ bool    Γ ⊢_p M ⇐ C    Γ ⊢_p N ⇐ C
+──────────────────────────────────────────
+Γ ⊢_p (if v then M else N) ⇐ C
+
+v ⇐ T    Γ,x:T ⊢_p body ⇐ C
+──────────────────────────────
+Γ ⊢_p (var x:T := v; body) ⇐ C
+
+Γ ⊢_p M ⇒ A    Γ,x:A ⊢_p N ⇐ C
+──────────────────────────────────
+Γ ⊢_p (M to x. N) ⇐ C
+
+v ⇐ procReturnType
+───────────────────────────
+Γ ⊢_p (return v) ⇐ procReturnType
+```
+
+### The Unified Subsumption Function
+
+One function, one table, three outcomes. No separate typesEqual/canUpcast/canNarrow:
+
+```lean
+inductive CoercionResult where
+  | refl                                    -- A = A, no coercion
+  | coerce (witness : FGLValue → FGLValue)  -- apply witness
+  | unrelated                               -- type error
+
+def subsume (actual expected : LowType) : CoercionResult :=
+  match actual, expected with
+  -- Reflexivity:
+  | a, b => if a == b then .refl else
+  -- Upcasts (infallible, value → value):
+  | .TInt, .TCore "Any" => .coerce .fromInt
+  | .TBool, .TCore "Any" => .coerce .fromBool
+  | .TString, .TCore "Any" => .coerce .fromStr
+  | .TFloat64, .TCore "Any" => .coerce .fromFloat
+  | .TCore "Composite", .TCore "Any" => .coerce .fromComposite
+  | .TCore "ListAny", .TCore "Any" => .coerce .fromListAny
+  | .TCore "DictStrAny", .TCore "Any" => .coerce .fromDictStrAny
+  | .TVoid, .TCore "Any" => .coerce (fun _ => .fromNone)
+  | _, .TCore "Box" => .coerce (fun v => .staticCall "Box..Any" [upcastToAny v])
+  -- Narrowing (partial, precondition-guarded, value → value):
+  | .TCore "Any", .TBool => .coerce (fun v => .staticCall "Any_to_bool" [v])
+  | .TCore "Any", .TInt => .coerce (fun v => .staticCall "Any..as_int!" [v])
+  | .TCore "Any", .TString => .coerce (fun v => .staticCall "Any..as_string!" [v])
+  | .TCore "Any", .TFloat64 => .coerce (fun v => .staticCall "Any..as_float!" [v])
+  | .TCore "Any", .TCore "Composite" => .coerce (fun v => .staticCall "Any..as_Composite!" [v])
+  | .TCore "Box", .TCore "Any" => .coerce (fun v => .staticCall "Box..AnyVal!" [v])
+  -- Unrelated:
+  | _, _ => .unrelated
+```
+
+Both upcast and narrowing produce VALUES. Narrowing is partial (precondition-guarded)
+but that's a verification concern. No bindings introduced by coercion.
+
+### Key Properties
+
+- **Pure calls are values.** `PAdd(from_int(x), from_int(y))` is ONE nested value
+  expression. No intermediate variables. Stays inline.
+- **Only `hasErrorOutput` calls produce true lets.** These are the ONLY bindings
+  that elaboration introduces (beyond user-written assignments/locals).
+- **Narrowing is value-level.** `Any_to_bool(x)` is a value expression (partial
+  function with precondition). Not a producer binding.
+- **Projection is a trivial cata.** FGL maps directly to Laurel with no restructuring.
+- **All coercion is value-level.** The `subsume` table decides everything.
+
+### Coercion Table (validated against PythonRuntimeLaurelPart.lean)
+
+**Subtyping (A <: B, infallible):**
+
+| A | B | Witness | Source |
+|---|---|---|---|
+| int | Any | `from_int` | Prelude: `from_int (as_int : int)` on Any |
+| bool | Any | `from_bool` | Prelude |
+| str | Any | `from_str` | Prelude |
+| real | Any | `from_float` | Prelude (note: `real` not `float64`) |
+| Composite | Any | `from_Composite` | Prelude |
+| ListAny | Any | `from_ListAny` | Prelude |
+| DictStrAny | Any | `from_DictStrAny` | Prelude |
+| TVoid | Any | `from_None` | Prelude |
+| Any | Box | `Box..Any` | Generated (single Box constructor) |
+
+**Narrowing (A ▷ B, partial/preconditioned):**
+
+| A | B | Witness | Source |
+|---|---|---|---|
+| Any | bool | `Any_to_bool` | Prelude: explicit function (truthiness) |
+| Any | int | `Any..as_int!` | DDM-generated partial accessor |
+| Any | str | `Any..as_string!` | DDM-generated |
+| Any | real | `Any..as_float!` | DDM-generated |
+| Any | Composite | `Any..as_Composite!` | DDM-generated |
+| Any | ListAny | `Any..as_ListAny!` | DDM-generated |
+| Any | DictStrAny | `Any..as_Dict!` | DDM-generated |
+| Box | Any | `Box..AnyVal!` | DDM-generated (infallible — single constructor) |
+
+### Γ Extension at Binding Sites
+
+Γ grows as elaboration descends under binders (standard type theory):
+- Enter procedure → extend Γ with parameters
+- Process `LocalVariable x : T` → extend Γ with `x : T` for continuation
+- Uses `withReader` on the reader monad. No mutable state. One Γ.
+
+### Heap (Co-Operations)
+
+Heap is a co-operation (Bauer 2018): discovered locally, propagated globally.
+- **Discovery:** FieldSelect on Composite, Assign to FieldSelect, New → mark procedure
+- **Propagation:** Fixpoint on call graph (if A calls B and B touches heap, A does too)
+- **Rewriting:** Add heap parameter to touching procedures, thread through calls
+
+Field access: `readField(heap, obj, field)` is a VALUE (pure given heap, returns Box).
+To get concrete type: `Box ▷ Any ~~> Box..AnyVal!` then `Any ▷ T ~~> Any..as_T!`.
+
+### Metadata
+
+Smart constructors: `mkLaurel md expr`. Process `.val`, keep `.md`. Synthesized
+nodes inherit metadata from the input node that triggered them.
+
+### What Elaboration Does NOT Do
+
+- No Python-specific logic (language-independent)
+- No administrative let-bindings (only true lets from hasErrorOutput + user code)
+- No ANF transformation (pure calls stay nested)
+- No type equality dispatch in the walk (subsume decides everything)
 
 **Elaboration = CBV→FGCBV Embedding (Levy 2003 §3.2)**
 
@@ -332,8 +519,8 @@ elaborate each sub-expression, bind result, apply coercions to bound values.
 bound by the time a coercion check happens. The bound variable IS an atom.
 
 **Projection is the LEFT INVERSE of the embedding.** It forgets the FGCBV structure
-back into CBV. The chain of `letProd`s becomes a flat sequence of assignments.
-`splitProducer` implements this via bind reassociation (monad law).
+back into CBV. Since pure calls stay as values (no admin lets), projection is a
+trivial catamorphism — map each FGL constructor to the corresponding Laurel constructor.
 
 Round-trip:
 ```
@@ -500,27 +687,19 @@ used at a CHECK position. The coercion wraps `x`:
 | Return value `tmp` in `return tmp` | procReturnType | Proc signature |
 | Condition `tmp` in `if tmp ...` | bool | Semantics |
 
-**MODE CORRECTNESS PRINCIPLE: No equality on HighTypes.**
+**MODE CORRECTNESS PRINCIPLE: No type dispatch in the walk.**
 
-All type comparisons in the elaboration walk MUST flow through:
-- `canUpcast actual expected` → subtyping (A <: B, infallible, value-level)
-- `canNarrow actual expected` → narrowing (A ▷ B, fallible, producer-level)
-
-If you find yourself writing `typesEqual` or pattern matching on a specific type
-in the elaboration walk, you are mode-incorrect. The only legitimate uses of
-`typesEqual` are:
-1. Inside `checkValue`/`checkProducer` BEFORE trying coercion (short-circuit: if
-   types already agree, no coercion needed — this is the reflexivity axiom A <: A)
-2. Nowhere else
+All type comparisons flow through ONE function: `subsume(actual, expected)`.
+It returns `refl`, `coerce witness`, or `unrelated`. No separate equality check.
+No pattern matching on specific types in the elaboration walk.
 
 Specifically NEVER:
 - `if expectedType == .TVoid then ...` (TVoid constructs SYNTH, not CHECK)
-- `if actualType == .TBool then ...` (the coercion table handles this)
-- `match expectedType with | .TInt => ... | .TBool => ...` (that's dispatch on types)
+- `if actualType == .TBool then ...` (the subsume table handles this)
+- `match expectedType with | .TInt => ... | .TBool => ...` (that's type dispatch)
 
-The coercion table is the ONLY mechanism for relating types. If two types aren't
-related by the table (neither `canUpcast` nor `canNarrow` produces a match), they
-are UNRELATED — that's a type error, not a case to handle.
+The `subsume` table is the ONLY mechanism for relating types. If `subsume` returns
+`unrelated`, that's a type error — not a case to handle with ad-hoc logic.
 
 **The Python annotations ARE the checking context.** Translation preserved them as
 precise types on LocalVariable declarations, procedure inputs/outputs. Elaboration
@@ -561,7 +740,7 @@ Narrowing is partial (the witness `n` may have a `requires` precondition) but
 this is a VERIFICATION concern, not an elaboration concern. Elaboration inserts
 the correct call; the verifier proves the precondition.
 
-`canUpcast` returns the witness `c`. `canNarrow` returns the witness `n`.
+`subsume` returns `refl`, `coerce witness`, or `unrelated`.
 The coercion table is the collection of all witnesses. ALL coercion is value-level.
 No coercion introduces bindings.
 
@@ -569,8 +748,8 @@ All coercion operates on VALUES. If you need to coerce a producer's result, BIND
 it first (`M to x.`), then apply the witness to `x` (a value). Producer checking
 has its own rules (if, var-bind, M-to-x, return) plus narrowing as fallback.
 
-To use a narrowed result as a value (e.g., for an if-condition), bind the
-narrowing producer: `n(v) to x. (use x as Value(B))`
+Narrowing produces a VALUE directly: `n(v) : Value(B)`. No binding needed.
+The result is used inline (e.g., `Any_to_bool(x)` as a condition expression).
 
 ### The Complete Coercion Table (validated against PythonRuntimeLaurelPart.lean)
 
@@ -616,57 +795,9 @@ Our `HighType.TFloat64` maps to `real` in Core. The narrowing accessor is `Any..
 - To use the field value as type T: `Box..AnyVal!(readField(...))` then `Any ▷ T`
 - This is two subsumption steps chained: `Box → Any → T`
 
-**Implementation:** One function, one table, three outcomes:
-
-```lean
-inductive CoercionResult where
-  | refl                                    -- A = A, no coercion
-  | coerce (witness : FGLValue → FGLValue)  -- apply witness
-  | unrelated                               -- type error
-
-def subsume (actual expected : LowType) : CoercionResult :=
-  match actual, expected with
-  -- Reflexivity:
-  | .TInt, .TInt | .TBool, .TBool | .TString, .TString
-  | .TFloat64, .TFloat64 | .TVoid, .TVoid => .refl
-  | .TCore n1, .TCore n2 => if n1 == n2 then .refl else ...
-  -- Upcasts (infallible, value → value):
-  | .TInt, .TCore "Any" => .coerce .fromInt
-  | .TBool, .TCore "Any" => .coerce .fromBool
-  | .TString, .TCore "Any" => .coerce .fromStr
-  | .TFloat64, .TCore "Any" => .coerce .fromFloat
-  | .TCore "Composite", .TCore "Any" => .coerce .fromComposite
-  | .TCore "ListAny", .TCore "Any" => .coerce .fromListAny
-  | .TCore "DictStrAny", .TCore "Any" => .coerce .fromDictStrAny
-  | .TVoid, .TCore "Any" => .coerce (fun _ => .fromNone)
-  | _, .TCore "Box" => .coerce (fun v => .staticCall "Box..Any" [<upcast v to Any first>])
-  -- Narrowing (partial, precondition-guarded, value → value):
-  | .TCore "Any", .TBool => .coerce (fun v => .staticCall "Any_to_bool" [v])
-  | .TCore "Any", .TInt => .coerce (fun v => .staticCall "Any..as_int!" [v])
-  | .TCore "Any", .TString => .coerce (fun v => .staticCall "Any..as_string!" [v])
-  | .TCore "Any", .TFloat64 => .coerce (fun v => .staticCall "Any..as_float!" [v])
-  | .TCore "Any", .TCore "Composite" => .coerce (fun v => .staticCall "Any..as_Composite!" [v])
-  | .TCore "Box", .TCore "Any" => .coerce (fun v => .staticCall "Box..AnyVal!" [v])
-  -- Unrelated:
-  | _, _ => .unrelated
-```
-
-No separate `typesEqual` + `canUpcast` + `canNarrow`. One table. `checkValue` becomes:
-```lean
-checkValue expr expected :=
-  let (val, actual) ← synthValue expr
-  match subsume actual (eraseType expected) with
-  | .refl => val
-  | .coerce c => c val
-  | .unrelated => throw error
-```
-No separate `typesEqual`, `canUpcast`, `canNarrow`. One function (`subsume`),
-one table, called at every CHECK boundary. The table decides everything.
-
-**Critical: coercions go at the USE SITE (argument position, return position),
-NOT at the definition site.** An `int` literal assigned to an `int` variable
-needs no coercion. That same variable passed to `PAdd(v: Any)` gets `from_int`
-at the call boundary.
+**Coercions go at the USE SITE** (argument position, condition position, return),
+NOT at the definition site. `var x: int := 5` → no coercion (int = int, reflexivity).
+`PAdd(x, y)` where PAdd expects Any → `from_int(x)` at the call boundary.
 
 Example:
 ```
@@ -808,7 +939,7 @@ datatype Any { ..., from_Composite (as_Composite: Composite), ... }
 
 This means:
 - `Composite <: Any` via `from_Composite` (subtyping: value→value, infallible)
-- `Any ▷ Composite` via `Any..as_Composite!` (narrowing: value→producer, may throw TypeError)
+- `Any ▷ Composite` via `Any..as_Composite!` (narrowing: value→value, partial — precondition-guarded)
 
 **Why pointer-preserving is sound:**
 - The `Composite` inside `Any` IS the heap reference (same `ref` integer, same `typeTag`)
@@ -1002,300 +1133,78 @@ produces Laurel that the same elaboration pass processes identically.
 
 ## Projection (FineGrainLaurel → Laurel)
 
-### Categorical Background: FGCBV and CBV
+### Projection is a Trivial Catamorphism
 
-FineGrainLaurel is to Laurel as FGCBV (Fine-Grain Call-By-Value) is to CBV
-(Call-By-Value). This is a precise category-theoretic relationship, not an analogy.
-
-**CBV** (Moggi 1991) models effectful computation via a monad T on a category C:
-- Types are objects of C
-- Values and computations live in the same syntactic category
-- The monad T encapsulates effects: a computation of type A is a value of type TA
-- Sequencing is monadic bind: `let x = M in N` where M : TA, N : TB (with x : A free)
-
-In our system, **T encapsulates elaboration effects** — specifically:
-- **Type coercions** (casting between Any and concrete types)
-- **Exception propagation** (error outputs)
-- **Partiality** (precondition violations, undefined behavior)
-
-These are the effects that elaboration makes explicit. A "producer" is any term
-that might cast, throw, or diverge. A "value" is inert — no effects possible.
-
-The problem with CBV (= Laurel): values and producers are conflated syntactically.
-The term `f(g(x))` hides sequencing — `g(x)` is a computation (it might throw, it
-might need a cast on its result) whose result feeds into `f`, but the syntax doesn't
-make the intermediate binding or error check explicit.
-
-**FGCBV** (Levy 1999, 2004) refines CBV by separating the syntax:
-- **Values** (type V): inert terms — variables, literals, pure constructions
-- **Producers** (type TV): effectful terms — function calls (may throw), coercions (may fail), let-bindings, control flow
-- A producer in value position *must* be explicitly sequenced via let-binding
-
-The key operation is **let-binding** (monadic bind made syntactically explicit):
-```
--- CBV / Laurel (implicit sequencing, implicit effects):
-f(g(x))           -- g might throw, f might cast — all hidden
-
--- FGCBV / FineGrainLaurel (explicit sequencing, explicit effects):
-let tmp = g(x) in   -- g is a producer: might throw → error check here
-let result = f(tmp) in  -- f is a producer: might cast → coercion here
-result
-```
-
-### Exception Handling: The Monadic Model
-
-Exception handling in FineGrainLaurel is **monadic** — not an ad-hoc protocol of
-sentinel variables and boolean checks. The FineGrainLaurel dialect already defines
-the correct operator:
+Projection forgets the Value/Producer polarity distinction. It maps each FGL
+constructor to the corresponding Laurel constructor. No restructuring, no hoisting,
+no collapsing of intermediate variables — because there ARE no intermediate variables
+(only true lets from hasErrorOutput calls and user assignments).
 
 ```
-op prodCallWithError (callee: Ident, args: CommaSepBy Value,
-                      resultVar: Ident, errorVar: Ident,
-                      resultTy: LaurelType, errorTy: LaurelType,
-                      body: Producer): Producer
-  => "let [" resultVar ": " resultTy ", " errorVar ": " errorTy
-     "] = " callee "(" args ") in " body;
-```
-
-This is the monadic bind for `T(A) = A + Error`:
-- The callee produces either a result (type A) or an error (type Error)
-- The `body` continuation has access to both `resultVar` and `errorVar`
-- The `body` decides how to handle the error (propagate or catch)
-
-**The flow:**
-1. **Translation** emits a plain `StaticCall "f" [args]` — it doesn't know about errors
-2. **Elaboration** sees that Γ says `f` has error output → transforms into:
-   ```
-   prodCallWithError "f" [args] result err A Error
-     (if isError(err) then prodRaise(err) else <continue with result>)
-   ```
-3. **Projection** (DDM) flattens back to Laurel's multi-output assignment that Core expects:
-   ```
-   result, maybe_except := f(args)
-   if isError(maybe_except) then ...
-   ```
-
-**The critical insight:** The ad-hoc `maybe_except` pattern in the old pipeline IS
-the projection of the monadic bind. We were generating the *projected* form directly
-instead of going through the proper intermediate. The difference:
-- **Wrong:** Translation emits `result, maybe_except := f(args); if isError(...)` directly
-- **Right:** Elaboration emits `prodCallWithError`, projection flattens it
-
-This matters because:
-- `prodCallWithError` is a **structural** construct that downstream passes can reason about
-- The projected form is opaque imperative code that looks like any other if-statement
-- FineGrainLaurel-level transformations (optimization, verification) can treat
-  `prodCallWithError` as a single unit (it's the monadic bind), not three separate statements
-
-### Prelude Alignment
-
-The Laurel prelude defines:
-- `Error` datatype: `NoError | TypeError | AttributeError | ...`
-- `isError(e: Error) : bool`: test if exception occurred
-- `exception(e: Error) : Any`: wrap exception in Any type
-
-The prelude's `Error` with `NoError` as the success marker is the concrete
-realization of the sum type `1 + TypeError + AttributeError + ...`. The monadic
-T(A) for our system is `A × Error` (where Error may be `NoError`), which projects
-to Laurel's multi-output convention: procedures return `(result: A, maybe_except: Error)`.
-
-If we find ourselves encoding exceptions non-monadically (flag variables, manual
-if-checks outside of the projection), something is wrong — we've left the Kleisli
-category.
-
-**Projection** (FGCBV → CBV) is the **forgetful functor** that erases the
-Value/Producer distinction. Category-theoretically:
-- FGCBV lives in the Kleisli category of the monad T
-- CBV lives in the base category C (with T implicit)
-- Projection is the canonical functor from Kleisli(T) → C that forgets the T-structure
-
-In our system:
-- **FineGrainLaurel** = FGCBV: separate `Value` and `Producer` categories, explicit let-bindings, explicit coercions
-- **Laurel** = CBV: single `StmtExpr` type, sequencing implicit, effects implicit
-- **Projection** = forgetful functor: erases polarity, keeps the inserted let-bindings and coercions as regular Laurel nodes
-
-### Elaboration and Projection are Inverses
-
-The round-trip:
-```
-Laurel (CBV) → [Elaboration = CBV→FGCBV embedding] → FGL → [Projection = FGCBV→CBV] → Laurel (CBV)
-```
-
-Projection is the LEFT INVERSE of elaboration. What comes back is the SAME
-program but with explicit coercions and let-bindings that weren't in the input.
-The embedding makes effects explicit. The forgetting flattens them back into
-imperative sequential code. The net effect: coercions inserted, sequencing made
-explicit, type errors caught.
-
-### Projection: Two-Pass (Declaration Hoisting)
-
-Core's Laurel→Core translator expects a specific format: all variable declarations
-at the TOP of a procedure body block, then only assignments/control flow below.
-No inline `LocalVariable` nodes in the middle of the body.
-
-This is standard compiler structure (like stack frame layout): declarations are
-separated from uses. The embedding produces many intermediate bindings (one per
-`letProd`). Projection must HOIST them.
-
-**Two-pass projection:**
-
-Pass 1 — **Collect declarations:** Walk the FGL producer tree, gather every
-`letProd` binding (name + type). These become `LocalVariable name type Hole`
-declarations at the top of the block.
-
-Pass 2 — **Emit assignments:** Walk again, emit `Assign [name] expr` for each
-binding (not `LocalVariable`). Control flow nodes (if, while, assert) emitted inline.
-
-**Output format:**
-```
-Block [
-  -- Hoisted declarations (all letProd bindings):
-  LocalVariable "arg$0" Any Hole;
-  LocalVariable "tmp$1" int Hole;
-  LocalVariable "narrowed$2" bool Hole;
+projectValue : FGLValue → StmtExprMd
+  litInt n        → LiteralInt n
+  litBool b       → LiteralBool b
+  litString s     → LiteralString s
+  var x           → Identifier x
+  fromInt v       → StaticCall "from_int" [projectValue v]
+  fromBool v      → StaticCall "from_bool" [projectValue v]
   ...
-  -- Body (assignments + control flow):
-  arg$0 := from_int(x);
-  tmp$1 := PAdd(arg$0, ...);
-  narrowed$2 := Any..as_int!(tmp$1);
+  staticCall f vs → StaticCall f (vs.map projectValue)
+  fieldAccess o f → FieldSelect (projectValue o) f
+
+projectProducer : FGLProducer → StmtExprMd
+  -- True lets (from hasErrorOutput calls):
+  callWithError f args rv ev rTy eTy body →
+    Block [LocalVariable rv Any Hole; LocalVariable ev Error (StaticCall "NoError" []);
+           Assign [rv, ev] (StaticCall f (args.map projectValue));
+           projectProducer body]
+  -- User assignments/locals:
+  assign target val body → Block [Assign [projectValue target] (projectValue val);
+                                   projectProducer body]
+  varDecl x ty init body → Block [Assign [Identifier x] (projectValue init);
+                                    projectProducer body]
+  -- Control flow:
+  ifThenElse c t e → IfThenElse (projectValue c) (projectProducer t) (projectProducer e)
+  whileLoop c body after → Block [While (projectValue c) [] none (projectProducer body);
+                                    projectProducer after]
+  assert c body → Block [Assert (projectValue c); projectProducer body]
+  assume c body → Block [Assume (projectValue c); projectProducer body]
+  exit label → Exit label
+  returnValue v → projectValue v  (terminal expression)
   ...
-]
 ```
 
-This matches Core's expectations:
-- `Hole` for uninitialized vars (= `<?>` in Core)
-- No inline LocalVariable in the body
-- Variables always declared before use (hoisted to top)
+**All projected variable types are `Any`.** Core uses Hindley-Milner unification.
+The prelude operates on `Any`. Precise types (from elaboration's LowType) are
+erased to `Any` during projection.
 
-The `_uninit` placeholder goes away — all vars get `Hole`.
+**Uninitialized variables use `Hole`.** Core expects `<?>` for declarations without
+a meaningful initial value.
 
-### Why This Matters
+### Why Projection is Trivial
 
-1. **Elaboration targets FGCBV** because the CBV→FGCBV embedding is what forces
-   every subexpression to be bound. Binding is where coercions are inserted.
-   In CBV (Laurel), subexpressions are implicit — no place to insert coercions.
+Because elaboration doesn't introduce administrative lets. Pure calls stay nested
+(they're values). Coercions are inline (they're value-level expressions). The ONLY
+bindings are:
+1. User-written `LocalVariable` declarations (from Translation's scope hoisting)
+2. User-written `Assign` statements
+3. `prodCallWithError` bindings (from hasErrorOutput procedures)
 
-2. **Projection is total and meaning-preserving.** Every FGCBV term projects to a
-   unique CBV term. The projection cannot fail and cannot change semantics — it only
-   forgets the syntactic stratification. This is the category-theoretic guarantee.
+These map directly to Laurel's existing AST forms. No bind reassociation needed.
+No let-floating. No two-pass hoisting.
 
-3. **Illegal states in CBV become type errors in FGCBV.** A producer nested directly
-   inside another producer (without let-binding) is a type error in FGCBV, though it's
-   syntactically representable in CBV. The separate types make it unrepresentable.
+### Exception Handling: prodCallWithError
 
-### Implementation: Projection as Bind Reassociation
+The ONLY elaboration-introduced binding. When Γ says `f.hasErrorOutput = true`:
+- Elaboration emits `prodCallWithError f [args] resultVar errorVar ...`
+- Projection maps this to Laurel's multi-output assignment:
+  ```
+  resultVar, errorVar := f(args)
+  if isError(errorVar) then ... else ...
+  ```
 
-Projection views an FGCBV term as a CBV term. The key operation: nested
-`prodLetProd` (monadic binds) become flat sequential statements. This is
-monadic bind ASSOCIATIVITY:
-
-```
--- FGCBV (nested lets — right-associated):
-let x = (let y = N in K) in body
-
--- CBV (flat statements — left-associated):
-y := N;
-x := K;
-body
-```
-
-The reassociation law: `let x = (let y = M in N) in K` = `let y = M in let x = N in K`
-
-This is not an optimization — it's the DEFINITION of viewing FGCBV as CBV.
-Every nested `prodLetProd` in the producer position of another `prodLetProd`
-gets reassociated to the same level.
-
-**The projection algorithm:**
-
-Two functions — one extracts the "prefix bindings + terminal expression" from a
-producer, the other flattens into a statement list:
-
-```
--- Split a producer into (prefix statements, terminal expression)
--- The terminal is what the producer "produces" — the value that would be bound
--- by an enclosing `let x = M in ...`
-splitProducer : FGL.Producer → (List Laurel.Stmt, Laurel.Expr)
-
-splitProducer (prodReturnValue v)       = ([], projectValue v)
-splitProducer (prodCall f args)         = ([], StaticCall f (args.map projectValue))
-splitProducer (prodLetProd x ty M body) = let (mStmts, mExpr) := splitProducer M
-                                          let xDecl := LocalVariable x ty (some mExpr)
-                                          let (bodyStmts, bodyExpr) := splitProducer body
-                                          (mStmts ++ [xDecl] ++ bodyStmts, bodyExpr)
-splitProducer (prodAssign t v body)     = let assignStmt := Assign [projectValue t] (projectValue v)
-                                          let (bodyStmts, bodyExpr) := splitProducer body
-                                          ([assignStmt] ++ bodyStmts, bodyExpr)
-splitProducer (prodIfThenElse c t e)    = ([], IfThenElse (projectValue c) (project t) (project e))
-splitProducer (prodWhile c invs b aft)  = let whileStmt := While (projectValue c) invs (project b)
-                                          let (afterStmts, afterExpr) := splitProducer aft
-                                          ([whileStmt] ++ afterStmts, afterExpr)
-
--- For a procedure body (top level): just get all statements, ignore terminal
-projectBody : FGL.Producer → Laurel.StmtExprMd
-projectBody prod = let (stmts, _terminal) := splitProducer prod
-                   Block stmts none
-```
-
-**Example — the reassociation in action:**
-
-```
--- FGL (nested):
-prodLetProd "assertCond" bool
-  (prodLetProd "narrow" Any (prodCall "PAnd" [a, a]) (prodCall "Any_to_bool" [valVar "narrow"]))
-  (prodAssert (valVar "assertCond") continuation)
-
--- splitProducer on the inner prodLetProd:
--- splitProducer (prodCall "PAnd" [a,a]) = ([], PAnd(a,a))
--- So: mStmts=[], mExpr=PAnd(a,a)
--- xDecl = LocalVariable "narrow" Any (some PAnd(a,a))
--- splitProducer (prodCall "Any_to_bool" [narrow]) = ([], Any_to_bool(narrow))
--- So: bodyStmts=[], bodyExpr=Any_to_bool(narrow)
--- Result: ([LocalVariable "narrow" Any (some PAnd(a,a))], Any_to_bool(narrow))
-
--- Now the outer prodLetProd:
--- (mStmts, mExpr) = ([LocalVariable "narrow" Any (some PAnd(a,a))], Any_to_bool(narrow))
--- xDecl = LocalVariable "assertCond" bool (some Any_to_bool(narrow))
--- Result includes: [LocalVariable "narrow" ..., LocalVariable "assertCond" ..., assert ...]
-
--- FLAT output:
-var narrow: Any := PAnd(a, a);
-var assertCond: bool := Any_to_bool(narrow);
-assert assertCond;
-```
-
-**No heuristics. No filtering. No "expression vs statement position."**
-Just the monad law `(m >>= f) >>= g = m >>= (λx. f x >>= g)` applied as a
-syntactic transformation: split into prefix + terminal, thread through.
-
-**Assumption: elaboration generates FRESH names for all bindings.**
-
-Laurel has block scoping (a `LocalVariable` at the top of a `Block` is scoped
-to that block). The flattening widens variable scope:
-
-In the nested form:
-```
-let x = (let y = N in K) in body
-```
-`y` is scoped ONLY inside `(let y = N in K)` — not visible in `body`.
-
-In the flattened form:
-```
-y := N;
-x := K;
-body;
-```
-`y` is now visible to `body` (same flat scope).
-
-This is SAFE because:
-1. Elaboration generates FRESH variable names for all intermediate bindings
-   (`narrow$1`, `assertCond$2`, `arg$3`, etc. via `freshVar`)
-2. Fresh names cannot clash with any user-defined or prelude names
-3. Therefore scope widening cannot cause variable capture
-4. Additionally, Translation already hoists user-defined locals to function
-   top (Python's scoping rule), so user variables are already function-scoped
-
-**Invariant to maintain:** Elaboration MUST use `freshVar` for all intermediate
-bindings. If it ever reuses a name, the flattening becomes unsound.
+This is the monadic bind for `T(A) = A × Error`. The projected form is Laurel's
+convention for error-producing procedures.
 
 ---
 
@@ -1362,12 +1271,10 @@ The bidirectional walk operates ACROSS the type boundary:
 - `synthValue : StmtExprMd → ElabM (FGLValue × LowType)` — synthesizes a target type
 - `checkValue : StmtExprMd → HighType → ElabM FGLValue` — expected type is in source system
 
-The coercion table crosses the boundary:
-```
-canUpcast : HighType → HighType → Option (FGLValue → FGLValue)
-```
-When it sees `UserDefined _ → TCore "Any"`, it emits `from_Composite` — which is
-correct because in the target, the value IS `Composite` (eraseType applied).
+The `subsume` function crosses the boundary: `checkValue` erases the expected
+HighType via `eraseType` before calling `subsume(actual, expectedLow)`. When the
+source type is `UserDefined _`, eraseType gives `TCore "Composite"`, and
+`subsume(.TCore "Composite", .TCore "Any")` returns the `from_Composite` witness.
 
 **How this affects term translation:**
 
