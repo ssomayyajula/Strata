@@ -554,14 +554,19 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
       let st : ElabState := { freshCounter := 0, currentProcReturnType := retTy, heapVar }
       let extEnv := (proc.inputs ++ proc.outputs).foldl
         (fun env p => { env with names := env.names.insert p.name.text (.variable p.type.val) }) typeEnv
-      -- If stateful, extend Γ with $heap
-      let extEnv := if isStateful then { extEnv with names := extEnv.names.insert "$heap" (.variable .THeap) } else extEnv
-      let (fgl, _) := (checkProducer bodyExpr (eraseType retTy)).run extEnv |>.run st
-      -- If stateful, add $heap params
+      -- If stateful, extend Γ with $heap_in and $heap
+      let extEnv := if isStateful then
+        { extEnv with names := extEnv.names.insert "$heap_in" (.variable .THeap) |>.insert "$heap" (.variable .THeap) }
+      else extEnv
+      let (fglRaw, _) := (checkProducer bodyExpr (eraseType retTy)).run extEnv |>.run st
+      -- If stateful, prepend $heap := $heap_in
+      let fgl := if isStateful then .assign (.var "$heap") (.var "$heap_in") fglRaw else fglRaw
+      -- If stateful, add $heap_in (input) and $heap (output)
       let heapTy : HighTypeMd := ⟨.THeap, #[]⟩
-      let heapParam : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := heapTy }
-      let inputs' := if isStateful then heapParam :: proc.inputs else proc.inputs
-      let outputs' := if isStateful then heapParam :: proc.outputs else proc.outputs
+      let heapIn : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := heapTy }
+      let heapOut : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := heapTy }
+      let inputs' := if isStateful then heapIn :: proc.inputs else proc.inputs
+      let outputs' := if isStateful then heapOut :: proc.outputs else proc.outputs
       procs := procs ++ [{ proc with inputs := inputs', outputs := outputs', body := .Transparent (projectBody bodyExpr.md fgl) }]
     | _ => procs := procs ++ [proc]
   let compositeType : TypeDefinition := .Datatype { name := "Composite", typeArgs := [], constructors := [{ name := "MkComposite", args := [{ name := "ref", type := ⟨.TInt, #[]⟩ }] }] }
