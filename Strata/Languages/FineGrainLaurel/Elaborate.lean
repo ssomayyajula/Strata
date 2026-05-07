@@ -307,7 +307,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
       let retTy := match proc.outputs with | [p] => p.type.val | _ => .TCore "Any"
       let st : ElabState := { freshCounter := 0, currentProcReturnType := retTy }
       -- Extend Γ with procedure parameters
-      let extEnv := proc.inputs.foldl (fun env p => { env with names := env.names.insert p.name.text (.variable p.type.val) }) typeEnv
+      let extEnv := (proc.inputs ++ proc.outputs).foldl (fun env p => { env with names := env.names.insert p.name.text (.variable p.type.val) }) typeEnv
       match (synthProducer bodyExpr).run extEnv |>.run st with
       | .ok ((fgl, _), _) => procs := procs ++ [{ proc with body := .Transparent (projectBody bodyExpr.md fgl) }]
       | .error _ => procs := procs ++ [proc]
