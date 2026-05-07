@@ -258,7 +258,7 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     match (← get).heapVar with
     | some hv =>
       let owner ← resolveFieldOwner field.text
-      let qualifiedName := match owner with | some cn => cn ++ "." ++ field.text | none => field.text
+      let qualifiedName := match owner with | some cn => "$field." ++ cn ++ "." ++ field.text | none => "$field." ++ field.text
       let fieldTy ← match owner with
         | some cn => do let ft ← lookupFieldType cn field.text; pure (ft.getD (.TCore "Any"))
         | none => pure (.TCore "Any")
@@ -475,7 +475,7 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
     match (← get).heapVar with
     | some hv =>
       let owner ← resolveFieldOwner field.text
-      let qualifiedName := match owner with | some cn => cn ++ "." ++ field.text | none => field.text
+      let qualifiedName := match owner with | some cn => "$field." ++ cn ++ "." ++ field.text | none => "$field." ++ field.text
       let fieldTy ← match owner with
         | some cn => do let ft ← lookupFieldType cn field.text; pure (ft.getD (.TCore "Any"))
         | none => pure (.TCore "Any")
@@ -571,7 +571,7 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
       match (← get).heapVar with
       | some hv =>
         let owner ← resolveFieldOwner field.text
-        let qualifiedName := match owner with | some cn => cn ++ "." ++ field.text | none => field.text
+        let qualifiedName := match owner with | some cn => "$field." ++ cn ++ "." ++ field.text | none => "$field." ++ field.text
         let fieldTy ← match owner with
           | some cn => do let ft ← lookupFieldType cn field.text; pure (ft.getD (.TCore "Any"))
           | none => pure (.TCore "Any")
@@ -756,7 +756,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       { name := Identifier.mk "typeTag" none, type := ⟨.UserDefined "TypeTag", #[]⟩ }] }] }
   let fieldConstructors := typeEnv.classFields.toList.foldl (fun acc (className, fields) =>
     acc ++ fields.map fun (fieldName, _) =>
-      { name := Identifier.mk (className ++ "." ++ fieldName) none, args := [] : DatatypeConstructor }) []
+      { name := Identifier.mk ("$field." ++ className ++ "." ++ fieldName) none, args := [] : DatatypeConstructor }) []
   let fieldDatatype : TypeDefinition := .Datatype {
     name := "Field", typeArgs := [], constructors := fieldConstructors }
   let boxConstructors := allBoxConstructors.map fun (ctorName, _, ty) =>

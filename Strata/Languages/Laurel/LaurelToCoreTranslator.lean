@@ -65,6 +65,7 @@ def translateType (model : SemanticModel) (ty : HighTypeMd) : LMonoTy :=
     | _ => .tcons "Composite" [] -- fallback for unresolved refs
   | .TCore s => .tcons s []
   | .TReal => LMonoTy.real
+  | .TFloat64 => LMonoTy.real
   | .Unknown => .tcons "Any" [] -- TODO, abort execution since there is no valid Core type to translate Unknown to
   | _ => .tcons "NotSupportedYet" [] -- TODO, abort execution since there is no valid Core type to translate Unknown to
 termination_by ty.val
