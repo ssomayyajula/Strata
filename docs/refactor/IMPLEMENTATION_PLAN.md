@@ -1,73 +1,55 @@
 # Implementation Plan: Python → Laurel
 
-## Status: 35/54 non-regressing (19 regressions)
+## Status: 36/54 non-regressing (18 regressions)
 
 ---
 
-## Architectural Change: EffectType replaces hasErrorOutput
+## Next: HOAS Smart Constructors for Binding Hygiene
 
-`FuncSig.hasErrorOutput: Bool` is boolean blindness. Replace with:
+The current code has dangling variable references — `callWithError` introduces
+`rv`/`ev` but subsequent code can reference them without Γ extension. This is
+unsound. Fix: HOAS smart constructors.
+
+### Task 1: Implement HOAS smart constructors
 
 ```lean
-inductive EffectType where
-  | pure (ty : HighType)
-  | error (resultTy : HighType) (errTy : HighType)
-  | stateful (resultTy : HighType)
-  | statefulError (resultTy : HighType) (errTy : HighType)
+-- freshVar is PRIVATE to this module
+private def freshVar (pfx : String) : ElabM String := ...
+
+-- The ONLY way to create binding forms:
+def mkCallWithError (callee : String) (args : List FGLValue) (resultTy errTy : LowType)
+    (body : FGLValue → FGLValue → ElabM FGLProducer) : ElabM FGLProducer
+
+def mkVarDecl (name : String) (ty : LowType) (init : Option FGLValue)
+    (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer
+
+def mkLetProd (ty : LowType) (prod : FGLProducer)
+    (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer
 ```
 
-Elaboration pattern-matches on `EffectType` — no boolean dispatch.
-- `.pure ty` → synthValue (value-level call, stays nested)
-- `.error resultTy errTy` → synthProducer (callWithError, true let)
-- `.stateful resultTy` → synthProducer (heap threading)
-- `.statefulError resultTy errTy` → synthProducer (both)
+Each extends Γ before calling the closure. `lake build`.
+
+### Task 2: Rewrite elaboration to use HOAS constructors
+
+- Assign effectful case: use `mkCallWithError` with closure for rest of block
+- LocalVariable case: use `mkVarDecl` with closure for continuation
+- `elaborateBlock`: threading uses closures, not `sequenceProducers`
+- No direct `freshVar` calls in elaboration code
+- `lake build`
+
+### Task 3: End-to-end validation
+
+Target: fix procedure_in_assert, method_param_reassign (dangling var bugs).
+Run diff_test.sh. Target: 38+/54.
 
 ---
 
-## Execution Tasks
+## Remaining Regressions After HOAS Fix
 
-### 1. Add EffectType to Resolution (NameResolution.lean)
-
-- Add `EffectType` inductive
-- Change `FuncSig`: remove `returnType + hasErrorOutput`, add `effectType : EffectType`
-- Update `buildTypeEnv`: determine effect from function body (raise → .error, field access → .stateful)
-- Update `preludeSignatures`: all prelude ops are `.pure (.TCore "Any")`
-- `lake build`
-
-### 2. Update Translation to use EffectType
-
-- `resolveKwargs` reads `sig.effectType` for param info
-- `translateFunction` determines effect for user procedures
-- No boolean dispatch anywhere
-- `lake build`
-
-### 3. Update Elaboration to pattern-match on EffectType
-
-- `synthValue` StaticCall: match `.pure ty` → value call
-- `synthProducer` StaticCall: match `.error`/`.stateful`/`.statefulError` → producer
-- Assign case: match RHS call's effect to determine if value or producer
-- No `hasErrorOutput` anywhere
-- `lake build`
-
-### 4. Fix remaining type errors
-
-- TVoid in Core (already fixed)
-- Assign with effectful RHS (now handled by EffectType dispatch)
-- test_power: NotSupportedYet issue
-- test_procedure_in_assert: function type mismatch
-- `lake build` + test
-
-### 5. End-to-end validation
-
-Target: 40+/54. Remaining will be heap (7) + PySpec (5).
-
----
-
-## Remaining Regressions (19)
-
-| Category | Count | Blocked by |
-|----------|-------|-----------|
-| Class/heap | 7 | Full heap implementation |
-| PySpec stubs | 5 | Stub integration (out of scope) |
-| TYPE_CHECK | 5 | EffectType fix (tasks 1-4) |
-| PROC_NOT_FOUND | 2 | Pipeline wiring |
+| Category | Count | Status |
+|----------|-------|--------|
+| Class/heap | 7 | Needs full heap implementation |
+| PySpec stubs | 5 | Out of scope |
+| PySpec arg mismatch | 3 | Out of scope |
+| Pipeline (Any_get) | 1 | filterPrelude issue |
+| Type errors (post-HOAS) | 2 | May be fixed by HOAS, otherwise diagnose |
