@@ -172,6 +172,15 @@ f : (A₁,...,Aₙ) → B & d    d > 1    vᵢ ⇐ Aᵢ
 Γ ⊢_p (return V) ⇐ A & e
 ```
 
+Mode check for `M to x. N ⇐ A & e`:
+- `A & e`: input (from check context)
+- Synth M → get `B & d` (now `d` is known)
+- Compute `d \ e` (residual — both `d` and `e` known, computable)
+- Check N against `A & (d \ e)` (all inputs determined)
+
+The residuated monoid makes this mode-correct: given the whole grade `e` and
+the prefix grade `d`, the continuation grade `d \ e` is uniquely determined.
+
 ### Subsumption
 
 ```
