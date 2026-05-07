@@ -382,7 +382,8 @@ private def resolveClassDef (name : Ann String SourceRange)
           | [] => []
         let retTy := extractReturnType methodReturns
         let hasKw := hasKwargsArg methodArgs
-        let effectType := detectEffectType methodBody.val retTy
+        let effectType := if methodName.val == "__init__" then .stateful retTy
+          else detectEffectType methodBody.val retTy
         let sig : FuncSig := {
           name := qualName,
           params := params,
@@ -555,6 +556,28 @@ def buildTypeEnv (stmts : Array (Python.stmt SourceRange)) : TypeEnv := Id.run d
               let (n, info) := resolveFunctionDef name args innerBody returns
               names := names.insert n info
           | _ => pure ()
+    | _ => pure ()
+  -- Propagate statefulness: any function that calls a class constructor is stateful
+  -- (object construction = heap allocation)
+  for (funcName, info) in names.toList do
+    match info with
+    | .function sig => match sig.effectType with
+      | .pure retTy =>
+        -- Check if this function's body calls any class (i.e., constructs objects)
+        let callsClass := stmts.any fun stmt => match stmt with
+          | .FunctionDef _ n _ body _ _ _ _ =>
+            if n.val == funcName then
+              body.val.any fun s => match s with
+                | .Assign _ _ (.Call _ (.Name _ callee _) _ _) _ =>
+                  match names[callee.val]? with | some (.class_ _ _) => true | _ => false
+                | .Expr _ (.Call _ (.Name _ callee _) _ _) =>
+                  match names[callee.val]? with | some (.class_ _ _) => true | _ => false
+                | _ => false
+            else false
+          | _ => false
+        if callsClass then
+          names := names.insert funcName (.function { sig with effectType := .stateful retTy })
+      | _ => pure ()
     | _ => pure ()
   return { names := names, classFields := classFields,
            overloadTable := {}, builtinMap := defaultBuiltinMap }
