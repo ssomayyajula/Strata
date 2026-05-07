@@ -260,6 +260,8 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     let sig ← lookupFuncSig callee.text
     match sig with
     | some s =>
+      let g ← discoverGrade callee.text
+      guard (g == .pure)
       let checkedArgs ← checkArgs args s.params
       pure (.staticCall callee.text checkedArgs, eraseType s.returnType)
     | none =>
