@@ -482,27 +482,68 @@ but that's a verification concern. No bindings introduced by coercion.
 - Process `LocalVariable x : T` → extend Γ with `x : T` for continuation
 - Uses `withReader` on the reader monad. No mutable state. One Γ.
 
-### Heap (State-Passing Translation)
+### Heap (State-Passing via the CBV→FGCBV Embedding)
 
-Heap is the state effect. The state-passing translation (Egger et al. 2014) makes
-it explicit by threading the heap as a parameter:
+The CBV→FGCBV embedding (Levy 2003, Egger/Møgelberg/Staton 2014) makes ALL
+effects explicit by threading monadic state through the continuation structure.
+We already instantiate this for error (via `callWithError`). Heap is the SAME
+mechanism instantiated for the state monad: `T(A) = Heap → (A × Heap)`.
 
-- **Discovery:** Walk procedure bodies. FieldSelect on Composite, Assign to
-  FieldSelect, New → mark procedure as heap-touching.
-- **Propagation:** Fixpoint on call graph (transitive: if A calls heap-touching B,
-  A is heap-touching too).
-- **State-passing:** Add heap parameter to touching procedures. Calls to touching
-  procedures pass and receive heap. Field accesses become `readField(heap, obj, field)` /
-  `updateField(heap, obj, field, val)`.
+Elaboration handles heap in the SAME walk as coercions and errors. When the
+elaborator encounters a stateful operation, it threads the heap variable through
+the CPS structure — exactly as it threads error variables. There is no separate
+"heap phase." Resolution's `EffectType` tells the elaborator which procedures
+are stateful; the elaborator reads this and acts accordingly.
 
-This is the SAME operation as error-passing (`prodCallWithError`), just for a
-different effect (state vs exceptions). Both are effect-passing translation:
-- Error-passing: `f(args)` → `let [result, err] = f(args) in ...`
-- State-passing: `f(args)` → `let (result, heap') = f(heap, args) in ...`
+**Heap operations (state access operations in the sense of Møgelberg & Staton):**
 
-Field access: `readField(heap, obj, field)` is a VALUE (pure given explicit heap,
-returns Box). To get concrete type: `Box → Any` via `Box..AnyVal!`, then
-`Any → T` via narrowing witness.
+| Operation | Source (Laurel) | Elaborated (FGL) |
+|-----------|-----------------|------------------|
+| Allocate | `.New classId` | `increment($heap)` → new heap; `MkComposite($heap_nextRef, TypeTag)` → result |
+| Field read | `.FieldSelect obj field` | `readField($heap, obj, field)` → Box; unwrap via `Box..AnyVal!` |
+| Field write | `Assign [FieldSelect obj field] val` | `$heap := updateField($heap, obj, field, Box..Any(val))` |
+| Call stateful | `f(args)` where f is `.stateful` | `($result, $heap) := f($heap, args)` |
+
+**Heap threading in the CPS structure:**
+
+The heap variable `$heap` is threaded linearly through producers. Each stateful
+operation consumes the current heap and produces a new one. The continuation
+receives the updated heap. This is identical to how `callWithError` threads
+error variables — it's the same M-to-x binding, just for a different effect.
+
+```
+-- Allocation (New):
+synthProducer (.New classId) =
+  let heap' = increment($heap)
+  let ref = Heap..nextReference!($heap)
+  let obj = MkComposite(ref, classId_TypeTag())
+  $heap := heap'
+  return obj
+
+-- Field read (pure given explicit heap):
+synthValue (.FieldSelect obj field) =
+  Box..AnyVal!(readField($heap, obj, qualifiedField))
+
+-- Field write:
+elaborateStmt (Assign [FieldSelect obj field] val) cont =
+  $heap := updateField($heap, obj, qualifiedField, Box..Any(from_T(val)))
+  cont
+
+-- Call to stateful procedure:
+elaborateStmt (StaticCall f args) cont  [where f.effectType = .stateful] =
+  ($result, $heap) := f($heap, coerced_args)
+  cont
+```
+
+**The heap variable is introduced at the procedure level.** For procedures with
+`.stateful` or `.statefulError` effect types, elaboration adds `$heap : Heap` as
+an input parameter and `$heap : Heap` as an output parameter. The procedure body
+threads `$heap` through all stateful operations.
+
+**Transitivity:** If procedure A calls stateful procedure B, then A must also
+thread the heap (even if A doesn't directly touch it). Resolution's `EffectType`
+already encodes this — a procedure is `.stateful` if it OR any of its transitive
+callees touches the heap. The elaborator just reads this from Γ.
 
 ### Metadata
 
@@ -977,30 +1018,24 @@ Our elaboration produces *derivations* — each name introduction (`prodLetProd`
 `prodVarDecl`) binds the name structurally. Names are correct by construction. There is
 nothing to re-resolve because the derivation tree IS the resolution.
 
-### Effect-Passing: Local vs Global
+### Effect-Passing: One Walk, All Effects
 
-All three effects are handled by the same methodology (effect-passing translation).
-The difference is SCOPE — whether the effect can be resolved locally or requires
-global program analysis:
+All effects are handled by the same mechanism: the CBV→FGCBV embedding threads
+monadic state through the continuation structure. There is ONE elaboration walk.
+It handles coercions, errors, AND heap simultaneously:
 
-| Effect | Scope | What elaboration does |
-|---|---|---|
-| Coercions | Local | Insert witness at CHECK boundary (inline) |
-| Exceptions (error output) | Local | Insert `prodCallWithError` at call site |
-| Heap (state) | **Global** | Discover locally, propagate through call graph, rewrite signatures |
+| Effect | What elaboration does |
+|---|---|
+| Coercions | Insert witness at CHECK boundary (subsume table) |
+| Exceptions | Thread error variable via `callWithError` |
+| Heap (state) | Thread `$heap` variable via state-passing |
 
-Local effects are resolved during the bidirectional walk: encounter a boundary,
-insert the appropriate node, move on.
-
-The heap effect requires global analysis because it's TRANSITIVE: if procedure A
-calls procedure B, and B touches the heap, then A must also receive a heap parameter
-(even if A doesn't directly touch the heap). This requires a fixpoint computation
-on the call graph AFTER the local walk.
-
-Implementation: elaboration has two sub-phases:
-1. **Local walk** (bidirectional synth/check): inserts coercions + error bindings,
-   discovers heap-touching procedures
-2. **Global propagation** (fixpoint on call graph): state-passing translation for heap
+All three happen in the SAME bidirectional walk. The `EffectType` from Γ tells
+the elaborator which mechanism to use for each call:
+- `.pure` → value-level call, no threading
+- `.error` → thread error variable
+- `.stateful` → thread heap variable
+- `.statefulError` → thread both
 
 ---
 
