@@ -121,16 +121,19 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
   | .Identifier id =>
     match (← lookupEnv id.text) with
     | some (.variable ty) => pure (.var id.text, eraseType ty)
-    | some (.function sig) => pure (.var id.text, eraseType sig.returnType)
+    | some (.function sig) => pure (.var id.text, eraseType sig.effectType.resultType)
     | _ => pure (.var id.text, .TCore "Any")
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
-    if (match sig with | some s => s.hasErrorOutput | none => false) then
-      throw (.unsupported "synthValue: effectful call")
-    let paramTypes := match sig with | some s => s.params.map (·.2) | none => args.map (fun _ => .TCore "Any")
-    let checkedArgs ← (args.zip paramTypes).mapM fun (arg, pty) => checkValue arg pty
-    let retTy := match sig with | some s => eraseType s.returnType | none => .TCore "Any"
-    pure (.staticCall callee.text checkedArgs, retTy)
+    match sig with
+    | some s => match s.effectType with
+      | .pure ty =>
+        let checkedArgs ← (args.zip (s.params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
+        pure (.staticCall callee.text checkedArgs, eraseType ty)
+      | _ => throw (.unsupported "synthValue: effectful call")
+    | none =>
+      let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
+      pure (.staticCall callee.text checkedArgs, .TCore "Any")
   | .FieldSelect obj field => let (ov, _) ← synthValue obj; pure (.fieldAccess ov field.text, .TCore "Any")
   | .New classId => pure (.staticCall "MkComposite" [.var "$heap_nextRef", .staticCall (classId.text ++ "_TypeTag") []], .TCore "Composite")
   | _ => throw (.unsupported "synthValue: not a value form")
@@ -145,14 +148,23 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
     if callee.text == "PAnd" || callee.text == "POr" then shortCircuit callee.text args
     else
       let sig ← lookupFuncSig callee.text
-      if !(match sig with | some s => s.hasErrorOutput | none => false) then
+      match sig with
+      | some s => match s.effectType with
+        | .pure _ =>
+          let (val, ty) ← synthValue expr; pure (.returnValue val, ty)
+        | .error resultTy _ =>
+          let checkedArgs ← (args.zip (s.params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
+          let rv ← freshVar "result"; let ev ← freshVar "err"
+          pure (.callWithError callee.text checkedArgs rv ev (eraseType resultTy) (.TCore "Error") (.returnValue (.var rv)), eraseType resultTy)
+        | .stateful resultTy =>
+          let checkedArgs ← (args.zip (s.params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
+          pure (.returnValue (.staticCall callee.text checkedArgs), eraseType resultTy)
+        | .statefulError resultTy _ =>
+          let checkedArgs ← (args.zip (s.params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
+          let rv ← freshVar "result"; let ev ← freshVar "err"
+          pure (.callWithError callee.text checkedArgs rv ev (eraseType resultTy) (.TCore "Error") (.returnValue (.var rv)), eraseType resultTy)
+      | none =>
         let (val, ty) ← synthValue expr; pure (.returnValue val, ty)
-      else
-        let paramTypes := match sig with | some s => s.params.map (·.2) | none => args.map (fun _ => .TCore "Any")
-        let retTy := match sig with | some s => eraseType s.returnType | none => .TCore "Any"
-        let checkedArgs ← (args.zip paramTypes).mapM fun (arg, pty) => checkValue arg pty
-        let rv ← freshVar "result"; let ev ← freshVar "err"
-        pure (.callWithError callee.text checkedArgs rv ev retTy (.TCore "Error") (.returnValue (.var rv)), retTy)
   | .Assign targets value => match targets with
     | [target] =>
       let targetTy ← match target.val with
@@ -170,6 +182,28 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
         let name := match target.val with | .Identifier id => id.text | _ => "_unknown"
         let hv ← freshVar "hole"
         pure (.varDecl name (eraseType targetTy) (some (.staticCall hv [])) .unit, .TVoid)
+      | .StaticCall callee args =>
+        let sig ← lookupFuncSig callee.text
+        match sig with
+        | some s => match s.effectType with
+          | .pure _ =>
+            let (tv, _) ← synthValue target
+            let cr ← checkValue value targetTy
+            pure (.assign tv cr .unit, .TVoid)
+          | .error resultTy _ =>
+            let (tv, _) ← synthValue target
+            let checkedArgs ← (args.zip (s.params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
+            let rv ← freshVar "result"; let ev ← freshVar "err"
+            pure (.callWithError callee.text checkedArgs rv ev (eraseType resultTy) (.TCore "Error")
+                   (.assign tv (.var rv) .unit), .TVoid)
+          | _ =>
+            let (tv, _) ← synthValue target
+            let cr ← checkValue value targetTy
+            pure (.assign tv cr .unit, .TVoid)
+        | none =>
+          let (tv, _) ← synthValue target
+          let cr ← checkValue value targetTy
+          pure (.assign tv cr .unit, .TVoid)
       | _ =>
         let (tv, _) ← synthValue target
         let cr ← checkValue value targetTy

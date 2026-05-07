@@ -1248,7 +1248,7 @@ partial def translateFunction (s : Python.stmt SourceRange)
       let returnType ← do
         let info ← lookupName procName
         match info with
-        | some (.function sig) => pure sig.returnType
+        | some (.function sig) => pure sig.effectType.resultType
         | _ => pure (.TCore "Any")
       let outputs : List Parameter := [{ name := Identifier.mk "LaurelResult" none,
                                           type := mkTypeDefault returnType }]
