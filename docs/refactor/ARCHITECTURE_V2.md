@@ -12,7 +12,7 @@ Python AST + library stubs
 Python AST (user code)
   ↓ [Translation: fold over AST, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
-  ↓ [Elaboration: impure CBV → Graded FGCBV, dependency order]
+  ↓ [Elaboration: impure CBV → Graded FGCBV, on-demand grade discovery]
 e' : GFGL.Program (graded fine-grain Laurel — effects explicit via grades)
   ↓ [Projection: forget grading, trivial cata]
 Laurel.Program (ready for Core)
@@ -132,8 +132,8 @@ f : (A₁,...,Aₙ) → B & 1    vᵢ ⇐ Aᵢ
 ### Producer Synthesis
 
 ```
-f : (A₁,...,Aₙ) → B & d    d > 1    vᵢ ⇐ Aᵢ
-───────────────────────────────────────────────
+f : (A₁,...,Aₙ) → B    grade(f) = d (on-demand discovery)    d > 1    vᵢ ⇐ Aᵢ
+────────────────────────────────────────────────────────────────────────────────
 Γ ⊢_p f(v₁,...,vₙ) ⇒ B & d
 
 ───────────────────────────
@@ -276,65 +276,62 @@ def subgrade : Grade → Grade → Option ConventionWitness
   | _,        _        => none
 ```
 
-Application (produces FGL):
+Application via smart constructors (read heapVar from state internally):
 
 ```lean
-def applyConvention (w : ConventionWitness) (callee : String) (args : List FGLValue)
-    (heap : Option FGLValue) (resultTy : LowType)
-    (body : List FGLValue → ElabM FGLProducer) : ElabM FGLProducer :=
-  match w with
-  | .pureCall =>
-    body [FGLValue.staticCall callee args]
-  | .errorCall =>
-    mkEffectfulCall callee args
-      [("result", resultTy), ("err", .TCore "Error")] body
-  | .heapCall =>
-    mkEffectfulCall callee (heap.get! :: args)
-      [("heap", .TCore "Heap"), ("result", resultTy)] body
-  | .heapErrorCall =>
-    mkEffectfulCall callee (heap.get! :: args)
-      [("heap", .TCore "Heap"), ("result", resultTy), ("err", .TCore "Error")] body
+-- Smart constructors dispatch on the convention witness.
+-- They read heapVar from ElabState, prepend heap if needed,
+-- generate fresh output names (HOAS), extend Γ, call body closure.
+
+def mkErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
+def mkHeapCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
+def mkHeapErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 ```
 
-### ElabResult (Dependent on Grade — Egger's State-Passing Closure)
+### CPS Elaboration (Operations Take Continuations)
 
-The result of synthesizing a producer is a TYPE that DEPENDS on the grade:
+The elaborator is CPS: `synthProducer` takes a continuation and nests the
+operation AROUND it. Every FGLProducer constructor has a `body` field — that
+IS the continuation. There is no `.seq`.
 
 ```lean
-def ElabResult (g : Grade) : Type :=
-  match g with
-  | .pure    => FGLProducer                    -- ready, no state needed
-  | .err     => FGLProducer                    -- error bindings already inside (output-only)
-  | .heap    => FGLValue → ElabM FGLProducer   -- closure: needs heap to produce bindings
-  | .heapErr => FGLValue → ElabM FGLProducer   -- closure: needs heap (errors output-only)
+-- synthProducer takes the rest of the block as continuation:
+partial def synthProducer (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM FGLProducer
+
+-- Smart constructors plug the continuation into the binding form:
+def mkErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer
+def mkHeapCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer
 ```
 
-**Errors are output-only.** The `effectfulCall` with `[rv, ev]` is constructed at
-synth time — we know the callee and args, that's enough. No input state needed.
+The smart constructors internally:
+1. Read `heapVar` from ElabState (current heap)
+2. Generate fresh output names via `freshVar` (HOAS)
+3. Extend Γ with bound outputs via `extendEnv` (HOAS)
+4. Call the body closure with the bound result value
+5. Update `heapVar` if a new heap was produced
 
-**Heap requires input.** The current heap must be provided at the sequencing point.
-Until then, the computation is a closure waiting for it. This IS Egger's
-state-passing: `(M)^S = λs. ...`.
-
-**synthProducer returns:** `(g : Grade) × LowType × ElabResult g`
-**checkProducer takes:** `(g : Grade)` as input, returns `ElabResult g`
+The continuation receives the bound result. The new heap is tracked in state
+(implementation bookkeeping). All binding is HOAS (closures + extendEnv).
 
 ### Producer Subsumption
 
 ```
-Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    d ≤ e
-────────────────────────────────────────────────
+Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    subgrade(d, e) = conv
+────────────────────────────────────────────────────────────────
 Γ ⊢_p M ⇐ B & e
 ```
 
-At the sequencing point (the to-rule), the ElabResult is APPLIED:
-- `ElabResult .pure` → use directly (it's already an FGLProducer)
-- `ElabResult .heap` → apply to current heap value → get FGLProducer with bindings
-- The HOAS closure inside the ElabResult generates fresh names, extends Γ,
-  and produces the effectfulCall node when applied
+**Both witnesses are proof-relevant:**
+- Type coercion `c` wraps the bound result value: `c(rv)`
+- Grade coercion `conv` selects the smart constructor (calling convention)
 
-The type coercion `c` is applied to the RESULT VALUE inside the closure —
-after the producer is bound, on the value that comes out.
+The `conv` witness determines WHICH smart constructor to use at the call site.
+`pureCall` → no binding. `errorCall` → `mkErrorCall`. `heapCall` → `mkHeapCall`.
+`heapErrorCall` → `mkHeapErrorCall`. The smart constructor produces the
+`effectfulCall` node with the correct args, outputs, and HOAS bindings.
+
+Type coercion `c` is applied to `rv` INSIDE the smart constructor's body closure
+— after binding, on the value that emerges.
 
 ### Heap Operations
 
