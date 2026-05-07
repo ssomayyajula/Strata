@@ -603,18 +603,26 @@ partial def discoverGrade (callee : String) : ElabM Grade := do
   match (← read).procGrades[callee]? with
   | some g => pure g
   | none =>
-    let body ← lookupProcBody callee
-    match body with
-    | some bodyExpr =>
-      let sig ← lookupFuncSig callee
-      let retTy := match sig with | some s => eraseType s.returnType | none => .TCore "Any"
-      let env ← read
-      let paramEnv := match sig with
-        | some s => s.params.foldl (fun e (n, t) =>
-            { e with typeEnv := { e.typeEnv with names := e.typeEnv.names.insert n (.variable t) } }) env
-        | none => env
-      tryGrades callee paramEnv bodyExpr retTy [.pure, .err, .heap, .heapErr]
-    | none => pure .pure
+    -- Functions (isFunctional) are always pure — skip grade discovery
+    -- Also: procs without heap/error outputs whose body we'd cascade into
+    let env ← read
+    let isFn := env.program.staticProcedures.any fun p =>
+      p.name.text == callee && p.isFunctional
+    let runtimeFn := env.runtime.staticProcedures.any fun p =>
+      p.name.text == callee && p.isFunctional
+    if isFn || runtimeFn then pure .pure
+    else
+      let body ← lookupProcBody callee
+      match body with
+      | some bodyExpr =>
+        let sig ← lookupFuncSig callee
+        let retTy := match sig with | some s => eraseType s.returnType | none => .TCore "Any"
+        let paramEnv := match sig with
+          | some s => s.params.foldl (fun e (n, t) =>
+              { e with typeEnv := { e.typeEnv with names := e.typeEnv.names.insert n (.variable t) } }) env
+          | none => env
+        tryGrades callee paramEnv bodyExpr retTy [.pure, .err, .heap, .heapErr]
+      | none => pure .pure
 
 partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd) (retTy : LowType) (grades : List Grade) : ElabM Grade := do
   match grades with
