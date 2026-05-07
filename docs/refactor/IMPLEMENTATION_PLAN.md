@@ -1,148 +1,106 @@
-# Implementation Plan: Graded FGCBV Elaboration
+# Implementation Plan
 
-## Threat of Deletion
+## Threat
 
-If any commit:
-- Doesn't build
-- Introduces regressions without fixing others
-- Violates the architecture
-- Uses boolean blindness
-- Manipulates raw variables instead of HOAS
-- Shoots from the hip without following this plan
+If any commit violates the architecture, doesn't build, or regresses: delete everything.
 
-Then EVERYTHING gets deleted and we start from scratch.
+## Architecture Summary
 
-## Architecture Reference
+- Entry: `checkProducer body returnType grade`
+- Grade discovered by trying `[pure, err, heap, heapErr]` until check succeeds
+- Callee grades stored in Γ via on-demand elaboration
+- `ElabState` = `{ freshCounter : Nat }`
+- Heap flows as `Option FGLValue` parameter
+- Producer subsumption: type coercion `c` + convention witness `conv`, applied via HOAS
+- Sequencing: `M to x. N ⇐ A & e` → synth M → `d`, check N → `d \ e`
+- All binding via HOAS (`mkEffectfulCall`, `mkVarDecl`)
 
-All implementation follows ARCHITECTURE_V2.md. Key rules:
+## Data Types
 
-- Grade monoid: `{1, err, heap, heap·err}`, residuated
-- Judgments: `Γ ⊢_v V ⇒/⇐ A` (values, no grade), `Γ ⊢_p M ⇒/⇐ A & e` (producers, graded)
-- Value subsumption: `subsume(A, B) = c` → `c(V)`
-- Producer subsumption: `subgrade(d, e) = conv` → `applyConvention(conv, M, fun outs => return c(rv))`
-- Sequencing: `M to x. N ⇐ A & e` → synth M → `B & d`, check N → `A & (d \ e)`
-- HOAS: `mkEffectfulCall` generates fresh names, extends Γ, calls closure
-- No mutable state for heap. Heap flows through HOAS closures.
-- Dependency order: elaborate callees before callers
-
-## Contract: Translation → Elaboration
-
-Translation guarantees:
-- Args to calls are value forms (Literal, Identifier, FieldSelect, pure StaticCall)
-- `.New` appears only in producer position
-- Annotations give precise types on LocalVariable declarations
-- No coercions, no effect annotations
-
-## Contract: Elaboration → Projection → Core
-
-Elaboration produces GFGL which projects to Laurel that Core accepts:
-- No `.New` (elaborated into allocation sequence when heap grade)
-- No `.FieldSelect` in expression position (elaborated into readField when heap grade)
-- `effectfulCall` projects to `[decls; Assign [targets] (StaticCall f args); body]`
-- Stateful procs get `$heap_in` input + `$heap` output
-
-## Implementation Steps
-
-### Step 1: Grade infrastructure
-
-Add to Elaborate.lean (before the mutual block):
-
-```lean
-inductive Grade where | pure | err | heap | heapErr
-  deriving Inhabited, BEq
-
-def Grade.mul : Grade → Grade → Grade
-def Grade.le : Grade → Grade → Bool
-def Grade.residual : Grade → Grade → Grade  -- d \ e
-
-inductive ConventionWitness where
-  | pureCall | errorCall | heapCall | heapErrorCall
-
-def subgrade : Grade → Grade → Option ConventionWitness
+```
+Grade: pure | err | heap | heapErr
+ConventionWitness: pureCall | errorCall | heapCall | heapErrorCall
+LowType: TInt | TBool | TString | TFloat64 | TVoid | TCore name
+FGLValue: litInt | litBool | litString | var | fromInt | fromStr | ... | staticCall
+FGLProducer: returnValue | assign | varDecl | ifThenElse | whileLoop | assert |
+             assume | effectfulCall | exit | labeledBlock | seq | unit
+ElabState: { freshCounter : Nat }
+ElabM: ReaderT TypeEnv (StateT ElabState Id)
 ```
 
-### Step 2: applyConvention
+## Functions
 
-```lean
-def applyConvention (w : ConventionWitness) (callee : String) (args : List FGLValue)
-    (heap : Option FGLValue) (resultTy : LowType)
-    (k : FGLValue → Option FGLValue → ElabM FGLProducer) : ElabM FGLProducer
+```
+synthValue (heap) (expr) : ElabM (FGLValue × LowType)
+checkValue (heap) (expr) (expected : HighType) : ElabM FGLValue
+checkArgs (heap) (args) (params) : ElabM (List FGLValue)
+
+synthProducer (heap) (expr) : ElabM (FGLProducer × LowType × Grade)
+checkProducer (heap) (expr) (expected : LowType) (grade : Grade) : ElabM FGLProducer
+
+elaborateBlock (heap) (stmts) (expected : LowType) (grade : Grade) : ElabM FGLProducer
+
+lookupCalleeGrade (callee : String) : ElabM Grade
+  -- On-demand: if not in Γ, elaborate callee body trying grades, store in Γ
 ```
 
-- `k` receives `(resultValue, newHeap?)` — HOAS bound variables
-- pureCall: `k (staticCall callee args) none`
-- errorCall: `mkEffectfulCall callee args [...] fun outs => k outs[0]! none`
-- heapCall: `mkEffectfulCall callee (heap::args) [...] fun outs => k outs[1]! (some outs[0]!)`
-- heapErrorCall: `mkEffectfulCall callee (heap::args) [...] fun outs => k outs[1]! (some outs[0]!)`
+## Entry Point: fullElaborate
 
-### Step 3: Elaboration functions (signature change)
-
-All elaboration functions take `heap : Option FGLValue` as parameter (the current
-heap in scope). No mutable state. HOAS closures thread it.
-
-```lean
-synthValue (heap : Option FGLValue) (expr : StmtExprMd) : ElabM (FGLValue × LowType)
-checkValue (heap : Option FGLValue) (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue
-synthProducer (heap : Option FGLValue) (expr : StmtExprMd) : ElabM (FGLProducer × LowType × Grade)
-checkProducer (heap : Option FGLValue) (expr : StmtExprMd) (expected : LowType) (grade : Grade) : ElabM FGLProducer
+```
+for proc in program.staticProcedures:
+  let grade := tryGrades proc.body [pure, err, heap, heapErr]
+  let heap := if grade ∈ {heap, heapErr} then some (.var "$heap") else none
+  let extEnv := Γ + proc params + (if heap: $heap_in, $heap)
+  let fgl := checkProducer heap body returnType grade  (under extEnv)
+  if heap: prepend $heap := $heap_in; add $heap_in/$heap params
+  project fgl → Laurel
 ```
 
-Note: `synthProducer` now returns `Grade`. `checkProducer` takes `grade` as input.
+## tryGrades
 
-### Step 4: synthProducer implementation
+```
+tryGrades body [g₁, g₂, ...]:
+  for g in grades:
+    if checkProducer succeeds at grade g:
+      return g
+  return heapErr  -- top, always succeeds
+```
 
-For each Laurel construct, produce (FGLProducer, LowType, Grade):
+"Succeeds" means: no residual failure (all `d \ e` computations return `some`).
+Since `ElabM` is `Id`-based (no `Except`), failure = encountering an operation
+whose grade exceeds the budget. Need to make check FALLIBLE for this.
 
-- `.StaticCall f args` where f has grade 1 → `(.returnValue val, ty, .pure)`
-- `.StaticCall f args` where f has grade d → use `applyConvention(subgrade(d, ...), ...)`, return grade d
-- `.New classId` → allocation sequence, grade `.heap`
-- `.Assign [x] v` → `(.assign tv cv .unit, .TVoid, .pure)`
-- `.Assert v` → grade `.pure`
-- `.FieldSelect obj field` (with heap) → readField, grade `.heap`
-- `.Block stmts` → elaborate block, grade = composition of all stmts
+## Making Check Fallible
 
-### Step 5: checkProducer implementation
+Change monad: `ElabM := ReaderT TypeEnv (StateT ElabState (Option))` or similar.
+Then when `Grade.residual d e = none`, the check fails (returns `none`).
+`tryGrades` catches the failure and tries the next grade.
 
-- `if v then M else N ⇐ A & e` → check both branches against `A & e`
-- `var x:T := v; body ⇐ A & e` → check body against `A & e`
-- `M to x. N ⇐ A & e` → synth M → `B & d`, check N → `A & (d \ e)`
-- `return v ⇐ A & e` → checkValue v A, grade 1, subgrading `1 ≤ e` (admissible)
-- Fallback: synth + subsumption
+Alternative: keep `ElabM` as `Id`, add `canCheck` that returns `Bool` by scanning
+the body. Simpler but less principled.
 
-### Step 6: elaborateBlock / elaborateStmt
+Decision: use `Option` monad. Check fails cleanly when grade is insufficient.
 
-`elaborateBlock` for a sequence [s₁, s₂, ..., sₙ]:
-- Last statement: checkProducer against expected type and grade
-- Earlier statements: synthProducer, grade accumulates
+## Revised Monad
 
-`elaborateStmt` (non-tail):
-- Synth the statement → get grade d
-- The continuation receives the new heap (if d includes heap)
-- Grade residual computed for continuation's expected grade
+```
+abbrev ElabM := ReaderT TypeEnv (StateT ElabState Option)
+```
 
-### Step 7: fullElaborate (dependency order)
+This means all elaboration functions return `Option`. `tryGrades` catches `none`.
 
-1. Build call graph (collect callees per proc)
-2. Topological sort
-3. Elaborate in order, building effect map: `procName → Grade`
-4. For each proc:
-   - Synth body → discover grade
-   - If grade includes heap: add $heap_in/$heap params
-   - Record grade in effect map
-5. Assemble output program with heapConstants if any proc has heap grade
+## Order of Implementation
 
-### Step 8: Validation
-
-- `lake build` must pass
-- `diff_test.sh compare pyAnalyzeV2` must not regress non-heap tests
-- Heap tests should improve (ideally all 16 regressions fixed)
-
-## Order of Execution
-
-1. Write Grade + ConventionWitness + subgrade + applyConvention
-2. Write synthProducer/checkProducer with Grade in signatures
-3. Write elaborateBlock/elaborateStmt with grade accumulation
-4. Write fullElaborate with dependency order + effect map
-5. Build. Fix errors.
-6. Test. Fix regressions.
-7. Commit only when both build AND tests pass or improve.
+1. Grade + ConventionWitness + subgrade + residual (done in previous step)
+2. LowType + eraseType + FGL terms
+3. ElabState + ElabM (with Option)
+4. HOAS constructors (mkEffectfulCall, mkVarDecl, applyConvention)
+5. Subsumption table
+6. synthValue / checkValue / checkArgs
+7. synthProducer (handles .New, .FieldSelect, .StaticCall, etc.)
+8. checkProducer (if, var-bind, to-rule with residual, return, subsumption fallback)
+9. elaborateBlock (sequencing with grade accumulation via residual)
+10. lookupCalleeGrade (on-demand elaboration, stores in Γ)
+11. fullElaborate (tryGrades, heap params, projection, heapConstants)
+12. Projection
+13. Build + test
