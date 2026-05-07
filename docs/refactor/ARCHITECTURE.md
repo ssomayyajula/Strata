@@ -915,19 +915,21 @@ function (e.g., `Any..as_int!` has precondition `Any..isfrom_int(v)`). Both upca
 and narrowing produce VALUES. The partiality is a verification concern — the verifier
 emits a proof obligation, not a runtime error branch.
 
-This means: ALL coercion is value-level. No coercion introduces bindings.
-The ONLY producer form that introduces true bindings is `prodCallWithError`
-(procedures with `hasErrorOutput = true`).
+This means: ALL type coercion is value-level. No type coercion introduces bindings.
+Bindings are introduced ONLY by grade > 1 producers (the `M to x. N` rule,
+implemented by `mkEffectfulCall`). The subgrading coercion at the call site
+determines which outputs to bind (heap, result, error).
 
 **Mode correctness invariants:**
-- Synth: output type determined by inputs (Γ, form, or fixed TVoid)
+- Synth: output type AND grade determined by inputs (Γ, form, callee's grade)
 - Check: expected type is INPUT from context, never conjured
+- Grade: always SYNTHESIZED (output), never checked against an expected grade
 - No type equality anywhere — TVoid in while body is a CHECK (semantic constraint)
-- `M to x. N`: M SYNTHS (learn A for binding), N CHECKS against C from context
+- `M to x. N`: M SYNTHS (learn A and grade d for binding), N CHECKS against C
 - Value subsumption + narrowing are the value checking FALLBACK
-- The ONLY producer-level binding is `prodCallWithError` (hasErrorOutput procedures)
-- All coercion (upcast AND narrowing) is value-level — no bindings introduced
-- Partiality of narrowing is a verification concern, not an elaboration effect
+- Bindings introduced ONLY by grade > 1 calls (subgrading coercion determines shape)
+- All type coercion (upcast AND narrowing) is value-level — no bindings introduced
+- Partiality of narrowing is a verification concern, not a grade contribution
 
 **Summary: which forms synthesize vs check:**
 
@@ -1212,59 +1214,37 @@ should be a precondition on Resolution output, not a post-hoc pass.
 
 ### What Elaboration Does (Language-Independent)
 
-#### Exceptions via the Exception Monad (Standard CBPV Treatment)
+#### Effects via the Grade Monoid
 
-In FGCBV/CBPV, the effect monad for our system is `T(A) = Heap → ((A + E) × Heap)`.
-A computation takes the current heap, may modify it, and produces either a value of
-type A (success) or an error of type E (failure), along with the updated heap. This
-combines the state monad (heap threading via state-passing) with the exception monad
-(error sum via error-passing) in a single `T`. Standard treatment: Levy 2004 Ch.5, 
-Plotkin & Pretnar 2009.
-
-**The fundamental operations are:**
-1. `prodCall "f" [args]` — call the procedure (returns `A + E` as a sum)
-2. `prodLetProd result ty call body` — bind the result (monadic bind: `M to x. N`)
-3. Case analysis on the sum — `if isError(result) then handle else continue`
-
-There is no special "call with error" primitive. Every procedure call is a 
-`prodCall`. If the procedure has error output (`hasErrorOutput = true`), its return
-type is `A + E` (concretely: it returns both a result and an error value). The
-caller binds and pattern-matches:
+In graded FGCBV, effects are tracked by grades. There is no separate "exception
+monad" or "state monad" — there is ONE grading that tracks ALL effects:
 
 ```
--- A function call that might throw:
-prodLetProd "result" (A × Error)      -- bind the call result (a product of value + error)
-  (prodCall "f" [args])               -- the call itself
-  (prodIfThenElse                     -- case analysis on the error component
-    (isError (snd result))            -- check if error
-    <handle error>                    -- error path
-    <continue with fst result>)       -- success path
+Grade monoid: (E = {1, err, heap, heap·err}, ≤, 1, ·)
 ```
 
-**Key insight: a downcast IS a fallible call.** `Any_to_bool(x)` is just a procedure
-call whose return type is `bool + TypeError`. It's not a separate mechanism — it's
-the same `prodCall` + bind + case pattern:
+Each grade determines a CALLING CONVENTION (via subgrading coercion):
 
-```
--- A downcast (just a call that can fail):
-prodLetProd "narrowed" bool
-  (prodCall "Any_to_bool" [valVar "x"])    -- call (may throw TypeError)
-  <continue with valVar "narrowed">        -- if it returns, the result is bool
-```
-
-**Smart constructor `prodCallWithError`:** For convenience, the FGL dialect defines
-`prodCallWithError` as SUGAR that expands to the above pattern (call + bind both
-result and error + case analysis). It is NOT a primitive — it's derived from
-`prodCall` + `prodLetProd` + `prodIfThenElse`. The dialect keeps it for readability
-of the projected output, but the THEORY is just the exception monad.
-
-| Operation | Treatment | Primitive? |
+| Callee grade | Outputs bound by caller | Calling convention |
 |---|---|---|
-| Infallible call | `prodCall "f" [args]` + `prodLetProd` | Yes (primitive) |
-| Fallible call | `prodCall "f" [args]` + bind + case on error | Yes (composed from primitives) |
-| Downcast (`Any ▷ T`) | `prodCall "Any_to_T" [val]` + bind + case | Yes (same as fallible call) |
-| Upcast (`T <: Any`) | `valFromT(val)` | Yes (VALUE-level, no call needed) |
-| `prodCallWithError` | Smart constructor = call + bind + case | No (sugar) |
+| `1` | none | Value-level call, stays nested |
+| `err` | `[result, error]` | `effectfulCall f args [rv, ev] body` |
+| `heap` | `[heap', result]` | `effectfulCall f [heap, args...] [hv, rv] body` |
+| `heap·err` | `[heap', result, error]` | `effectfulCall f [heap, args...] [hv, rv, ev] body` |
+
+**One mechanism for all effects:** `mkEffectfulCall` (the HOAS `M to x. N`). The
+grade of the callee determines which outputs are bound. The subgrading coercion
+at the call site selects the right output shape. No separate `prodCallWithError`
+vs state-threading — it's all the same `M to x. N` with different output lists.
+
+| Operation | Grade | Treatment |
+|---|---|---|
+| Pure call | `1` | Value-level (no binding needed) |
+| Error call | `err` | `mkEffectfulCall` with `[result, error]` outputs |
+| Heap call | `heap` | `mkEffectfulCall` with `[heap', result]` outputs, heap prepended to args |
+| Both | `heap·err` | `mkEffectfulCall` with `[heap', result, error]` outputs |
+| Upcast (`T <: Any`) | n/a (value) | `from_T(val)` — value-level, no grade |
+| Narrowing (`Any ▷ T`) | n/a (value) | `Any_to_T(val)` — value-level, no grade |
 
 There is no "cast insertion" vs "exception handling" distinction. There is only
 **prodCallWithError** — the monadic bind for the effect monad T(A) = A × Error.
