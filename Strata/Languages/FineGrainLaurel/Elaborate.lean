@@ -200,7 +200,12 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
       pure (.staticCall callee.text checkedArgs, .TCore "Any")
-  | _ => pure (.var "_unknown", .TCore "Any")
+  | .New id => dbg_trace s!"[BUG] synthValue: New({id.text})"; failure
+  | .Block _ _ => dbg_trace "[BUG] synthValue: Block"; failure
+  | .Assign _ _ => dbg_trace "[BUG] synthValue: Assign"; failure
+  | .IfThenElse _ _ _ => dbg_trace "[BUG] synthValue: IfThenElse"; failure
+  | .Hole _ _ => pure (.var "_hole", .TCore "Any")
+  | _ => dbg_trace "[BUG] synthValue: other"; failure
 
 partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
   let (val, actual) ← synthValue expr
@@ -245,9 +250,17 @@ partial def synthProducer (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM
         | .Identifier id => match (← lookupEnv id.text) with | some (.variable t) => pure t | _ => pure (.TCore "Any")
         | _ => pure (.TCore "Any")
       let (tv, _) ← synthValue target
-      let cr ← checkValue value targetTy
-      let c ← cont
-      pure (.assign tv cr c)
+      match value.val with
+      | .Hole false _ =>
+        mkVarDecl "_havoc" (eraseType targetTy) none fun hv => do
+          let c ← cont; pure (.assign tv hv c)
+      | .Hole true _ => do
+        let hv ← freshVar "hole"
+        mkVarDecl (match target.val with | .Identifier id => id.text | _ => "_x") (eraseType targetTy) (some (.staticCall hv [])) fun _ => cont
+      | _ =>
+        let cr ← checkValue value targetTy
+        let c ← cont
+        pure (.assign tv cr c)
     | _ => cont
   | .LocalVariable nameId typeMd initOpt =>
     let ci ← match initOpt with
