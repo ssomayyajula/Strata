@@ -509,7 +509,34 @@ end
 def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) : StmtExprMd :=
   mkLaurel md (.Block (projectProducer md prod) none)
 
+-- Effect inference: scan a Laurel body for heap-touching operations
+private partial def bodyTouchesHeap (expr : StmtExprMd) (statefulProcs : Std.HashSet String) : Bool :=
+  go expr
+where
+  go (e : StmtExprMd) : Bool := match e.val with
+    | .New _ => true
+    | .FieldSelect _ _ => true
+    | .StaticCall callee args => statefulProcs.contains callee.text || args.any go
+    | .Assign targets v => targets.any go || go v
+    | .Block stmts _ => stmts.any go
+    | .IfThenElse c t e => go c || go t || match e with | some x => go x | none => false
+    | .While c _ _ b => go c || go b
+    | .LocalVariable _ _ i => match i with | some x => go x | none => false
+    | .Return v => match v with | some x => go x | none => false
+    | .Assert c | .Assume c => go c
+    | _ => false
+
 def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String Laurel.Program := do
+  -- Pass 1: Determine which procs are stateful (dependency order — procs listed callees-first)
+  let mut statefulProcs : Std.HashSet String := {}
+  for proc in program.staticProcedures do
+    match proc.body with
+    | .Transparent bodyExpr =>
+      if bodyTouchesHeap bodyExpr statefulProcs then
+        statefulProcs := statefulProcs.insert proc.name.text
+    | _ => pure ()
+
+  -- Pass 2: Elaborate each proc with the correct heap setting
   let mut procs : List Laurel.Procedure := []
   for proc in program.staticProcedures do
     match proc.body with
@@ -518,35 +545,33 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
       let st : ElabState := { freshCounter := 0, currentProcReturnType := retTy }
       let baseEnv := (proc.inputs ++ proc.outputs).foldl
         (fun env p => { env with names := env.names.insert p.name.text (.variable p.type.val) }) typeEnv
-      let heap := match typeEnv.names[proc.name.text]? with
-        | some (.function sig) => match sig.effectType with
-          | .stateful _ | .statefulError _ _ => some (FGLValue.var "$heap")
-          | _ => none
-        | _ => none
-      match heap with
-      | some h =>
+      let isStateful := statefulProcs.contains proc.name.text
+      match isStateful with
+      | true =>
+        let heap := some (FGLValue.var "$heap")
         let extEnv := { baseEnv with names := baseEnv.names.insert "$heap_in" (.variable .THeap) |>.insert "$heap" (.variable .THeap) }
-        let (fglRaw, _) := (checkProducer (some h) bodyExpr (eraseType retTy)).run extEnv |>.run st
+        let (fglRaw, _) := (checkProducer heap bodyExpr (eraseType retTy)).run extEnv |>.run st
         let fgl := FGLProducer.assign (.var "$heap") (.var "$heap_in") fglRaw
         let heapTy : HighTypeMd := ⟨.THeap, #[]⟩
         let heapIn : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := heapTy }
         let heapOut : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := heapTy }
         procs := procs ++ [{ proc with inputs := heapIn :: proc.inputs, outputs := heapOut :: proc.outputs, body := .Transparent (projectBody bodyExpr.md fgl) }]
-      | none =>
+      | false =>
         let (fgl, _) := (checkProducer none bodyExpr (eraseType retTy)).run baseEnv |>.run st
         procs := procs ++ [{ proc with body := .Transparent (projectBody bodyExpr.md fgl) }]
     | _ => procs := procs ++ [proc]
-  let hasStateful := procs.any fun p => p.inputs.any fun i => i.name.text == "$heap_in"
+
+  -- Add heap type infrastructure if any proc is stateful
   let compositeType : TypeDefinition := .Datatype { name := "Composite", typeArgs := [], constructors := [{ name := "MkComposite", args := [{ name := "ref", type := ⟨.TInt, #[]⟩ }] }] }
-  match hasStateful with
+  match statefulProcs.isEmpty with
   | true =>
-    pure { program with
-      staticProcedures := heapConstants.staticProcedures ++ procs,
-      types := heapConstants.types ++ [compositeType] ++ program.types }
-  | false =>
     pure { program with
       staticProcedures := procs,
       types := [compositeType] ++ program.types }
+  | false =>
+    pure { program with
+      staticProcedures := heapConstants.staticProcedures ++ procs,
+      types := heapConstants.types ++ [compositeType] ++ program.types }
 
 end
 end Strata.FineGrainLaurel
