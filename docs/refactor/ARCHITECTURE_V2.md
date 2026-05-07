@@ -291,11 +291,12 @@ def mkHeapCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 def mkHeapErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 ```
 
-### CPS Elaboration
+### State-Passing Elaboration (Egger-style)
 
-The elaborator is CPS: `synthProducer` takes a continuation and nests the
-operation AROUND it. Every FGLProducer constructor has a `body` field — that
-IS the continuation. There is no `.seq`.
+The elaborator uses Egger-style state-passing: `synthProducer` takes the rest
+of the block as the continuation of `M to x. N`. The heap state flows through
+the smart constructors (HOAS closures). Every FGLProducer constructor has a
+`body` field — that IS the continuation of the sequencing rule. There is no `.seq`.
 
 ```lean
 partial def synthProducer (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM FGLProducer
@@ -347,9 +348,9 @@ on the body. The smallest grade at which `checkProducer` succeeds IS the grade.
 | `subgrade(d, e)` | `subgrade d e : Option ConventionWitness` → dispatches smart constructor |
 | `d \ e` | `Grade.residual d e : Option Grade` |
 
-The CPS transform: formal rules show `M to x. N` as a single check rule.
-Implementation realizes this as `synthProducer M (elaborateBlock rest)` — the
-continuation IS the rest of the block, passed as argument.
+The state-passing implementation: formal rules show `M to x. N` as a single
+check rule. Implementation realizes this as `synthProducer M (elaborateBlock rest)`
+— the rest of the block IS the continuation of the sequencing rule.
 
 ### On-Demand Callee Grade Discovery
 
