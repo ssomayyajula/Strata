@@ -402,10 +402,24 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
         let mut assigns : List StmtExprMd := [tmpAssign]
         let mut idx : Int := 0
         for elt in elts.val.toList do
-          let tgtExpr ← translateExpr elt
           let idxLit ← mkExpr sr (.LiteralInt idx)
           let getExpr ← mkExpr sr (.StaticCall "Any_get" [tmpRef, idxLit])
-          assigns := assigns ++ [← mkExpr sr (.Assign [tgtExpr] getExpr)]
+          match elt with
+          | .Tuple _ innerElts _ => do
+            -- Nested tuple: unpack recursively via tmp
+            let innerTmp ← freshVar "for_unpack"
+            let innerRef ← mkExpr sr (.Identifier innerTmp)
+            assigns := assigns ++ [← mkExpr sr (.Assign [innerRef] getExpr)]
+            let mut innerIdx : Int := 0
+            for innerElt in innerElts.val.toList do
+              let innerTarget ← translateExpr innerElt
+              let innerIdxLit ← mkExpr sr (.LiteralInt innerIdx)
+              let innerGet ← mkExpr sr (.StaticCall "Any_get" [innerRef, innerIdxLit])
+              assigns := assigns ++ [← mkExpr sr (.Assign [innerTarget] innerGet)]
+              innerIdx := innerIdx + 1
+          | _ => do
+            let tgtExpr ← translateExpr elt
+            assigns := assigns ++ [← mkExpr sr (.Assign [tgtExpr] getExpr)]
           idx := idx + 1
         pure (assigns, tmpRef)
       | _ => do
