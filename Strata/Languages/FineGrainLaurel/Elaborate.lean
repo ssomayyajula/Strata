@@ -255,7 +255,7 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
       let compositeObj := applySubsume ov objTy (.TCore "Composite")
       let read := FGLValue.staticCall "readField" [.var hv, compositeObj, .staticCall qualifiedName []]
       pure (.staticCall (boxDestructorName fieldTy) [read], eraseType fieldTy)
-    | none => pure (.fieldAccess ov field.text, .TCore "Any")
+    | none => failure
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
     match sig with
