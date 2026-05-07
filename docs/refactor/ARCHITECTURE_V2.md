@@ -355,16 +355,21 @@ check rule. Implementation realizes this as `synthProducer M (elaborateBlock res
 ### On-Demand Callee Grade Discovery
 
 When elaboration encounters `StaticCall f args`:
-1. Look up f's grade in ElabState (same place as its type info)
-2. If not yet known: find f's body, try `checkProducer body returnType g`
-   for g ∈ [pure, err, heap, heapErr]. First success → f's grade. Store it.
+1. Look up f's grade in `procGrades` (stateful part of Γ)
+2. If not yet known: find f's body in the program (reader part of environment),
+   call `checkProducer body returnType g` for g ∈ [pure, err, heap, heapErr].
+   The smallest grade at which checking SUCCEEDS is f's grade. Store it.
 3. Dispatch smart constructor based on discovered grade.
 
-The grade is part of the procedure's TYPE — stored alongside its param types
-and return type in the elaborator's state. Not a separate cache. When a callee
-is elaborated on-demand, its grade joins the same structure as its other type
-information. This is the same mechanism: type-checking discovers types AND
-grades simultaneously.
+**Grade discovery IS type-checking.** The typing rules themselves determine
+the grade. If `checkProducer` succeeds at grade `g`, then `g` is sufficient.
+No manual AST scanning. No heuristics. The bidirectional algorithm is the
+oracle — checking fails (Option returns none) when the grade is too low
+(residual `d \ e = none`), succeeds when it's sufficient.
+
+The grade is part of the procedure's TYPE — stored in `procGrades` (the
+stateful part of Γ that grows as callees are discovered on-demand). The
+program (procedure bodies) is in the reader (immutable environment).
 
 ### Procedure Signature Rewriting
 
