@@ -436,8 +436,8 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
     let (tv, _) ← synthValue target
     match value.val with
     | .Hole false _ =>
-      mkVarDecl "_havoc" (eraseType targetTy) none fun hv => do
-        let after ← elabRest rest grade; pure (.assign tv hv after)
+      let name := match target.val with | .Identifier id => id.text | _ => "_havoc"
+      mkVarDecl name (eraseType targetTy) none fun _ => elabRest rest grade
     | .Hole true _ =>
       let hv ← freshVar "hole"
       let name := match target.val with | .Identifier id => id.text | _ => "_x"
@@ -606,6 +606,8 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
         | none => none
       match grade with
       | some g =>
+        -- Bug fix: multi-output procedures (result + error) need at least err grade
+        let g := if proc.outputs.length > 1 then Grade.join g .err else g
         let st : ElabState := { globalState with
           freshCounter := 0
           heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
@@ -652,7 +654,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
     name := "Box", typeArgs := [], constructors := boxConstructors }
   if hasHeap then
     let heapTypesFiltered := heapConstants.types.filter fun td => match td with
-      | .Datatype dt => dt.name.text != "Composite"
+      | .Datatype dt => dt.name.text != "Composite" && dt.name.text != "NotSupportedYet"
       | _ => true
     pure { program with
       staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ heapConstants.staticProcedures ++ procs

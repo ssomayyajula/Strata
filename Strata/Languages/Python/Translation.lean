@@ -546,21 +546,23 @@ partial def translateFunction (s : Python.stmt SourceRange)
   match s with
   | .FunctionDef sr name args body _ _returns _ _ => do
     let procName := match className with | some cn => s!"{cn}@{name.val}" | none => name.val
-    let allParams ← match (← lookupName procName) with
+    let (allParams, selfAlreadyStripped) ← match (← lookupName procName) with
       | some (.function sig) =>
         pure (sig.params.map fun (pName, pType) =>
-          ({ name := Identifier.mk pName none, type := mkTypeDefault pType } : Parameter))
+          ({ name := Identifier.mk pName none, type := mkTypeDefault pType } : Parameter), isMethod)
       | _ => match args with
-        | .mk_arguments _ _ argList _ _ _ _ _ =>
-          argList.val.toList.mapM fun arg => match arg with
+        | .mk_arguments _ _ argList _ _ _ _ _ => do
+          let ps ← argList.val.toList.mapM fun arg => match arg with
             | .mk_arg _ argName annotation _ =>
               let ty := match annotation.val with | some e => pythonTypeToLaurel (extractTypeStr e) | none => .TCore "Any"
               pure ({ name := Identifier.mk argName.val none, type := mkTypeDefault ty } : Parameter)
+          pure (ps, false)
     let (inputs, paramCopies) ← if isMethod then do
       let selfType := match className with
         | some cn => HighType.UserDefined (Identifier.mk cn none) | none => .TCore "Any"
       let selfParam : Parameter := { name := Identifier.mk "self" none, type := mkTypeDefault selfType }
-      let otherParams := if allParams.length > 0 then allParams.tail! else []
+      let otherParams := if selfAlreadyStripped then allParams
+        else if allParams.length > 0 then allParams.tail! else []
       let renamedParams := otherParams.map fun p => { p with name := Identifier.mk s!"$in_{p.name.text}" none }
       let copies ← emitMutableParamCopies sr (otherParams.map fun p => (p.name.text, p.type.val))
       pure (selfParam :: renamedParams, copies)
