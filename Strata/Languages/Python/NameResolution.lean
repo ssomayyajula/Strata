@@ -322,11 +322,18 @@ private def extractReturnType (returns : Ann (Option (Python.expr SourceRange)) 
 /-- Detect whether a function body contains a raise statement or has exception handler patterns
     that indicate it may produce an error output.
     This is a heuristic — PySpec data provides the definitive answer. -/
-private def detectErrorOutput (body : Array (Python.stmt SourceRange)) : Bool :=
-  body.any fun s =>
-    match s with
-    | .Raise _ _ _ => true
+private def detectEffectType (body : Array (Python.stmt SourceRange)) (retTy : HighType) : EffectType :=
+  let hasRaise := body.any fun s => match s with | .Raise _ _ _ => true | _ => false
+  let hasSelfAccess := body.any fun s => match s with
+    | .Assign _ targets _ _ => targets.val.any fun t => match t with
+        | .Attribute _ (.Name _ n _) _ _ => n.val == "self" | _ => false
+    | .AnnAssign _ (.Attribute _ (.Name _ n _) _ _) _ _ _ => n.val == "self"
     | _ => false
+  match hasSelfAccess, hasRaise with
+  | true, true => .statefulError retTy (.TCore "Error")
+  | true, false => .stateful retTy
+  | false, true => .error retTy (.TCore "Error")
+  | false, false => .pure retTy
 
 /-- Process a top-level FunctionDef and produce a NameInfo.function entry. -/
 private def resolveFunctionDef (name : Ann String SourceRange)
@@ -336,13 +343,13 @@ private def resolveFunctionDef (name : Ann String SourceRange)
   let params := extractParams args
   let defaults := extractDefaults args
   let retTy := extractReturnType returns
-  let hasError := detectErrorOutput body.val
   let hasKw := hasKwargsArg args
+  let effectType := detectEffectType body.val retTy
   let sig : FuncSig := {
     name := name.val,
     params := params,
     defaults := defaults,
-    effectType := if hasError then .error retTy (.TCore "Error") else .pure retTy,
+    effectType := effectType,
     hasKwargs := hasKw
   }
   (name.val, .function sig)
@@ -374,13 +381,13 @@ private def resolveClassDef (name : Ann String SourceRange)
           | _ :: rest => rest
           | [] => []
         let retTy := extractReturnType methodReturns
-        let hasError := detectErrorOutput methodBody.val
         let hasKw := hasKwargsArg methodArgs
+        let effectType := detectEffectType methodBody.val retTy
         let sig : FuncSig := {
           name := qualName,
           params := params,
           defaults := defaults,
-          effectType := if hasError then .error retTy (.TCore "Error") else .pure retTy,
+          effectType := effectType,
           hasKwargs := hasKw
         }
         methodEntries := methodEntries ++ [(qualName, .function sig)]
