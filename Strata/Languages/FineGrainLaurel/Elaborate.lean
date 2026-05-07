@@ -313,12 +313,11 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
         pure (.returnValue val, ty)
   -- ─── New ────────────────────────────────────────────────────────────────────
   -- Γ ⊢_p (new Foo) ⇒ Composite
-  -- New is a PRODUCER (heap allocation = stateful effect).
-  -- Heap parameterization is a LATER phase. For now, emit as a stateful call
-  -- that returns Composite. No $heap_nextRef — that doesn't exist yet.
-  | .New classId =>
-    let (val, ty) ← synthValue expr
-    pure (.returnValue val, ty)
+  -- New is a PRODUCER (stateful — heap allocation).
+  -- The heap phase (state-passing translation) handles the actual implementation.
+  -- Here we just record the type: it produces Composite.
+  | .New _classId =>
+    pure (.returnValue (.staticCall "MkComposite" []), .TCore "Composite")
   -- ─── Assign ─────────────────────────────────────────────────────────────────
   -- v ⇐ Γ(x)
   -- ─────────────────────────
