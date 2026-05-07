@@ -288,6 +288,52 @@ partial def checkArgs (args : List StmtExprMd) (params : List (String × HighTyp
       pure (v :: vs)
   go args paramTypes
 
+-- checkArgsK: like checkArgs but with continuation — lifts effectful args via binding
+-- When an arg is an effectful StaticCall (grade > 1), binds it and passes the bound value.
+partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighType))
+    (grade : Grade) (cont : List FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
+  let paramTypes := params.map (·.2)
+  let rec go : List StmtExprMd → List HighType → List FGLValue → ElabM FGLProducer
+    | [], _, acc => cont acc.reverse
+    | arg :: rest, ptys, acc => do
+      let pty := match ptys with | p :: _ => p | [] => .TCore "Any"
+      let ptysRest := match ptys with | _ :: ps => ps | [] => []
+      match arg.val with
+      | .StaticCall callee innerArgs =>
+        let innerSig ← lookupFuncSig callee.text
+        match innerSig with
+        | some s =>
+          let innerGrade ← discoverGrade callee.text
+          let innerChecked ← checkArgs innerArgs s.params
+          match innerGrade with
+          | .pure =>
+            let val := FGLValue.staticCall callee.text innerChecked
+            let coerced := applySubsume val (eraseType s.returnType) (eraseType pty)
+            go rest ptysRest (coerced :: acc)
+          | .err => do
+            guard (Grade.leq .err grade)
+            mkErrorCall callee.text innerChecked s.returnType fun rv =>
+              go rest ptysRest (applySubsume rv (eraseType s.returnType) (eraseType pty) :: acc)
+          | .heap => do
+            guard (Grade.leq .heap grade)
+            mkHeapCall callee.text innerChecked s.returnType fun rv =>
+              go rest ptysRest (applySubsume rv (eraseType s.returnType) (eraseType pty) :: acc)
+          | .heapErr => do
+            guard (Grade.leq .heapErr grade)
+            mkHeapErrorCall callee.text innerChecked s.returnType fun rv =>
+              go rest ptysRest (applySubsume rv (eraseType s.returnType) (eraseType pty) :: acc)
+        | none => do
+          -- No sig: runtime function, always pure
+          let innerChecked ← innerArgs.mapM fun a => checkValue a (.TCore "Any")
+          let val := FGLValue.staticCall callee.text innerChecked
+          let coerced := applySubsume val (.TCore "Any") (eraseType pty)
+          go rest ptysRest (coerced :: acc)
+      | _ => do
+        -- Non-StaticCall arg: regular value check
+        let v ← checkValue arg pty
+        go rest ptysRest (v :: acc)
+  go args paramTypes []
+
 -- checkProducer: the main recursive function.
 -- `rest` is the remaining statements after this one (the continuation).
 -- `grade` is the ambient grade (from the enclosing check context).
