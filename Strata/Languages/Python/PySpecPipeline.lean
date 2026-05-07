@@ -484,7 +484,12 @@ public def pyAnalyzeLaurelV2
   -- Step 4: Run Elaboration with base Γ (no runtime sigs — avoids spurious coercions
   -- on prelude calls that Core handles without coercion)
   let elaboratedProgram ← profileStep profile "Elaborate (full: coercions + type infrastructure)" do
-    match FineGrainLaurel.fullElaborate baseEnv laurelProgram Python.pythonRuntimeLaurelPart with
+    -- Pre-compute grades for runtime procs with error output (result + Error pattern)
+    let runtimeGrades := Python.pythonRuntimeLaurelPart.staticProcedures.foldl (fun acc proc =>
+      let hasErrorOutput := proc.outputs.any fun o => match o.type.val with | .TCore "Error" => true | _ => false
+      if hasErrorOutput then acc.insert proc.name.text .err else acc)
+      ({} : Std.HashMap String FineGrainLaurel.Grade)
+    match FineGrainLaurel.fullElaborate baseEnv laurelProgram Python.pythonRuntimeLaurelPart runtimeGrades with
     | .error e => throw (.internal s!"Elaboration failed: {e}")
     | .ok prog => pure prog
 

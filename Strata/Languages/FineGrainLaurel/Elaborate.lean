@@ -682,10 +682,10 @@ def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) 
 
 -- fullElaborate: entry point
 
-def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laurel.Program := default) : Except String Laurel.Program := do
+def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laurel.Program := default) (initialGrades : Std.HashMap String Grade := {}) : Except String Laurel.Program := do
   let baseEnv : ElabEnv := { typeEnv := typeEnv, program := program, runtime := runtime }
   let mut procs : List Laurel.Procedure := []
-  let mut knownGrades : Std.HashMap String Grade := {}
+  let mut knownGrades : Std.HashMap String Grade := initialGrades
   let mut allBoxConstructors : List (String × String × HighType) := []
   for proc in program.staticProcedures do
     match proc.body with
