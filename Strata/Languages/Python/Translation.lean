@@ -308,7 +308,8 @@ partial def unpackTargets (sr : SourceRange) (elts : List (Python.expr SourceRan
     | .Tuple _ innerElts _ => do
       let innerTmp ← freshVar "unpack"
       let innerRef ← mkExpr sr (.Identifier innerTmp)
-      stmts := stmts ++ [← mkExpr sr (.Assign [innerRef] getExpr)]
+      let innerDecl ← mkExpr sr (.LocalVariable innerTmp (mkTypeDefault (.TCore "Any")) (some getExpr))
+      stmts := stmts ++ [innerDecl]
       stmts := stmts ++ (← unpackTargets sr innerElts.val.toList innerRef)
     | _ => do
       let tgt ← translateExpr elt

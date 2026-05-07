@@ -433,16 +433,25 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
     let targetTy ← match target.val with
       | .Identifier id => match (← lookupEnv id.text) with | some (.variable t) => pure t | _ => pure (.TCore "Any")
       | _ => pure (.TCore "Any")
-    let needsDecl := false
+    let needsDecl ← match target.val with
+      | .Identifier id => do match (← lookupEnv id.text) with | some _ => pure false | none => pure true
+      | _ => pure false
     let (tv, _) ← synthValue target
     match value.val with
     | .Hole false _ =>
-      let name := match target.val with | .Identifier id => id.text | _ => "_havoc"
-      mkVarDecl name (eraseType targetTy) none fun _ => elabRest rest grade
+      if needsDecl then
+        let name := match target.val with | .Identifier id => id.text | _ => "_havoc"
+        mkVarDecl name (eraseType targetTy) none fun _ => elabRest rest grade
+      else
+        mkVarDecl "_havoc" (eraseType targetTy) none fun hv => do
+          let after ← elabRest rest grade; pure (.assign tv hv after)
     | .Hole true _ =>
       let hv ← freshVar "hole"
-      let name := match target.val with | .Identifier id => id.text | _ => "_x"
-      mkVarDecl name (eraseType targetTy) (some (.staticCall hv [])) fun _ => elabRest rest grade
+      if needsDecl then
+        let name := match target.val with | .Identifier id => id.text | _ => "_x"
+        mkVarDecl name (eraseType targetTy) (some (.staticCall hv [])) fun _ => elabRest rest grade
+      else do
+        let after ← elabRest rest grade; pure (.assign tv (.staticCall hv []) after)
     | .New classId =>
       guard (Grade.leq .heap grade)
       match (← get).heapVar with
