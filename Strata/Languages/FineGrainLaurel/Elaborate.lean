@@ -354,7 +354,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
   -- Add just Composite (needed for prelude from_Composite). Not Heap/Field/Box (undefined for non-class tests).
   let compositeType : TypeDefinition := .Datatype { name := "Composite", typeArgs := [], constructors := [{ name := "MkComposite", args := [{ name := "ref", type := ⟨.TInt, #[]⟩ }] }] }
   let notSupportedType : TypeDefinition := .Datatype { name := "NotSupportedYet", typeArgs := [], constructors := [{ name := "MkNotSupportedYet", args := [] }] }
-  pure { program with staticProcedures := procs, types := [compositeType, notSupportedType] ++ program.types }
+  pure { program with staticProcedures := procs, types := [compositeType] ++ program.types }
 
 end
 end Strata.FineGrainLaurel
