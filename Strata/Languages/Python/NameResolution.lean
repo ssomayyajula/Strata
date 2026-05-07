@@ -306,7 +306,7 @@ private def hasKwargsArg (args : Python.arguments SourceRange) : Bool :=
     we only record THAT a default exists (as a Hole placeholder). -/
 private def extractDefaults (args : Python.arguments SourceRange) : List (Option StmtExprMd) :=
   match args with
-  | .mk_arguments _ argList _ _ _ _ _ defaults =>
+  | .mk_arguments _ _posonlyargs argList _ _ _ _ defaults =>
       let paramCount := argList.val.size
       let defaultCount := defaults.val.size
       let requiredCount := paramCount - defaultCount
