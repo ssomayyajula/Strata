@@ -674,11 +674,11 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
       | _ => true
     pure { program with
       staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ heapConstants.staticProcedures ++ procs
-      types := [fieldDatatype, boxDatatype, typeTagDatatype, compositeType] ++ heapTypesFiltered ++ program.types }
+      types := [fieldDatatype, boxDatatype, typeTagDatatype, compositeType] ++ heapTypesFiltered ++ coreDefinitionsForLaurel.types ++ program.types }
   else
     pure { program with
       staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ procs
-      types := [typeTagDatatype, compositeType] ++ program.types }
+      types := [typeTagDatatype, compositeType] ++ coreDefinitionsForLaurel.types ++ program.types }
 
 end
 end Strata.FineGrainLaurel

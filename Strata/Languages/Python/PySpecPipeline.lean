@@ -476,7 +476,9 @@ public def pyAnalyzeLaurelV2
   let metadataPath := sourcePath.getD pythonIonPath
   let laurelProgram ← profileStep profile "Translate Python to Laurel (V2)" do
     match Python.Translation.runTranslation stmts translationEnv metadataPath with
-    | .error e => throw (.internal s!"V2 Translation failed: {e}")
+    | .error e => match e with
+      | .userError range msg => throw (.userCode range msg)
+      | _ => throw (.internal s!"V2 Translation failed: {e}")
     | .ok (program, _state) => pure program
 
   -- Step 4: Run Elaboration with base Γ (no runtime sigs — avoids spurious coercions
