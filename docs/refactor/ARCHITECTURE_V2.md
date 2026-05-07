@@ -316,25 +316,15 @@ The smart constructors internally:
 The continuation receives the bound result. The new heap is tracked in state
 (implementation bookkeeping). All binding is HOAS (closures + extendEnv).
 
-### Producer Subsumption
+### Producer Subsumption (see §Subsumption above for the full rule)
 
-```
-Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    subgrade(d, e) = conv
-────────────────────────────────────────────────────────────────
-Γ ⊢_p M ⇐ B & e
-```
+The `conv` witness selects the smart constructor:
+- `pureCall` → no binding
+- `errorCall` → `mkErrorCall`
+- `heapCall` → `mkHeapCall`
+- `heapErrorCall` → `mkHeapErrorCall`
 
-**Both witnesses are proof-relevant:**
-- Type coercion `c` wraps the bound result value: `c(rv)`
-- Grade coercion `conv` selects the smart constructor (calling convention)
-
-The `conv` witness determines WHICH smart constructor to use at the call site.
-`pureCall` → no binding. `errorCall` → `mkErrorCall`. `heapCall` → `mkHeapCall`.
-`heapErrorCall` → `mkHeapErrorCall`. The smart constructor produces the
-`effectfulCall` node with the correct args, outputs, and HOAS bindings.
-
-Type coercion `c` is applied to `rv` INSIDE the smart constructor's body closure
-— after binding, on the value that emerges.
+The `c` witness coerces `rv` inside the continuation (after binding).
 
 ### Heap Operations
 
@@ -376,31 +366,30 @@ continuation IS the rest of the block, passed as argument.
 ### On-Demand Callee Grade Discovery
 
 When elaboration encounters `StaticCall f args`:
-1. Check `gradeCache[f]` in ElabState
-2. If miss: find f's body in the program, try `checkProducer body returnType g`
-   for g ∈ [pure, err, heap, heapErr]. First success → f's grade. Cache it.
+1. Look up f's grade in ElabState (same place as its type info)
+2. If not yet known: find f's body, try `checkProducer body returnType g`
+   for g ∈ [pure, err, heap, heapErr]. First success → f's grade. Store it.
 3. Dispatch smart constructor based on discovered grade.
 
-This is demand-driven. No topological sort. No separate pass. Callees are
-elaborated on-demand the first time they're called. Recursive calls use the
-cache.
-
-The grade cache is in ElabState (mutable). This is implementation bookkeeping.
-HOAS is maintained (fresh variable introduction uses closures). Γ (Reader) stays
-immutable.
+The grade is part of the procedure's TYPE — stored alongside its param types
+and return type in the elaborator's state. Not a separate cache. When a callee
+is elaborated on-demand, its grade joins the same structure as its other type
+information. This is the same mechanism: type-checking discovers types AND
+grades simultaneously.
 
 ### Procedure Signature Rewriting
 
-After all procs are elaborated, `fullElaborate` rewrites signatures:
-- Grade `heap`/`heapErr` procs get `$heap_in` input + `$heap` output
+After a proc's grade is discovered:
+- Grade `heap`/`heapErr` → add `$heap_in` input + `$heap` output
 - Body prepended with `$heap := $heap_in`
 - Callers already pass heap (smart constructors did this during elaboration)
 
 ### Resolution Does NOT Determine Effects
 
-Resolution provides parameter types and return types. `EffectType` in `FuncSig`
-is REMOVED. The elaborator discovers effects on-demand. Resolution's only role
-is giving the elaborator enough type information to check arguments.
+Resolution provides parameter types, return types, defaults, kwargs.
+The elaborator discovers grades on-demand by elaborating callee bodies.
+There is no `EffectType` annotation from Resolution. The grade IS the
+type — discovered by the same mechanism that checks everything else.
 
 ### Holes
 
