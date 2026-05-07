@@ -69,7 +69,7 @@ The stratification is REPRESENTATIONAL: `Laurel.Program` and `FineGrainLaurel.Pr
 are different Lean types. You cannot accidentally pass un-elaborated Laurel to Core —
 the type system prevents it. FineGrainLaurel separates Values (pure expressions
 including coercions) from Producers (effectful procedure calls, control flow, assignment).
-Only procedures with `hasErrorOutput` produce true let-bindings.
+Only procedures with effectful return types (error/stateful/statefulError) produce true let-bindings.
 
 ---
 
@@ -127,12 +127,17 @@ signature. They share one output type. This is not a coincidence — they both a
 the same question ("what is this name?"), so they must produce the same answer type.
 
 ```lean
+inductive EffectType where
+  | pure (ty : HighType)                                     -- value-level call
+  | error (resultTy : HighType) (errTy : HighType)           -- error monad
+  | stateful (resultTy : HighType)                           -- heap state
+  | statefulError (resultTy : HighType) (errTy : HighType)   -- heap + error
+
 structure FuncSig where
   name : String
   params : List (String × HighType)
   defaults : List (Option StmtExprMd)   -- default values for optional params
-  returnType : HighType
-  hasErrorOutput : Bool                 -- does this procedure have an Error output?
+  effectType : EffectType               -- return type + effects (no boolean flags)
   hasKwargs : Bool                      -- does this accept **kwargs?
 
 structure TypeEnv where
@@ -157,7 +162,7 @@ inductive NameInfo where
 | Is `Foo` a class or a function? | `NameInfo.class_` vs `NameInfo.function` |
 | What are `Foo`'s fields? | `NameInfo.class_ _ fields` |
 | What are `f`'s parameter types and defaults? | `FuncSig.params`, `FuncSig.defaults` |
-| Does `f` have an error output? | `FuncSig.hasErrorOutput` |
+| What effects does `f` have? | `FuncSig.effectType` (pure/error/stateful/statefulError) |
 | What does `boto3.client("iam")` resolve to? | `overloadTable["client"]["iam"]` → `"IAMClient"` |
 | What does `str(x)` map to in Laurel? | `builtinMap["str"]` → `"to_string_any"` |
 | What type is `obj` for `obj.method()` dispatch? | `NameInfo.variable ty` → use `ty` to qualify method |
@@ -316,12 +321,12 @@ def eraseType : HighType → LowType
 In FGCBV, the distinction is about **elaboration effects**:
 
 - **Values:** Pure expressions. No elaboration effects. Can be nested freely.
-  Includes: literals, variables, pure function calls (no `hasErrorOutput`),
+  Includes: literals, variables, pure function calls (effectType = .pure),
   coercions (both upcasts and narrowing — narrowing is partial but that's a
   verification concern, not a runtime control flow concern).
 
 - **Producers:** Expressions with elaboration effects. Must be bound via `let`.
-  Only: procedure calls with `hasErrorOutput = true` (produce error output),
+  Only: effectful procedure calls (effectType = .error/.stateful/.statefulError),
   mutation (assignment), control flow (if, while, return, exit).
 
 Pure function calls (arithmetic, coercions, field reads) are VALUES even though
@@ -335,7 +340,7 @@ via error-value binding. The verifier handles it via SMT, not runtime branching.
 ───────────────        ─────────────────
 Γ ⊢_v n ⇒ int         Γ ⊢_v x ⇒ Γ(x)
 
-vᵢ ⇐ paramTyᵢ    f.hasErrorOutput = false
+vᵢ ⇐ paramTyᵢ    f.effectType = .pure ty
 ────────────────────────────────────────────
 Γ ⊢_v f(v₁,...,vₙ) ⇒ returnType(f)              (pure call — stays nested)
 ```
@@ -349,7 +354,7 @@ vᵢ ⇐ paramTyᵢ    f.hasErrorOutput = false
 
 **Producer synthesis:**
 ```
-vᵢ ⇐ paramTyᵢ    f.hasErrorOutput = true
+vᵢ ⇐ paramTyᵢ    f.effectType = .error resultTy errTy
 ──────────────────────────────────────────────
 Γ ⊢_p f(v₁,...,vₙ) ⇒ returnType(f)              (effectful call — TRUE let)
 
@@ -1275,7 +1280,7 @@ No let-floating. No two-pass hoisting.
 
 ### Exception Handling: prodCallWithError
 
-The ONLY elaboration-introduced binding. When Γ says `f.hasErrorOutput = true`:
+The ONLY elaboration-introduced binding. When Γ says `f.effectType = .error resultTy errTy`:
 - Elaboration emits `prodCallWithError f [args] resultVar errorVar ...`
 - Projection maps this to Laurel's multi-output assignment:
   ```
