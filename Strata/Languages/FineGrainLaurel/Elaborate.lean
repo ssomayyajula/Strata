@@ -355,8 +355,6 @@ partial def elaborateAssign (target value : StmtExprMd) (cont : ElabM FGLProduce
     let name := match target.val with | .Identifier id => id.text | _ => "_unknown"
     let prod ← mkVarDecl name (eraseType targetTy) (some (.staticCall hv [])) fun _ => cont
     pure (prod, .TVoid)
-  | .New classId =>
-    pure (.seq (.new classId.text) (.assign tv (.var "_last_new") (← cont)), .TVoid)
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
     match sig with
@@ -391,6 +389,13 @@ partial def elaborateAssign (target value : StmtExprMd) (cont : ElabM FGLProduce
     | none =>
       let cr ← checkValue value targetTy
       pure (.assign tv cr (← cont), .TVoid)
+  | .New classId =>
+    let prod ← mkEffectfulCall (classId.text ++ "@new") []
+      [("obj", .UserDefined (Identifier.mk classId.text none))]
+      fun outs => do
+        let coerced := applySubsume outs[0]! (.TCore "Composite") (eraseType targetTy)
+        pure (.assign tv coerced (← cont))
+    pure (prod, .TVoid)
   | _ =>
     let cr ← checkValue value targetTy
     pure (.assign tv cr (← cont), .TVoid)
