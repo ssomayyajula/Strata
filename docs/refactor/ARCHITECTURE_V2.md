@@ -344,15 +344,34 @@ after the producer is bound, on the value that comes out.
 | `.FieldSelect obj field` | `heap` | `Box..AnyVal!(readField($heap, obj, field))` |
 | `Assign [FieldSelect obj f] v` | `heap` | `$heap := updateField($heap, obj, f, Box..Any(v))` |
 
-### Dependency Order
+### On-Demand Callee Grade Discovery
 
-Procedures elaborated in topological order of call graph. Callee's grade known
-before caller's elaboration. Effect map: `procName → Grade`.
+When elaboration encounters `StaticCall f args`:
+1. Check `gradeCache[f]` in ElabState
+2. If miss: find f's body in the program, try `checkProducer body returnType g`
+   for g ∈ [pure, err, heap, heapErr]. First success → f's grade. Cache it.
+3. Dispatch smart constructor based on discovered grade.
 
-### Procedure Entry
+This is demand-driven. No topological sort. No separate pass. Callees are
+elaborated on-demand the first time they're called. Recursive calls use the
+cache.
 
-Body synth'd to discover grade. That grade becomes the procedure's effect signature.
-Callers read it from the effect map.
+The grade cache is in ElabState (mutable). This is implementation bookkeeping.
+HOAS is maintained (fresh variable introduction uses closures). Γ (Reader) stays
+immutable.
+
+### Procedure Signature Rewriting
+
+After all procs are elaborated, `fullElaborate` rewrites signatures:
+- Grade `heap`/`heapErr` procs get `$heap_in` input + `$heap` output
+- Body prepended with `$heap := $heap_in`
+- Callers already pass heap (smart constructors did this during elaboration)
+
+### Resolution Does NOT Determine Effects
+
+Resolution provides parameter types and return types. `EffectType` in `FuncSig`
+is REMOVED. The elaborator discovers effects on-demand. Resolution's only role
+is giving the elaborator enough type information to check arguments.
 
 ### Holes
 
