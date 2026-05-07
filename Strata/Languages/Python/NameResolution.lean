@@ -283,7 +283,7 @@ def collectFunctionLocals (body : Array (Python.stmt SourceRange)) (paramNames :
     Returns (paramName, paramType) pairs. -/
 private def extractParams (args : Python.arguments SourceRange) : List (String × HighType) :=
   match args with
-  | .mk_arguments _ argList _posonlyargs _vararg _kwonly _kwDefaults _kwarg _defaults =>
+  | .mk_arguments _ _posonlyargs argList _vararg _kwonly _kwDefaults _kwarg _defaults =>
       argList.val.toList.map fun arg =>
         match arg with
         | .mk_arg _ argName annotation _ =>
