@@ -120,8 +120,8 @@ Grade mode agrees with type mode.
 ───────────────
 Γ ⊢_v x ⇒ A
 
-f : (A₁,...,Aₙ) → B & 1    vᵢ ⇐ Aᵢ
-──────────────────────────────────────
+f : (A₁,...,Aₙ) → B    grade(f) = 1    vᵢ ⇐ Aᵢ
+──────────────────────────────────────────────────
 Γ ⊢_v f(v₁,...,vₙ) ⇒ B
 
 Γ ⊢_v V ⇒ A    subsume(A, B) = c
@@ -181,15 +181,18 @@ Mode check for `M to x. N ⇐ A & e`:
 The residuated monoid makes this mode-correct: given the whole grade `e` and
 the prefix grade `d`, the continuation grade `d \ e` is uniquely determined.
 
-### Subsumption
+### Subsumption (synth meets check)
 
 ```
-Γ ⊢_p M ⇒ A & d    A <: B    d ≤ e
-─────────────────────────────────────
-Γ ⊢_p M ⇐ B & e
+Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    subgrade(d, e) = conv
+────────────────────────────────────────────────────────────────
+Γ ⊢_p conv(M, fun rv => return c(rv)) ⇐ B & e
 ```
 
-Type coercion (`A <: B`) produces a witness. Subgrading (`d ≤ e`) is admissible.
+The output term applies BOTH witnesses:
+- `conv` wraps M in the correct binding form (effectfulCall with appropriate outputs)
+- `c` coerces the bound result value inside the continuation
+- `rv` is HOAS-bound (fresh name + extendEnv)
 
 ### Subsumption Table (Type Coercions)
 
@@ -340,6 +343,35 @@ Type coercion `c` is applied to `rv` INSIDE the smart constructor's body closure
 | `.New classId` | `heap` | `increment($heap)` → `MkComposite(ref, TypeTag)` |
 | `.FieldSelect obj field` | `heap` | `Box..AnyVal!(readField($heap, obj, field))` |
 | `Assign [FieldSelect obj f] v` | `heap` | `$heap := updateField($heap, obj, f, Box..Any(v))` |
+
+### Procedure Entry Point
+
+```
+Γ, params ⊢_p body ⇐ returnType & e
+─────────────────────────────────────
+procedure f(params) → returnType & e
+```
+
+The procedure's grade `e` is discovered by trying grades [1, err, heap, heap·err]
+on the body. The smallest grade at which `checkProducer` succeeds IS the grade.
+`fullElaborate` does this for each procedure and rewrites its signature accordingly.
+
+### Formal Rules → Implementation Mapping
+
+| Formal | Implementation |
+|---|---|
+| `Γ ⊢_v V ⇒ A` | `synthValue expr : ElabM (FGLValue × LowType)` |
+| `Γ ⊢_v V ⇐ A` | `checkValue expr expected : ElabM FGLValue` |
+| `Γ ⊢_p M ⇒ A & d` | `synthProducer expr cont : ElabM FGLProducer` (CPS — cont is rest of block) |
+| `Γ ⊢_p M ⇐ A & e` | `checkProducer expr expected : ElabM FGLProducer` |
+| `M to x. N ⇐ A & e` | `elaborateBlock [M, ...rest] cont` (M synth'd, rest is continuation) |
+| `subsume(A, B)` | `subsume actual expected : CoercionResult` |
+| `subgrade(d, e)` | `subgrade d e : Option ConventionWitness` → dispatches smart constructor |
+| `d \ e` | `Grade.residual d e : Option Grade` |
+
+The CPS transform: formal rules show `M to x. N` as a single check rule.
+Implementation realizes this as `synthProducer M (elaborateBlock rest)` — the
+continuation IS the rest of the block, passed as argument.
 
 ### On-Demand Callee Grade Discovery
 
