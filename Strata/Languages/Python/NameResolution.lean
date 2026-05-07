@@ -660,6 +660,24 @@ def TypeEnv.withPrelude (env : TypeEnv) : TypeEnv := Id.run do
       names := names.insert n (.function sig)
   return { env with names := names }
 
+/-- Merge procedure signatures from a Laurel runtime program into a TypeEnv.
+    Extracts FuncSig from each procedure's inputs/outputs.
+    Does not override user-defined entries. -/
+def TypeEnv.withRuntimeProgram (env : TypeEnv) (runtime : Laurel.Program) : TypeEnv := Id.run do
+  let mut names := env.names
+  for proc in runtime.staticProcedures do
+    let procName := proc.name.text
+    if !names.contains procName then
+      let params := proc.inputs.map fun p => (p.name.text, p.type.val)
+      let retTy := match proc.outputs with
+        | [out] => out.type.val
+        | _ => HighType.TCore "Any"
+      let defaults := params.map fun _ => (none : Option StmtExprMd)
+      let effectType := EffectType.pure retTy
+      let sig : FuncSig := { name := procName, params, defaults, effectType, hasKwargs := false }
+      names := names.insert procName (.function sig)
+  return { env with names := names }
+
 /-- Merge PySpec data into a TypeEnv.
     Takes parallel maps of procedure signatures and class definitions
     from the PySpec loader and inserts them as NameInfo entries. -/
