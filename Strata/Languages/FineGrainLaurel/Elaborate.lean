@@ -7,6 +7,7 @@ module
 import Strata.Languages.FineGrainLaurel.FineGrainLaurel
 public import Strata.Languages.Laurel.Laurel
 public import Strata.Languages.Laurel.HeapParameterizationConstants
+public import Strata.Languages.Laurel.CoreDefinitionsForLaurel
 public import Strata.Languages.Python.NameResolution
 
 namespace Strata.FineGrainLaurel
@@ -19,22 +20,26 @@ def mkLaurel (md : Imperative.MetaData Core.Expression) (e : StmtExpr) : StmtExp
 def mkHighTypeMd (md : Imperative.MetaData Core.Expression) (ty : HighType) : HighTypeMd :=
   { val := ty, md := md }
 
--- Grade
+-- Grade Monoid (residuated, partially-ordered, idempotent)
 
 inductive Grade where | pure | err | heap | heapErr deriving Inhabited, BEq, Repr
 
-def Grade.mul : Grade → Grade → Grade
+def Grade.leq : Grade → Grade → Bool
+  | .pure, _ => true
+  | .err, .err => true | .err, .heapErr => true
+  | .heap, .heap => true | .heap, .heapErr => true
+  | .heapErr, .heapErr => true
+  | _, _ => false
+
+def Grade.join : Grade → Grade → Grade
   | .pure, e => e | e, .pure => e
   | .err, .heap => .heapErr | .heap, .err => .heapErr
   | .err, .err => .err | .heap, .heap => .heap
   | .heapErr, _ => .heapErr | _, .heapErr => .heapErr
 
-def Grade.residual : Grade → Grade → Option Grade
-  | .pure, e => some e
-  | .err, .err => some .pure | .err, .heapErr => some .heap
-  | .heap, .heap => some .pure | .heap, .heapErr => some .err
-  | .heapErr, .heapErr => some .pure
-  | _, _ => none
+-- Left residual: d \ e = e when d ≤ e, none otherwise (idempotent monoid)
+def Grade.residual (d e : Grade) : Option Grade :=
+  if d.leq e then some e else none
 
 -- Types
 
@@ -80,26 +85,90 @@ inductive FGLProducer where
   | unit
   deriving Inhabited
 
--- Monad + State
+-- Convention Witness (defunctionalized subgrading)
+
+inductive ConventionWitness where
+  | pureCall | errorCall | heapCall | heapErrorCall
+
+def conventionOf : Grade → ConventionWitness
+  | .pure => .pureCall | .err => .errorCall
+  | .heap => .heapCall | .heapErr => .heapErrorCall
+
+-- Monad
+
+structure ElabEnv where
+  typeEnv : TypeEnv
+  program : Laurel.Program
 
 structure ElabState where
   freshCounter : Nat := 0
   heapVar : Option String := none
+  procGrades : Std.HashMap String Grade := {}
+  usedBoxConstructors : List (String × String × HighType) := []  -- (ctorName, dtorName, fieldType)
 
-abbrev ElabM := ReaderT TypeEnv (StateT ElabState Option)
+abbrev ElabM := ReaderT ElabEnv (StateT ElabState Option)
 
 private def freshVar (pfx : String := "tmp") : ElabM String := do
   let s ← get; set { s with freshCounter := s.freshCounter + 1 }; pure s!"{pfx}${s.freshCounter}"
 
-def lookupEnv (name : String) : ElabM (Option NameInfo) := do pure (← read).names[name]?
+def boxConstructorName (ty : HighType) : String :=
+  match ty with
+  | .TInt => "BoxInt" | .TBool => "BoxBool" | .TFloat64 => "BoxFloat64"
+  | .TReal => "BoxReal" | .TString => "BoxString"
+  | .UserDefined name => s!"BoxComposite"
+  | .TCore name => s!"Box..{name}"
+  | _ => "BoxComposite"
+
+def boxDestructorName (ty : HighType) : String :=
+  match ty with
+  | .TInt => "Box..intVal!" | .TBool => "Box..boolVal!" | .TFloat64 => "Box..float64Val!"
+  | .TReal => "Box..realVal!" | .TString => "Box..stringVal!"
+  | .UserDefined _ => "Box..compositeVal!"
+  | .TCore name => s!"Box..{name}Val!"
+  | _ => "Box..compositeVal!"
+
+def boxFieldName (ty : HighType) : String :=
+  match ty with
+  | .TInt => "intVal" | .TBool => "boolVal" | .TFloat64 => "float64Val"
+  | .TReal => "realVal" | .TString => "stringVal"
+  | .UserDefined _ => "compositeVal"
+  | .TCore name => s!"{name}Val"
+  | _ => "compositeVal"
+
+def boxFieldType (ty : HighType) : HighType :=
+  match ty with
+  | .UserDefined _ => .UserDefined (Identifier.mk "Composite" none)
+  | other => other
+
+def recordBoxUse (ty : HighType) : ElabM Unit := do
+  let ctor := boxConstructorName ty
+  let dtor := boxDestructorName ty
+  let existing := (← get).usedBoxConstructors
+  unless existing.any (fun (c, _, _) => c == ctor) do
+    modify fun s => { s with usedBoxConstructors := s.usedBoxConstructors ++ [(ctor, dtor, ty)] }
+
+def lookupFieldType (className fieldName : String) : ElabM (Option HighType) := do
+  match (← read).typeEnv.classFields[className]? with
+  | some fields => pure (fields.find? (fun (n, _) => n == fieldName) |>.map (·.2))
+  | none => pure none
+
+def resolveFieldOwner (fieldName : String) : ElabM (Option String) := do
+  let env := (← read).typeEnv
+  for (className, fields) in env.classFields.toList do
+    if fields.any (fun (n, _) => n == fieldName) then return some className
+  pure none
+
+def lookupEnv (name : String) : ElabM (Option NameInfo) := do pure (← read).typeEnv.names[name]?
 def extendEnv (name : String) (ty : HighType) (action : ElabM α) : ElabM α :=
-  withReader (fun env => { env with names := env.names.insert name (.variable ty) }) action
+  withReader (fun env => { env with typeEnv := { env.typeEnv with names := env.typeEnv.names.insert name (.variable ty) } }) action
 def lookupFuncSig (name : String) : ElabM (Option FuncSig) := do
-  match (← read).names[name]? with | some (.function sig) => pure (some sig) | _ => pure none
+  match (← read).typeEnv.names[name]? with | some (.function sig) => pure (some sig) | _ => pure none
+def lookupProcBody (name : String) : ElabM (Option StmtExprMd) := do
+  match (← read).program.staticProcedures.find? (fun p => p.name.text == name) with
+  | some proc => match proc.body with | .Transparent b => pure (some b) | _ => pure none
+  | none => pure none
 
 -- HOAS Smart Constructors
--- These internally use heapVar from state + freshVar + extendEnv.
--- External code never touches raw variable names.
 
 def mkEffectfulCall (callee : String) (args : List FGLValue)
     (outputSpecs : List (String × HighType))
@@ -131,7 +200,6 @@ def mkHeapCall (callee : String) (args : List FGLValue) (resultTy : HighType)
   let heapArg := match hv with | some h => FGLValue.var h | none => FGLValue.var "$heap"
   mkEffectfulCall callee (heapArg :: args) [("heap", .THeap), ("result", resultTy)]
     fun outs => do
-      -- Update heapVar to the fresh heap output (outs[0] is the new heap)
       match outs[0]! with | .var n => modify fun s => { s with heapVar := some n } | _ => pure ()
       body outs[1]!
 
@@ -144,7 +212,7 @@ def mkHeapErrorCall (callee : String) (args : List FGLValue) (resultTy : HighTyp
       match outs[0]! with | .var n => modify fun s => { s with heapVar := some n } | _ => pure ()
       body outs[1]!
 
--- Subsumption
+-- Subsumption (type coercions — value-level, no grade contribution)
 
 inductive CoercionResult where | refl | coerce (w : FGLValue → FGLValue) | unrelated
   deriving Inhabited
@@ -164,13 +232,16 @@ def subsume (actual expected : LowType) : CoercionResult :=
   | .TCore "Any", .TString => .coerce (fun v => .staticCall "Any..as_string!" [v])
   | .TCore "Any", .TFloat64 => .coerce (fun v => .staticCall "Any..as_float!" [v])
   | .TCore "Any", .TCore "Composite" => .coerce (fun v => .staticCall "Any..as_Composite!" [v])
-  | .TCore "Box", .TCore "Any" => .coerce (fun v => .staticCall "Box..AnyVal!" [v])
+  -- Box unwrapping is type-directed, not a subsumption coercion (see §Heap Field Access)
   | _, _ => .unrelated
 
 def applySubsume (val : FGLValue) (actual expected : LowType) : FGLValue :=
   match subsume actual expected with | .refl => val | .coerce c => c val | .unrelated => val
 
--- Elaboration
+-- The nesting combinator type: takes the rest (monadic) and produces the nested FGL
+abbrev NestComb := ElabM FGLProducer → ElabM FGLProducer
+
+-- Elaboration (mutual block)
 
 mutual
 
@@ -185,11 +256,22 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     | some (.function sig) => pure (.var id.text, eraseType sig.returnType)
     | _ => pure (.var id.text, .TCore "Any")
   | .FieldSelect obj field =>
-    let (ov, _) ← synthValue obj
+    let (ov, objTy) ← synthValue obj
     match (← get).heapVar with
     | some hv =>
-      let read := FGLValue.staticCall "readField" [.var hv, ov, .staticCall field.text []]
-      pure (.staticCall "Box..AnyVal!" [read], .TCore "Any")
+      let owner ← resolveFieldOwner field.text
+      let qualifiedName := match owner with | some cn => cn ++ "." ++ field.text | none => field.text
+      let fieldTy ← match owner with
+        | some cn => do
+          let ft ← lookupFieldType cn field.text
+          pure (ft.getD (.TCore "Any"))
+        | none => pure (.TCore "Any")
+      recordBoxUse fieldTy
+      -- readField expects Composite — narrow from Any if needed
+      let compositeObj := applySubsume ov objTy (.TCore "Composite")
+      let read := FGLValue.staticCall "readField" [.var hv, compositeObj, .staticCall qualifiedName []]
+      let dtor := boxDestructorName fieldTy
+      pure (.staticCall dtor [read], eraseType fieldTy)
     | none => pure (.fieldAccess ov field.text, .TCore "Any")
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
@@ -200,12 +282,8 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
       pure (.staticCall callee.text checkedArgs, .TCore "Any")
-  | .New id => dbg_trace s!"[BUG] synthValue: New({id.text})"; failure
-  | .Block _ _ => dbg_trace "[BUG] synthValue: Block"; failure
-  | .Assign _ _ => dbg_trace "[BUG] synthValue: Assign"; failure
-  | .IfThenElse _ _ _ => dbg_trace "[BUG] synthValue: IfThenElse"; failure
   | .Hole _ _ => pure (.var "_hole", .TCore "Any")
-  | _ => dbg_trace "[BUG] synthValue: other"; failure
+  | _ => failure
 
 partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
   let (val, actual) ← synthValue expr
@@ -214,127 +292,291 @@ partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValu
 partial def checkArgs (args : List StmtExprMd) (params : List (String × HighType)) : ElabM (List FGLValue) :=
   (args.zip (params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
 
-partial def synthProducer (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM FGLProducer := do
+-- synthProducer: returns (nesting combinator, result type, grade)
+-- The combinator takes the rest of the block (monadic) and nests it into the body field.
+partial def synthProducer (expr : StmtExprMd) : ElabM (NestComb × LowType × Grade) := do
   match expr.val with
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
     match sig with
     | some s =>
       let checkedArgs ← checkArgs args s.params
-      -- TODO: on-demand grade discovery. For now treat all calls as pure.
-      cont
-    | none => cont
-  | .New classId =>
-    match (← get).heapVar with
-    | some hv =>
-      let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
-      let newHeap := FGLValue.staticCall "increment" [.var hv]
-      let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
-      let freshH ← freshVar "heap"
-      modify fun s => { s with heapVar := some freshH }
-      let c ← extendEnv freshH .THeap cont
-      pure (.assign (.var freshH) newHeap (.returnValue obj))
-    | none => failure
+      let grade ← discoverGrade callee.text
+      let retTy := eraseType s.returnType
+      match conventionOf grade with
+      | .pureCall =>
+        pure (fun restM => restM, retTy, .pure)
+      | .errorCall =>
+        pure (fun restM => mkErrorCall callee.text checkedArgs s.returnType fun _rv => restM, retTy, .err)
+      | .heapCall =>
+        pure (fun restM => mkHeapCall callee.text checkedArgs s.returnType fun _rv => restM, retTy, .heap)
+      | .heapErrorCall =>
+        pure (fun restM => mkHeapErrorCall callee.text checkedArgs s.returnType fun _rv => restM, retTy, .heapErr)
+    | none =>
+      let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
+      let grade ← discoverGrade callee.text
+      let retTy := LowType.TCore "Any"
+      match conventionOf grade with
+      | .pureCall =>
+        pure (fun restM => restM, retTy, .pure)
+      | .errorCall =>
+        pure (fun restM => mkErrorCall callee.text checkedArgs (.TCore "Any") fun _rv => restM, retTy, .err)
+      | .heapCall =>
+        pure (fun restM => mkHeapCall callee.text checkedArgs (.TCore "Any") fun _rv => restM, retTy, .heap)
+      | .heapErrorCall =>
+        pure (fun restM => mkHeapErrorCall callee.text checkedArgs (.TCore "Any") fun _rv => restM, retTy, .heapErr)
+
   | .Assign targets value => match targets with
     | [target] =>
+      -- Field write: Assign [FieldSelect obj field] value → heap update
+      match target.val with
+      | .FieldSelect obj field =>
+        let (ov, objTy) ← synthValue obj
+        pure (fun restM => do
+          match (← get).heapVar with
+          | some hv =>
+            let owner ← resolveFieldOwner field.text
+            let qualifiedName := match owner with | some cn => cn ++ "." ++ field.text | none => field.text
+            let fieldTy ← match owner with
+              | some cn => do let ft ← lookupFieldType cn field.text; pure (ft.getD (.TCore "Any"))
+              | none => pure (.TCore "Any")
+            recordBoxUse fieldTy
+            let cv ← checkValue value fieldTy
+            let ctor := boxConstructorName fieldTy
+            let boxed := FGLValue.staticCall ctor [cv]
+            let compositeObj := applySubsume ov objTy (.TCore "Composite")
+            let newHeap := FGLValue.staticCall "updateField" [.var hv, compositeObj, .staticCall qualifiedName [], boxed]
+            let freshH ← freshVar "heap"
+            modify fun s => { s with heapVar := some freshH }
+            extendEnv freshH .THeap (do
+              let rest ← restM
+              pure (.varDecl freshH (.TCore "Heap") (some newHeap) rest))
+          | none => failure, .TVoid, .heap)
+      | _ =>
       let targetTy ← match target.val with
         | .Identifier id => match (← lookupEnv id.text) with | some (.variable t) => pure t | _ => pure (.TCore "Any")
         | _ => pure (.TCore "Any")
       let (tv, _) ← synthValue target
       match value.val with
       | .Hole false _ =>
-        mkVarDecl "_havoc" (eraseType targetTy) none fun hv => do
-          let c ← cont; pure (.assign tv hv c)
-      | .Hole true _ => do
+        pure (fun restM => mkVarDecl "_havoc" (eraseType targetTy) none fun hv => do
+          let rest ← restM; pure (.assign tv hv rest), .TVoid, .pure)
+      | .Hole true _ =>
         let hv ← freshVar "hole"
-        mkVarDecl (match target.val with | .Identifier id => id.text | _ => "_x") (eraseType targetTy) (some (.staticCall hv [])) fun _ => cont
+        let name := match target.val with | .Identifier id => id.text | _ => "_x"
+        pure (fun restM => mkVarDecl name (eraseType targetTy) (some (.staticCall hv [])) fun _ => restM, .TVoid, .pure)
       | .New classId =>
-        -- .New is a producer (grade heap). Allocate directly.
+        pure (fun restM => do
+          match (← get).heapVar with
+          | some hv =>
+            let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
+            let newHeap := FGLValue.staticCall "increment" [.var hv]
+            let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
+            let freshH ← freshVar "heap"
+            modify fun s => { s with heapVar := some freshH }
+            extendEnv freshH .THeap (do
+              let rest ← restM
+              pure (.varDecl freshH (.TCore "Heap") (some newHeap) (.assign tv obj rest)))
+          | none => failure, .TVoid, .heap)
+      | .StaticCall callee args =>
+        let sig ← lookupFuncSig callee.text
+        match sig with
+        | some s =>
+          let checkedArgs ← checkArgs args s.params
+          let grade ← discoverGrade callee.text
+          match conventionOf grade with
+          | .pureCall =>
+            let cv := FGLValue.staticCall callee.text checkedArgs
+            let coerced := applySubsume cv (eraseType s.returnType) (eraseType targetTy)
+            pure (fun restM => do let rest ← restM; pure (.assign tv coerced rest), .TVoid, .pure)
+          | .errorCall =>
+            pure (fun restM => mkErrorCall callee.text checkedArgs s.returnType fun rv => do
+              let coerced := applySubsume rv (eraseType s.returnType) (eraseType targetTy)
+              let rest ← restM; pure (.assign tv coerced rest), .TVoid, .err)
+          | .heapCall =>
+            pure (fun restM => mkHeapCall callee.text checkedArgs s.returnType fun rv => do
+              let coerced := applySubsume rv (eraseType s.returnType) (eraseType targetTy)
+              let rest ← restM; pure (.assign tv coerced rest), .TVoid, .heap)
+          | .heapErrorCall =>
+            pure (fun restM => mkHeapErrorCall callee.text checkedArgs s.returnType fun rv => do
+              let coerced := applySubsume rv (eraseType s.returnType) (eraseType targetTy)
+              let rest ← restM; pure (.assign tv coerced rest), .TVoid, .heapErr)
+        | none =>
+          let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
+          let grade ← discoverGrade callee.text
+          match conventionOf grade with
+          | .pureCall =>
+            let cv := FGLValue.staticCall callee.text checkedArgs
+            pure (fun restM => do let rest ← restM; pure (.assign tv cv rest), .TVoid, .pure)
+          | .errorCall =>
+            pure (fun restM => mkErrorCall callee.text checkedArgs (.TCore "Any") fun rv => do
+              let rest ← restM; pure (.assign tv rv rest), .TVoid, .err)
+          | .heapCall =>
+            pure (fun restM => mkHeapCall callee.text checkedArgs (.TCore "Any") fun rv => do
+              let rest ← restM; pure (.assign tv rv rest), .TVoid, .heap)
+          | .heapErrorCall =>
+            pure (fun restM => mkHeapErrorCall callee.text checkedArgs (.TCore "Any") fun rv => do
+              let rest ← restM; pure (.assign tv rv rest), .TVoid, .heapErr)
+      | .FieldSelect obj field =>
+        let (ov, objTy) ← synthValue obj
         match (← get).heapVar with
         | some hv =>
-          let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
-          let newHeap := FGLValue.staticCall "increment" [.var hv]
-          let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
-          let freshH ← freshVar "heap"
-          modify fun s => { s with heapVar := some freshH }
-          let c ← extendEnv freshH .THeap (do let k ← cont; pure (.assign tv obj k))
-          pure (.varDecl freshH (.TCore "Heap") (some newHeap) c)
+          let owner ← resolveFieldOwner field.text
+          let qualifiedName := match owner with | some cn => cn ++ "." ++ field.text | none => field.text
+          let fieldTy ← match owner with
+            | some cn => do let ft ← lookupFieldType cn field.text; pure (ft.getD (.TCore "Any"))
+            | none => pure (.TCore "Any")
+          recordBoxUse fieldTy
+          let compositeObj := applySubsume ov objTy (.TCore "Composite")
+          let read := FGLValue.staticCall "readField" [.var hv, compositeObj, .staticCall qualifiedName []]
+          let dtor := boxDestructorName fieldTy
+          let unboxed := FGLValue.staticCall dtor [read]
+          let coerced := applySubsume unboxed (eraseType fieldTy) (eraseType targetTy)
+          pure (fun restM => do let rest ← restM; pure (.assign tv coerced rest), .TVoid, .heap)
         | none =>
-          -- No heap available — pass through as-is (will fail at Core)
-          let c ← cont
-          pure (.assign tv (.staticCall "MkComposite" []) c)
+          let fv := FGLValue.fieldAccess ov field.text
+          pure (fun restM => do let rest ← restM; pure (.assign tv fv rest), .TVoid, .pure)
       | _ =>
-        let cr ← checkValue value targetTy
-        let c ← cont
-        pure (.assign tv cr c)
-    | _ => cont
+        let cv ← checkValue value targetTy
+        pure (fun restM => do let rest ← restM; pure (.assign tv cv rest), .TVoid, .pure)
+    | _ => pure (fun restM => restM, .TVoid, .pure)
+
   | .LocalVariable nameId typeMd initOpt =>
     let ci ← match initOpt with
       | some ⟨.Hole false _, _⟩ => pure none
       | some ⟨.Hole true _, _⟩ => do let hv ← freshVar "hole"; pure (some (.staticCall hv []))
       | some i => do let v ← checkValue i typeMd.val; pure (some v)
       | none => pure none
-    mkVarDecl nameId.text (eraseType typeMd.val) ci fun _ => cont
+    pure (fun restM => mkVarDecl nameId.text (eraseType typeMd.val) ci fun _ => restM, .TVoid, .pure)
+
   | .Assert cond =>
     let cc ← checkValue cond .TBool
-    let c ← cont
-    pure (.assert cc c)
+    pure (fun restM => do let rest ← restM; pure (.assert cc rest), .TVoid, .pure)
+
   | .Assume cond =>
     let cc ← checkValue cond .TBool
-    let c ← cont
-    pure (.assume cc c)
-  | .While cond _invs _dec body =>
-    let cc ← checkValue cond .TBool
-    let bp ← checkProducer body .TVoid
-    let c ← cont
-    pure (.whileLoop cc bp c)
-  | .Exit target => pure (.exit target)
+    pure (fun restM => do let rest ← restM; pure (.assume cc rest), .TVoid, .pure)
+
+  | .While _ _ _ _ => failure  -- While is check-mode only (handled by elaborateBlock)
+
+  | .IfThenElse _ _ _ => failure  -- IfThenElse is check-mode only (handled by elaborateBlock)
+
+  | .Exit target =>
+    pure (fun _restM => pure (.exit target), .TVoid, .pure)
+
   | .Return valueOpt =>
-    let retTy := .TCore "Any"  -- TODO: pass from check context
-    match valueOpt with
-    | some v => let cv ← checkValue v retTy; pure (.returnValue cv)
-    | none => pure (.returnValue .fromNone)
-  | .IfThenElse cond thn els =>
-    let cc ← checkValue cond .TBool
-    let tp ← checkProducer thn .TVoid
-    let ep ← match els with | some e => checkProducer e .TVoid | none => pure .unit
-    let c ← cont
-    pure (.ifThenElse cc tp ep)
+    pure (fun _restM => do
+      let retTy := .TCore "Any"
+      match valueOpt with
+      | some v => let cv ← checkValue v retTy; pure (.returnValue cv)
+      | none => pure (.returnValue .fromNone), .TVoid, .pure)
+
   | .Block stmts label =>
-    let prod ← elaborateBlock stmts cont
-    pure (match label with | some l => .labeledBlock l prod | none => prod)
+    pure (fun restM => do
+      let g ← currentGrade
+      let prod ← elaborateBlock stmts .TVoid g
+      let rest ← restM
+      pure (match label with | some l => .labeledBlock l prod | none => prod), .TVoid, .pure)
+
+  | .New classId =>
+    pure (fun restM => do
+      match (← get).heapVar with
+      | some hv =>
+        let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
+        let newHeap := FGLValue.staticCall "increment" [.var hv]
+        let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
+        let freshH ← freshVar "heap"
+        modify fun s => { s with heapVar := some freshH }
+        extendEnv freshH .THeap (do
+          let rest ← restM
+          pure (.varDecl freshH (.TCore "Heap") (some newHeap) (.returnValue obj)))
+      | none => failure, .TCore "Composite", .heap)
+
   | .Hole deterministic _ =>
     if deterministic then do
       let hv ← freshVar "hole"
-      let c ← cont
-      pure (.returnValue (.staticCall hv []))
+      pure (fun restM => do let rest ← restM; pure (.returnValue (.staticCall hv [])), .TCore "Any", .pure)
     else
-      mkVarDecl "_havoc" (.TCore "Any") none fun _hv => cont
-  | _ => cont
+      pure (fun restM => mkVarDecl "_havoc" (.TCore "Any") none fun _hv => restM, .TCore "Any", .pure)
 
-partial def checkProducer (expr : StmtExprMd) (expected : LowType) : ElabM FGLProducer := do
+  | _ => pure (fun restM => restM, .TVoid, .pure)
+
+-- checkProducer: check-mode rules (if, var-bind, return) + fallback to synth+subsumption
+partial def checkProducer (expr : StmtExprMd) (expected : LowType) (grade : Grade) : ElabM FGLProducer := do
   match expr.val with
   | .IfThenElse cond thn els =>
     let cc ← checkValue cond .TBool
-    let tp ← checkProducer thn expected
-    let ep ← match els with | some e => checkProducer e expected | none => pure .unit
+    let tp ← checkProducer thn expected grade
+    let ep ← match els with | some e => checkProducer e expected grade | none => pure .unit
     pure (.ifThenElse cc tp ep)
   | .Return valueOpt =>
     match valueOpt with
     | some v => let cv ← checkValue v (liftType expected); pure (.returnValue cv)
     | none => pure (.returnValue .fromNone)
   | .Block stmts label =>
-    let prod ← elaborateBlock stmts (pure .unit)
+    let prod ← elaborateBlock stmts expected grade
     pure (match label with | some l => .labeledBlock l prod | none => prod)
   | _ =>
-    synthProducer expr (pure .unit)
+    elaborateBlock [expr] expected grade
 
-partial def elaborateBlock (stmts : List StmtExprMd) (terminal : ElabM FGLProducer) : ElabM FGLProducer := do
+-- elaborateBlock: sequence statements via nesting combinators + to-rule
+partial def elaborateBlock (stmts : List StmtExprMd) (expected : LowType) (grade : Grade) : ElabM FGLProducer := do
   match stmts with
-  | [] => terminal
-  | [last] => checkProducer last .TVoid
+  | [] => pure .unit
+  | [last] => match last.val with
+    | .Return _ => checkProducer last expected grade
+    | .Exit _ =>
+      let (plug, _, _) ← synthProducer last
+      plug (pure .unit)
+    | _ =>
+      let (plug, _, d) ← synthProducer last
+      guard (Grade.leq d grade)
+      plug (pure .unit)
   | stmt :: rest =>
-    synthProducer stmt (elaborateBlock rest terminal)
+    let (plug, _, d) ← synthProducer stmt
+    guard (Grade.leq d grade)
+    plug (elaborateBlock rest expected grade)
+
+-- discoverGrade: typing rules as oracle (checkProducer at each grade)
+partial def discoverGrade (callee : String) : ElabM Grade := do
+  match (← get).procGrades[callee]? with
+  | some g => pure g
+  | none =>
+    let body ← lookupProcBody callee
+    match body with
+    | some bodyExpr =>
+      let sig ← lookupFuncSig callee
+      let retTy := match sig with | some s => eraseType s.returnType | none => .TCore "Any"
+      let env ← read
+      let paramEnv := match sig with
+        | some s => s.params.foldl (fun e (n, t) =>
+            { e with typeEnv := { e.typeEnv with names := e.typeEnv.names.insert n (.variable t) } }) env
+        | none => env
+      let grade ← tryGrades paramEnv bodyExpr retTy [.pure, .err, .heap, .heapErr]
+      modify fun s => { s with procGrades := s.procGrades.insert callee grade }
+      pure grade
+    | none => pure .pure
+
+partial def tryGrades (env : ElabEnv) (body : StmtExprMd) (retTy : LowType) (grades : List Grade) : ElabM Grade := do
+  match grades with
+  | [] => pure .heapErr
+  | g :: rest =>
+    let st ← get
+    let trialSt : ElabState := { st with
+      heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+    match (checkProducer body retTy g).run env |>.run trialSt with
+    | some (_, st') =>
+      -- Adopt discovered procGrades from successful trial
+      modify fun s => { s with procGrades := st'.procGrades }
+      pure g
+    | none => tryGrades env body retTy rest
+
+-- Helper: get the current grade from the check context (threaded via elaborateBlock)
+-- We read the heapVar to infer the ambient grade
+partial def currentGrade : ElabM Grade := do
+  match (← get).heapVar with
+  | some _ => pure .heapErr
+  | none => pure .heapErr
 
 end
 
@@ -379,22 +621,90 @@ end
 def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) : StmtExprMd :=
   mkLaurel md (.Block (projectProducer md prod) none)
 
--- fullElaborate
+-- fullElaborate: entry point
 
 def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String Laurel.Program := do
+  let env : ElabEnv := { typeEnv := typeEnv, program := program }
   let mut procs : List Laurel.Procedure := []
+  let mut globalState : ElabState := {}
   for proc in program.staticProcedures do
     match proc.body with
     | .Transparent bodyExpr =>
-      let st : ElabState := { freshCounter := 0, heapVar := none }
       let extEnv := (proc.inputs ++ proc.outputs).foldl
-        (fun env p => { env with names := env.names.insert p.name.text (.variable p.type.val) }) typeEnv
-      match (checkProducer bodyExpr (.TCore "Any")).run extEnv |>.run st with
-      | some (fgl, _) => procs := procs ++ [{ proc with body := .Transparent (projectBody bodyExpr.md fgl) }]
+        (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
+      let procEnv : ElabEnv := { env with typeEnv := extEnv }
+      let retTy := match proc.outputs[0]? with | some o => eraseType o.type.val | none => .TCore "Any"
+      -- Discover grade by trying checkProducer at each level
+      let grade := [Grade.pure, Grade.err, Grade.heap, Grade.heapErr].findSome? fun g =>
+        let st : ElabState := { globalState with
+          freshCounter := 0
+          heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+        match (checkProducer bodyExpr retTy g).run procEnv |>.run st with
+        | some _ => some g
+        | none => none
+      match grade with
+      | some g =>
+        dbg_trace s!"[elab] {proc.name.text} grade={repr g}"
+        let st : ElabState := { globalState with
+          freshCounter := 0
+          heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+        match (checkProducer bodyExpr retTy g).run procEnv |>.run st with
+        | some (fgl, st') =>
+          globalState := { globalState with
+            procGrades := st'.procGrades
+            usedBoxConstructors := globalState.usedBoxConstructors ++ st'.usedBoxConstructors.filter
+              (fun (c, _, _) => !globalState.usedBoxConstructors.any (fun (c2, _, _) => c == c2)) }
+          let projected := projectBody bodyExpr.md fgl
+          -- If heap grade, add heap params
+          if g == .heap || g == .heapErr then
+            let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd bodyExpr.md .THeap }
+            let heapOutParam : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := mkHighTypeMd bodyExpr.md .THeap }
+            let heapInit := mkLaurel bodyExpr.md (.Assign [mkLaurel bodyExpr.md (.Identifier (Identifier.mk "$heap" none))] (mkLaurel bodyExpr.md (.Identifier (Identifier.mk "$heap_in" none))))
+            let newBody := mkLaurel bodyExpr.md (.Block ([heapInit] ++ (projectProducer bodyExpr.md fgl)) none)
+            procs := procs ++ [{ proc with
+              inputs := [heapInParam] ++ proc.inputs
+              outputs := [heapOutParam] ++ proc.outputs
+              body := .Transparent newBody }]
+          else
+            procs := procs ++ [{ proc with body := .Transparent projected }]
+        | none => procs := procs ++ [proc]
       | none => procs := procs ++ [proc]
     | _ => procs := procs ++ [proc]
-  let compositeType : TypeDefinition := .Datatype { name := "Composite", typeArgs := [], constructors := [{ name := "MkComposite", args := [{ name := "ref", type := ⟨.TInt, #[]⟩ }] }] }
-  pure { program with staticProcedures := procs, types := [compositeType] ++ program.types }
+  let hasHeap := globalState.procGrades.toList.any fun (_, g) => g == .heap || g == .heapErr
+  -- Collect composite class names from TypeEnv for TypeTag generation
+  let compositeNames := typeEnv.classFields.toList.map (·.1)
+  let typeTagDatatype : TypeDefinition := .Datatype {
+    name := "TypeTag", typeArgs := [],
+    constructors := compositeNames.map fun n => { name := Identifier.mk (n ++ "_TypeTag") none, args := [] } }
+  let compositeType : TypeDefinition := .Datatype {
+    name := "Composite", typeArgs := [],
+    constructors := [{ name := Identifier.mk "MkComposite" none, args := [
+      { name := Identifier.mk "ref" none, type := ⟨.TInt, #[]⟩ },
+      { name := Identifier.mk "typeTag" none, type := ⟨.UserDefined "TypeTag", #[]⟩ }] }] }
+  -- Generate Field datatype: one zero-arg constructor per class field (qualified: ClassName.fieldName)
+  let fieldConstructors := typeEnv.classFields.toList.foldl (fun acc (className, fields) =>
+    acc ++ fields.map fun (fieldName, _) =>
+      { name := Identifier.mk (className ++ "." ++ fieldName) none, args := [] : DatatypeConstructor }) []
+  let fieldDatatype : TypeDefinition := .Datatype {
+    name := "Field", typeArgs := [], constructors := fieldConstructors }
+  -- Generate Box datatype from used constructors
+  let boxConstructors := globalState.usedBoxConstructors.map fun (ctorName, _, ty) =>
+    { name := Identifier.mk ctorName none, args := [
+      { name := Identifier.mk (boxFieldName ty) none, type := ⟨boxFieldType ty, #[]⟩ }] : DatatypeConstructor }
+  let boxDatatype : TypeDefinition := .Datatype {
+    name := "Box", typeArgs := [], constructors := boxConstructors }
+  if hasHeap then
+    -- Filter out Composite from heapConstants (we provide our own with typeTag)
+    let heapTypesFiltered := heapConstants.types.filter fun td => match td with
+      | .Datatype dt => dt.name.text != "Composite"
+      | _ => true
+    pure { program with
+      staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ heapConstants.staticProcedures ++ procs
+      types := [fieldDatatype, boxDatatype, typeTagDatatype, compositeType] ++ heapTypesFiltered ++ program.types }
+  else
+    pure { program with
+      staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ procs
+      types := [typeTagDatatype, compositeType] ++ program.types }
 
 end
 end Strata.FineGrainLaurel

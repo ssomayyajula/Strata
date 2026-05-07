@@ -212,7 +212,7 @@ def subsume (actual expected : LowType) : CoercionResult :=
   | .TCore "Any", .TString      => .coerce (fun v => .staticCall "Any..as_string!" [v])
   | .TCore "Any", .TFloat64     => .coerce (fun v => .staticCall "Any..as_float!" [v])
   | .TCore "Any", .TCore "Composite" => .coerce (fun v => .staticCall "Any..as_Composite!" [v])
-  | .TCore "Box", .TCore "Any"  => .coerce (fun v => .staticCall "Box..AnyVal!" [v])
+  -- No Box..AnyVal! — Box unwrapping is type-directed (see §Heap Field Access)
   | _, _ => .unrelated
 ```
 
@@ -230,7 +230,7 @@ def subsume (actual expected : LowType) : CoercionResult :=
 | ListAny | Any | `from_ListAny` | Prelude |
 | DictStrAny | Any | `from_DictStrAny` | Prelude |
 | TVoid | Any | `from_None` | Prelude |
-| Any | Box | `Box..Any` | Generated |
+| T | Box | `BoxT(val)` | Generated (type-directed: BoxInt, BoxBool, BoxComposite, ...) |
 
 **Narrowing (A ▷ B, partial — precondition-guarded):**
 
@@ -243,19 +243,48 @@ def subsume (actual expected : LowType) : CoercionResult :=
 | Any | Composite | `Any..as_Composite!` | DDM-generated |
 | Any | ListAny | `Any..as_ListAny!` | DDM-generated |
 | Any | DictStrAny | `Any..as_Dict!` | DDM-generated |
-| Box | Any | `Box..AnyVal!` | DDM-generated (infallible) |
+| Box | T | `Box..tVal!(box)` | Generated (type-directed: Box..intVal!, Box..boolVal!, ...) |
 
 Both produce VALUES. Narrowing is partial (precondition-guarded).
 No grade contribution — these are value-level operations.
 
 ### Composite and Any
 
-`Any` is a tagged union. `Composite` is a heap reference (`MkComposite(ref: int)`).
+`Any` is a tagged union. `Composite` is a heap reference (`MkComposite(ref: int, typeTag: TypeTag)`).
 `Composite <: Any` via `from_Composite` (pointer-preserving injection).
 `Any ▷ Composite` via `Any..as_Composite!`.
 
-Field access on Composite: `readField(heap, obj, field) → Box`, then `Box..AnyVal! → Any`,
-then narrow `Any ▷ T`.
+### Heap Field Access (Type-Directed Box Protocol)
+
+The heap stores fields as `Box` values. `Box` is a sum type with one constructor
+per primitive type used in fields:
+
+```
+datatype Box { BoxInt(intVal: int) | BoxBool(boolVal: bool) | BoxComposite(compositeVal: Composite) | ... }
+```
+
+Constructors and destructors are type-directed, selected by the field's declared
+type from `classFields` in TypeEnv:
+
+| Field type | Box constructor | Box destructor |
+|---|---|---|
+| int | `BoxInt(val)` | `Box..intVal!(box)` |
+| bool | `BoxBool(val)` | `Box..boolVal!(box)` |
+| float64 | `BoxFloat64(val)` | `Box..float64Val!(box)` |
+| str | `BoxString(val)` | `Box..stringVal!(box)` |
+| Composite | `BoxComposite(val)` | `Box..compositeVal!(box)` |
+| UserDefined T | `Box..T(val)` | `Box..TVal!(box)` |
+| TCore name | `Box..name(val)` | `Box..nameVal!(box)` |
+
+Field read: `Box..tVal!(readField($heap, obj, ClassName.fieldName))` → value at field type
+Field write: `$heap := updateField($heap, obj, ClassName.fieldName, BoxT(value))`
+
+The qualified field name `ClassName.fieldName` is a zero-arg constructor of the
+`Field` datatype. One constructor per declared field across all classes.
+
+The `Box` datatype is generated with only the constructors actually used (tracked
+during elaboration). The `Field` datatype is generated from all fields in
+`classFields`.
 
 ### Subgrading Witness (Defunctionalized Calling Convention)
 
@@ -291,19 +320,34 @@ def mkHeapCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 def mkHeapErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 ```
 
-### State-Passing Elaboration (Egger-style)
-
-The elaborator uses Egger-style state-passing: `synthProducer` takes the rest
-of the block as the continuation of `M to x. N`. The heap state flows through
-the smart constructors (HOAS closures). Every FGLProducer constructor has a
-`body` field — that IS the continuation of the sequencing rule. There is no `.seq`.
+### Elaboration Structure
 
 ```lean
-partial def synthProducer (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM FGLProducer
+synthProducer (expr) : ElabM (FGLProducer → FGLProducer, LowType, Grade)
+checkProducer (expr) (expected : LowType) (grade : Grade) : ElabM FGLProducer
+elaborateBlock (stmts) (expected : LowType) (grade : Grade) : ElabM FGLProducer
 ```
 
-The smart constructors (§Subgrading Witness) plug the continuation into the
-binding form. They handle all HOAS internally (fresh names, extendEnv, heapVar).
+**synthProducer** returns `(FGLProducer → FGLProducer, LowType, Grade)`:
+- The function takes a continuation (the rest of the block) and plugs it into
+  the `body` field of the produced FGLProducer node. E.g., `fun rest => .assert cond rest`.
+- For effectful calls, the smart constructor (HOAS) generates the effectfulCall
+  node and the function plugs `rest` into the body after the bindings.
+
+**elaborateBlock** sequences statements by nesting:
+```
+elaborateBlock [s₁, s₂, s₃] expected grade:
+  let (plug₁, _, d₁) := synthProducer s₁
+  let restGrade := d₁ \ grade   -- residual (may fail → grade too low)
+  let rest := elaborateBlock [s₂, s₃] expected restGrade
+  plug₁ rest                     -- nest rest inside s₁'s body
+```
+
+**checkProducer** handles check-mode rules (if, var-bind, return) and falls
+back to synth + subsumption.
+
+No continuation parameter on synthProducer. No CPS. The `FGLProducer → FGLProducer`
+return IS the nesting combinator — it plugs the rest in.
 
 ### Producer Subsumption (see §Subsumption above for the full rule)
 
@@ -319,9 +363,9 @@ The `c` witness coerces `rv` inside the continuation (after binding).
 
 | Source | Grade | Elaborated |
 |---|---|---|
-| `.New classId` | `heap` | `increment($heap)` → `MkComposite(ref, TypeTag)` |
-| `.FieldSelect obj field` | `heap` | `Box..AnyVal!(readField($heap, obj, field))` |
-| `Assign [FieldSelect obj f] v` | `heap` | `$heap := updateField($heap, obj, f, Box..Any(v))` |
+| `.New classId` | `heap` | `$heap := increment($heap); MkComposite(Heap..nextReference!($heap_prev), classId_TypeTag())` |
+| `.FieldSelect obj field` | `heap` | `Box..tVal!(readField($heap, obj, ClassName.fieldName))` (t = field's declared type) |
+| `Assign [FieldSelect obj f] v` | `heap` | `$heap := updateField($heap, obj, ClassName.fieldName, BoxT(v))` (T = field's declared type) |
 
 ### Procedure Entry Point
 
