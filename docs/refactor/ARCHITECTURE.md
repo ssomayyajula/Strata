@@ -611,6 +611,44 @@ has exactly one FGCBV translation.
 ⟦if c then a else b⟧  = ⟦c⟧ to cond. narrow(cond,bool) to b. if b then ⟦a⟧ else ⟦b⟧
 ```
 
+**Type preservation (the embedding preserves typability):**
+
+The embedding is an action on DERIVATIONS. If `D : Γ ⊢_Laurel e : A` is a typing
+derivation in Laurel (which uses implicit subsumption: `int` flows into `Any`
+positions without explicit cast), then `⟦D⟧ : Γ ⊢_FGL e' : A` is a derivation
+in FGL where every subsumption step is witnessed by an explicit coercion.
+
+The key: Laurel's type system has `int <: Any` (implicit subsumption). When the
+source derivation D applies the subsumption rule at a check boundary (e.g., passing
+an `int` arg where `Any` is expected), the image `⟦D⟧` applies the explicit
+coercion witness `from_int` at that same point. The coercion IS the explicit form
+of what subsumption does implicitly.
+
+For each source typing rule, the embedding produces a valid target derivation:
+
+```
+Source:  Γ ⊢ a : int    int <: Any (implicit)    Γ ⊢ f : Any → Any
+         ──────────────────────────────────────────────────────────
+         Γ ⊢ f(a) : Any
+
+Image:   Γ ⊢_v a ⇒ int    subsume(int, Any) = from_int
+         ───────────────────────────────────────────────
+         Γ ⊢_v from_int(a) ⇐ Any    Γ ⊢_p f(from_int(a)) ⇒ Any
+```
+
+Every step in ⟦D⟧ is justified by an FGL typing rule. The coercion witnesses
+(`from_int`, `Any_to_bool`, etc.) are well-typed functions in FGL's type system:
+`from_int : int → Any`, `Any_to_bool : Any → bool`. Their application at the
+correct types is guaranteed by the bidirectional algorithm's mode discipline:
+coercions only fire when synth produces type A and check expects type B with
+A ≠ B — and the subsume table only returns witnesses for VALID coercions.
+
+If subsume returns `.unrelated`, no coercion is inserted — this means the source
+derivation CANNOT have used subsumption at that point (the types are unrelated).
+The embedding is TOTAL on well-typed Laurel: every well-typed source derivation
+maps to a well-typed target derivation. Ill-typed source terms (where unrelated
+types meet) don't have source derivations, so the embedding doesn't need to handle them.
+
 Key properties:
 - **Every subexpression is elaborated as a PRODUCER** (`⟦e⟧` always produces a producer)
 - **Every intermediate result is BOUND** (`to x.` = letProd)
