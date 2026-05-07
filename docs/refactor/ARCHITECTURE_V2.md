@@ -147,8 +147,8 @@ f : (A₁,...,Aₙ) → B    grade(f) = d (on-demand discovery)    d > 1    vᵢ
 ───────────────────────────
 Γ ⊢_p (assert V) ⇒ TVoid & 1
 
-Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇐ TVoid & e
-─────────────────────────────────────────
+Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇐ TVoid & e    (e discovered by trying grades on M)
+─────────────────────────────────────────────────────────────────────────────
 Γ ⊢_p (while V do M) ⇒ TVoid & e
 ```
 
@@ -291,30 +291,18 @@ def mkHeapCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 def mkHeapErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 ```
 
-### CPS Elaboration (Operations Take Continuations)
+### CPS Elaboration
 
 The elaborator is CPS: `synthProducer` takes a continuation and nests the
 operation AROUND it. Every FGLProducer constructor has a `body` field — that
 IS the continuation. There is no `.seq`.
 
 ```lean
--- synthProducer takes the rest of the block as continuation:
 partial def synthProducer (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM FGLProducer
-
--- Smart constructors plug the continuation into the binding form:
-def mkErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer
-def mkHeapCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer
 ```
 
-The smart constructors internally:
-1. Read `heapVar` from ElabState (current heap)
-2. Generate fresh output names via `freshVar` (HOAS)
-3. Extend Γ with bound outputs via `extendEnv` (HOAS)
-4. Call the body closure with the bound result value
-5. Update `heapVar` if a new heap was produced
-
-The continuation receives the bound result. The new heap is tracked in state
-(implementation bookkeeping). All binding is HOAS (closures + extendEnv).
+The smart constructors (§Subgrading Witness) plug the continuation into the
+binding form. They handle all HOAS internally (fresh names, extendEnv, heapVar).
 
 ### Producer Subsumption (see §Subsumption above for the full rule)
 
