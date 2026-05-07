@@ -536,8 +536,17 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
         let (fgl, _) := (checkProducer none bodyExpr (eraseType retTy)).run baseEnv |>.run st
         procs := procs ++ [{ proc with body := .Transparent (projectBody bodyExpr.md fgl) }]
     | _ => procs := procs ++ [proc]
+  let hasStateful := procs.any fun p => p.inputs.any fun i => i.name.text == "$heap_in"
   let compositeType : TypeDefinition := .Datatype { name := "Composite", typeArgs := [], constructors := [{ name := "MkComposite", args := [{ name := "ref", type := ⟨.TInt, #[]⟩ }] }] }
-  pure { program with staticProcedures := procs, types := [compositeType] ++ program.types }
+  match hasStateful with
+  | true =>
+    pure { program with
+      staticProcedures := heapConstants.staticProcedures ++ procs,
+      types := heapConstants.types ++ [compositeType] ++ program.types }
+  | false =>
+    pure { program with
+      staticProcedures := procs,
+      types := [compositeType] ++ program.types }
 
 end
 end Strata.FineGrainLaurel
