@@ -254,8 +254,8 @@ partial def translateCall (sr : SourceRange) (func : Python.expr SourceRange)
     else
       let objExpr ← translateExpr receiver
       let qualifiedName ← resolveMethodName receiver methodName.val sr
-      let allArgs ← resolveKwargs qualifiedName (objExpr :: posArgs) kwargPairs
-      mkExpr sr (.StaticCall qualifiedName allArgs)
+      let resolvedArgs ← resolveKwargs qualifiedName posArgs kwargPairs
+      mkExpr sr (.StaticCall qualifiedName (objExpr :: resolvedArgs))
   | .Name _ calleeName _ =>
     match (← lookupBuiltin calleeName.val) with
     | some laurelName =>
@@ -268,7 +268,7 @@ partial def translateCall (sr : SourceRange) (func : Python.expr SourceRange)
         let tmpDecl ← mkExpr sr (.LocalVariable tmpName (mkTypeDefault (.UserDefined classId)) (some newExpr))
         let tmpRef ← mkExpr sr (.Identifier tmpName)
         let initName := s!"{className}@__init__"
-        let initCall ← mkExpr sr (.StaticCall initName (← resolveKwargs initName (tmpRef :: posArgs) kwargPairs))
+        let initCall ← mkExpr sr (.StaticCall initName (tmpRef :: (← resolveKwargs initName posArgs kwargPairs)))
         mkExpr sr (.Block [tmpDecl, initCall, tmpRef] none)
       | some (.function sig) =>
         mkExpr sr (.StaticCall sig.name (← resolveKwargs sig.name posArgs kwargPairs))
@@ -478,7 +478,7 @@ partial def translateAssignSingle (sr : SourceRange) (target value : Python.expr
       let posArgs ← callArgs.val.toList.mapM translateExpr
       let kwargPairs ← translateKwargs callKwargs.val translateExpr
       let initName := s!"{className}@__init__"
-      let initCall ← mkExpr sr (.StaticCall initName (← resolveKwargs initName (targetExpr :: posArgs) kwargPairs))
+      let initCall ← mkExpr sr (.StaticCall initName (targetExpr :: (← resolveKwargs initName posArgs kwargPairs)))
       pure [assignNew, initCall]
     | _ => do
       pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]

@@ -69,7 +69,7 @@ private def addTypeName (name : String) : CollectM Unit :=
 private partial def collectHighTypeNames (ty : HighTypeMd) : CollectM Unit := do
   match ty.val with
   | .UserDefined name => addTypeName name.text
-  | .TCore _ => pure ()
+  | .TCore name => addTypeName name
   | .TTypedField vt => collectHighTypeNames vt
   | .TSet et => collectHighTypeNames et
   | .TMap kt vt => collectHighTypeNames kt; collectHighTypeNames vt
