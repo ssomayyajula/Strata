@@ -1,106 +1,83 @@
 # Implementation Plan
 
-## Threat
+## Key Insight: ElabResult is dependent on Grade
 
-If any commit violates the architecture, doesn't build, or regresses: delete everything.
-
-## Architecture Summary
-
-- Entry: `checkProducer body returnType grade`
-- Grade discovered by trying `[pure, err, heap, heapErr]` until check succeeds
-- Callee grades stored in Γ via on-demand elaboration
-- `ElabState` = `{ freshCounter : Nat }`
-- Heap flows as `Option FGLValue` parameter
-- Producer subsumption: type coercion `c` + convention witness `conv`, applied via HOAS
-- Sequencing: `M to x. N ⇐ A & e` → synth M → `d`, check N → `d \ e`
-- All binding via HOAS (`mkEffectfulCall`, `mkVarDecl`)
-
-## Data Types
-
-```
-Grade: pure | err | heap | heapErr
-ConventionWitness: pureCall | errorCall | heapCall | heapErrorCall
-LowType: TInt | TBool | TString | TFloat64 | TVoid | TCore name
-FGLValue: litInt | litBool | litString | var | fromInt | fromStr | ... | staticCall
-FGLProducer: returnValue | assign | varDecl | ifThenElse | whileLoop | assert |
-             assume | effectfulCall | exit | labeledBlock | seq | unit
-ElabState: { freshCounter : Nat }
-ElabM: ReaderT TypeEnv (StateT ElabState Id)
+```lean
+def ElabResult (g : Grade) : Type :=
+  match g with
+  | .pure    => FGLProducer
+  | .err     => FGLProducer
+  | .heap    => FGLValue → ElabM FGLProducer
+  | .heapErr => FGLValue → ElabM FGLProducer
 ```
 
-## Functions
+- synthProducer returns: `(g : Grade) × LowType × ElabResult g`
+- checkProducer takes grade as input, returns: `ElabResult g`
+- Errors: output-only (effectfulCall with [rv, ev] built at synth time)
+- Heap: closure waiting for heap value (applied at sequencing point)
+
+## The Algorithm
+
+1. Entry: `checkProducer body returnType grade` where grade is discovered on-demand
+2. On-demand callee grade: at call site, elaborate callee body trying grades, store in Γ
+3. Total: bidirectional algorithm never fails on well-typed Laurel
+4. Failure ONLY during on-demand callee grade discovery (trying grades)
+5. ElabState = { freshCounter } only
+6. Return type flows DOWN via check mode (parameter, not state)
+7. No heap parameter threading — heap lives inside closures
+
+## The To-Rule (Sequencing)
 
 ```
-synthValue (heap) (expr) : ElabM (FGLValue × LowType)
-checkValue (heap) (expr) (expected : HighType) : ElabM FGLValue
-checkArgs (heap) (args) (params) : ElabM (List FGLValue)
-
-synthProducer (heap) (expr) : ElabM (FGLProducer × LowType × Grade)
-checkProducer (heap) (expr) (expected : LowType) (grade : Grade) : ElabM FGLProducer
-
-elaborateBlock (heap) (stmts) (expected : LowType) (grade : Grade) : ElabM FGLProducer
-
-lookupCalleeGrade (callee : String) : ElabM Grade
-  -- On-demand: if not in Γ, elaborate callee body trying grades, store in Γ
+M to x. N ⇐ A & e:
+  1. Synth M → (d, B, result_d : ElabResult d)
+  2. Apply result_d:
+     - if d ∈ {pure, err}: result_d IS the FGLProducer (use directly)
+     - if d ∈ {heap, heapErr}: result_d is closure, apply to current heap
+  3. Bind the produced result in HOAS
+  4. Compute d \ e (residual)
+  5. Check N ⇐ A & (d \ e), passing new heap if d produced one
 ```
 
-## Entry Point: fullElaborate
+## Monad
 
-```
-for proc in program.staticProcedures:
-  let grade := tryGrades proc.body [pure, err, heap, heapErr]
-  let heap := if grade ∈ {heap, heapErr} then some (.var "$heap") else none
-  let extEnv := Γ + proc params + (if heap: $heap_in, $heap)
-  let fgl := checkProducer heap body returnType grade  (under extEnv)
-  if heap: prepend $heap := $heap_in; add $heap_in/$heap params
-  project fgl → Laurel
-```
-
-## tryGrades
-
-```
-tryGrades body [g₁, g₂, ...]:
-  for g in grades:
-    if checkProducer succeeds at grade g:
-      return g
-  return heapErr  -- top, always succeeds
-```
-
-"Succeeds" means: no residual failure (all `d \ e` computations return `some`).
-Since `ElabM` is `Id`-based (no `Except`), failure = encountering an operation
-whose grade exceeds the budget. Need to make check FALLIBLE for this.
-
-## Making Check Fallible
-
-Change monad: `ElabM := ReaderT TypeEnv (StateT ElabState (Option))` or similar.
-Then when `Grade.residual d e = none`, the check fails (returns `none`).
-`tryGrades` catches the failure and tries the next grade.
-
-Alternative: keep `ElabM` as `Id`, add `canCheck` that returns `Bool` by scanning
-the body. Simpler but less principled.
-
-Decision: use `Option` monad. Check fails cleanly when grade is insufficient.
-
-## Revised Monad
-
-```
+```lean
 abbrev ElabM := ReaderT TypeEnv (StateT ElabState Option)
+-- Option for on-demand callee grade discovery (tryGrades can fail)
+-- Main elaboration is total on well-typed input (never hits none)
+
+structure ElabState where
+  freshCounter : Nat := 0
 ```
 
-This means all elaboration functions return `Option`. `tryGrades` catches `none`.
+## Synth vs Check Dispatch
 
-## Order of Implementation
+SYNTH (produce type + grade + ElabResult):
+- effectful call (grade from callee)
+- .New (grade = heap)
+- assign (grade = pure)
+- assert/assume (grade = pure)
+- while (grade from body)
 
-1. Grade + ConventionWitness + subgrade + residual (done in previous step)
-2. LowType + eraseType + FGL terms
-3. ElabState + ElabM (with Option)
-4. HOAS constructors (mkEffectfulCall, mkVarDecl, applyConvention)
+CHECK (receive type + grade, return ElabResult):
+- if/else (both branches check at same grade)
+- var-bind (body checks at same grade)
+- M to x. N (M synths, N checks at residual grade)
+- return (check value against type, grade admissible)
+- subsumption fallback (synth, then d ≤ e admissible)
+
+## Implementation Order
+
+1. Grade + ConventionWitness + residual
+2. Types + FGL terms
+3. ElabState + ElabM (Option-based)
+4. HOAS (mkEffectfulCall, mkVarDecl)
 5. Subsumption table
-6. synthValue / checkValue / checkArgs
-7. synthProducer (handles .New, .FieldSelect, .StaticCall, etc.)
-8. checkProducer (if, var-bind, to-rule with residual, return, subsumption fallback)
-9. elaborateBlock (sequencing with grade accumulation via residual)
-10. lookupCalleeGrade (on-demand elaboration, stores in Γ)
-11. fullElaborate (tryGrades, heap params, projection, heapConstants)
-12. Projection
+6. ElabResult type family
+7. synthValue / checkValue
+8. synthProducer (returns Sigma grade + ElabResult)
+9. checkProducer (takes grade, returns ElabResult)
+10. elaborateBlock (sequences with residual, applies closures)
+11. On-demand callee grade discovery
+12. fullElaborate + projection
 13. Build + test

@@ -296,36 +296,45 @@ def applyConvention (w : ConventionWitness) (callee : String) (args : List FGLVa
       [("heap", .TCore "Heap"), ("result", resultTy), ("err", .TCore "Error")] body
 ```
 
-### Producer Subsumption (HOAS: convention binds, coercion applied inside)
+### ElabResult (Dependent on Grade — Egger's State-Passing Closure)
 
-```
-Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    subgrade(d, e) = conv
-────────────────────────────────────────────────────────────────
-Γ ⊢_p applyConvention(conv, M, fun outs =>
-         let rv := result(outs)          -- HOAS: rv bound in extended Γ
-         return c(rv)                    -- coercion applied to bound value
-       ) ⇐ B & e
-```
-
-**HOAS structure:** `applyConvention` generates fresh names for all outputs,
-extends Γ with each (`extendEnv rv A`, `extendEnv hv Heap`, etc.), then calls
-the body closure with the bound variables. The closure receives values that are
-IN SCOPE — no raw variable names, no mutable state.
+The result of synthesizing a producer is a TYPE that DEPENDS on the grade:
 
 ```lean
--- mkEffectfulCall IS the HOAS M-to-x. It:
--- 1. Generates fresh names
--- 2. Extends Γ for each output
--- 3. Calls body closure with bound FGLValues
--- 4. Produces FGLProducer.effectfulCall node
-def mkEffectfulCall (callee : String) (args : List FGLValue)
-    (outputSpecs : List (String × HighType))
-    (body : List FGLValue → ElabM FGLProducer) : ElabM FGLProducer
+def ElabResult (g : Grade) : Type :=
+  match g with
+  | .pure    => FGLProducer                    -- ready, no state needed
+  | .err     => FGLProducer                    -- error bindings already inside (output-only)
+  | .heap    => FGLValue → ElabM FGLProducer   -- closure: needs heap to produce bindings
+  | .heapErr => FGLValue → ElabM FGLProducer   -- closure: needs heap (errors output-only)
 ```
 
-The coercion `c` is applied to `rv` INSIDE the closure — after binding, before
-the continuation uses the value. This is the only correct place: `c` consumes
-a value, and `rv` becomes a value only after the producer is bound.
+**Errors are output-only.** The `effectfulCall` with `[rv, ev]` is constructed at
+synth time — we know the callee and args, that's enough. No input state needed.
+
+**Heap requires input.** The current heap must be provided at the sequencing point.
+Until then, the computation is a closure waiting for it. This IS Egger's
+state-passing: `(M)^S = λs. ...`.
+
+**synthProducer returns:** `(g : Grade) × LowType × ElabResult g`
+**checkProducer takes:** `(g : Grade)` as input, returns `ElabResult g`
+
+### Producer Subsumption
+
+```
+Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    d ≤ e
+────────────────────────────────────────────────
+Γ ⊢_p M ⇐ B & e
+```
+
+At the sequencing point (the to-rule), the ElabResult is APPLIED:
+- `ElabResult .pure` → use directly (it's already an FGLProducer)
+- `ElabResult .heap` → apply to current heap value → get FGLProducer with bindings
+- The HOAS closure inside the ElabResult generates fresh names, extends Γ,
+  and produces the effectfulCall node when applied
+
+The type coercion `c` is applied to the RESULT VALUE inside the closure —
+after the producer is bound, on the value that comes out.
 
 ### Heap Operations
 
