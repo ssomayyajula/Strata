@@ -70,37 +70,49 @@ And any other `sig.effectType.resultType` → `sig.returnType`.
 
 **Remove:** All `match s.effectType with` dispatching.
 
-**Add to ElabState:**
+**ElabState (procedure-level context — grades discovered across procs):**
 ```lean
 structure ElabState where
   freshCounter : Nat := 0
   heapVar : Option String := none
-  gradeOf : Std.HashMap String Grade := {}   -- discovered callee grades
-  program : Laurel.Program                    -- for on-demand body lookup
+  procGrades : Std.HashMap String Grade := {}  -- discovered procedure grades
 ```
 
-Wait — the architecture says grade is part of the procedure's TYPE, stored
-alongside its type info. So `gradeOf` should be in ElabState. And `program`
-is needed to find callee bodies for on-demand elaboration.
+The Reader (TypeEnv) has variable bindings — immutable within a proc body.
+ElabState.procGrades has discovered procedure grades — grows monotonically
+as callees are elaborated on-demand. Two parts of Γ: local (Reader) and
+procedural (State).
 
-**Add `discoverCalleeGrade`:**
+`program : Laurel.Program` is passed as a parameter to `fullElaborate` and
+threaded to `discoverCalleeGrade` — NOT stored in state.
+
+**Add `discoverGrade`:**
 ```lean
-def discoverCalleeGrade (callee : String) : ElabM Grade := do
-  -- Check if already discovered
-  match (← get).gradeOf[callee]? with
+partial def discoverGrade (callee : String) : ElabM Grade := do
+  match (← get).procGrades[callee]? with
   | some g => pure g
   | none =>
-    -- Find body in program
-    let proc := (← get).program.staticProcedures.find? (·.name.text == callee)
-    match proc with
-    | some p => match p.body with
-      | .Transparent bodyExpr =>
-        -- Try grades smallest to largest
-        let grade := tryGrades bodyExpr [.pure, .err, .heap, .heapErr]
-        modify fun s => { s with gradeOf := s.gradeOf.insert callee grade }
-        pure grade
-      | _ => pure .pure
-    | none => pure .pure  -- unknown callee (prelude) treated as pure
+    let body ← lookupProcBody callee  -- from reader (program)
+    match body with
+    | some bodyExpr =>
+      -- Try checkProducer at increasing grades. First success = callee's grade.
+      -- Grade discovery IS type-checking. The typing rules are the oracle.
+      let sig ← lookupFuncSig callee
+      let retTy := match sig with | some s => s.returnType | none => .TCore "Any"
+      let grade := tryGrades bodyExpr retTy [.pure, .err, .heap, .heapErr]
+      modify fun s => { s with procGrades := s.procGrades.insert callee grade }
+      pure grade
+    | none => pure .pure  -- unknown (prelude) treated as pure
+
+-- tryGrades: call checkProducer at each grade, return first success
+private def tryGrades (body : StmtExprMd) (retTy : HighType) (grades : List Grade) : Grade :=
+  match grades with
+  | [] => .heapErr  -- top always works
+  | g :: rest =>
+    -- Run checkProducer in a fresh sub-context at grade g
+    -- If Option returns some → success → this is the grade
+    -- If Option returns none → grade too low → try next
+    ...
 ```
 
 **Replace effectType dispatch in synthProducer:**
