@@ -245,14 +245,55 @@ No grade contribution — these are value-level operations.
 Field access on Composite: `readField(heap, obj, field) → Box`, then `Box..AnyVal! → Any`,
 then narrow `Any ▷ T`.
 
-### Calling Convention (Grade → Binding Shape)
+### Subgrading Witness (Defunctionalized Calling Convention)
 
-| Callee grade | Args | Outputs bound |
-|---|---|---|
-| `1` | `[args]` | none (value) |
-| `err` | `[args]` | `[result, error]` |
-| `heap` | `[heap, args]` | `[heap', result]` |
-| `heap·err` | `[heap, args]` | `[heap', result, error]` |
+`subgrade(d, e)` returns a `ConventionWitness` when `d ≤ e`. The witness is
+proof-relevant: it determines the FGL term produced at the call site.
+
+```lean
+inductive ConventionWitness where
+  | pureCall                -- grade 1: value-level, no binding
+  | errorCall               -- grade err: bind [result, error]
+  | heapCall                -- grade heap: pass heap, bind [heap', result]
+  | heapErrorCall           -- grade heap·err: pass heap, bind [heap', result, error]
+
+def subgrade : Grade → Grade → Option ConventionWitness
+  | .pure,    _        => some .pureCall
+  | .err,     .err     => some .errorCall
+  | .err,     .heapErr => some .errorCall
+  | .heap,    .heap    => some .heapCall
+  | .heap,    .heapErr => some .heapCall
+  | .heapErr, .heapErr => some .heapErrorCall
+  | _,        _        => none
+```
+
+Application (produces FGL):
+
+```lean
+def applyConvention (w : ConventionWitness) (callee : String) (args : List FGLValue)
+    (heap : Option FGLValue) (resultTy : LowType)
+    (body : List FGLValue → ElabM FGLProducer) : ElabM FGLProducer :=
+  match w with
+  | .pureCall =>
+    body [FGLValue.staticCall callee args]
+  | .errorCall =>
+    mkEffectfulCall callee args
+      [("result", resultTy), ("err", .TCore "Error")] body
+  | .heapCall =>
+    mkEffectfulCall callee (heap.get! :: args)
+      [("heap", .TCore "Heap"), ("result", resultTy)] body
+  | .heapErrorCall =>
+    mkEffectfulCall callee (heap.get! :: args)
+      [("heap", .TCore "Heap"), ("result", resultTy), ("err", .TCore "Error")] body
+```
+
+### Producer Subsumption (both witnesses applied)
+
+```
+Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    subgrade(d, e) = conv
+────────────────────────────────────────────────────────────────
+Γ ⊢_p applyConvention(conv, coerce_c(M)) ⇐ B & e
+```
 
 ### Heap Operations
 
