@@ -307,9 +307,11 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
   let paramTypes := params.map (·.2)
   let rec go : List StmtExprMd → List HighType → List FGLValue → ElabM FGLProducer
     | [], _, acc => cont acc.reverse
-    | arg :: rest, ptys, acc => do
-      let pty := match ptys with | p :: _ => p | [] => .TCore "Any"
-      let ptysRest := match ptys with | _ :: ps => ps | [] => []
+    | arg :: rest, [], acc => do
+      -- Excess args (e.g. self): synth without coercion
+      let (v, _) ← synthValue arg
+      go rest [] (v :: acc)
+    | arg :: rest, pty :: ptysRest, acc => do
       match arg.val with
       | .StaticCall callee innerArgs =>
         let innerSig ← lookupFuncSig callee.text
