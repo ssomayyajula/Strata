@@ -147,8 +147,8 @@ f : (A₁,...,Aₙ) → B    grade(f) = d (on-demand discovery)    d > 1    vᵢ
 ───────────────────────────
 Γ ⊢_p (assert V) ⇒ TVoid & 1
 
-Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇐ TVoid & e    (e discovered by trying grades on M)
-─────────────────────────────────────────────────────────────────────────────
+Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇒ TVoid & e
+─────────────────────────────────────────
 Γ ⊢_p (while V do M) ⇒ TVoid & e
 ```
 
