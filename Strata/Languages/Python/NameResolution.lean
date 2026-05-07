@@ -672,7 +672,7 @@ def TypeEnv.withRuntimeProgram (env : TypeEnv) (runtime : Laurel.Program) : Type
       let retTy := match proc.outputs with
         | [out] => out.type.val
         | _ => HighType.TCore "Any"
-      let defaults := params.map fun _ => (none : Option StmtExprMd)
+      let defaults := params.map fun _ => (some (⟨StmtExpr.Hole, #[]⟩ : StmtExprMd))
       let effectType := EffectType.pure retTy
       let sig : FuncSig := { name := procName, params, defaults, effectType, hasKwargs := false }
       names := names.insert procName (.function sig)

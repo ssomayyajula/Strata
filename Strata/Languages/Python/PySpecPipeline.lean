@@ -467,23 +467,22 @@ public def pyAnalyzeLaurelV2
     | .error msg => throw (.internal msg)
 
   -- Step 2: Build TypeEnv (Γ) from Python AST + prelude
-  let typeEnv ← profileStep profile "Build TypeEnv (Resolution)" do
+  let baseEnv ← profileStep profile "Build TypeEnv (Resolution)" do
     let env := Python.Resolution.buildTypeEnv stmts
     pure env.withPrelude
 
-  -- Step 3: Run Translation (fold over AST → Laurel)
+  -- Step 3: Run Translation with extended Γ (includes runtime sigs for default filling)
+  let translationEnv := baseEnv.withRuntimeProgram Python.pythonRuntimeLaurelPart
   let metadataPath := sourcePath.getD pythonIonPath
   let laurelProgram ← profileStep profile "Translate Python to Laurel (V2)" do
-    match Python.Translation.runTranslation stmts typeEnv metadataPath with
+    match Python.Translation.runTranslation stmts translationEnv metadataPath with
     | .error e => throw (.internal s!"V2 Translation failed: {e}")
     | .ok (program, _state) => pure program
 
-  -- Step 4: Run full Elaboration (Phase 1: bidirectional walk + Phases 2-7: heap
-  -- parameterization, type hierarchy, modifies clauses, hole inference/elimination,
-  -- constrained type elimination). This produces a Laurel.Program with all type
-  -- infrastructure (Composite, Box, Field, Heap, TypeTag) registered in program.types.
+  -- Step 4: Run Elaboration with base Γ (no runtime sigs — avoids spurious coercions
+  -- on prelude calls that Core handles without coercion)
   let elaboratedProgram ← profileStep profile "Elaborate (full: coercions + type infrastructure)" do
-    match FineGrainLaurel.fullElaborate typeEnv laurelProgram with
+    match FineGrainLaurel.fullElaborate baseEnv laurelProgram with
     | .error e => throw (.internal s!"Elaboration failed: {e}")
     | .ok prog => pure prog
 
