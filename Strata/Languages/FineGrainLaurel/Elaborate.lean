@@ -65,16 +65,11 @@ inductive FGLProducer where
   | unit
   deriving Inhabited
 
--- Monad
--- The state carries the current heap variable name (if threading heap).
--- This IS the state `s` from Egger's translation — it flows through the
--- CPS structure. Each effectful call that touches state produces a NEW
--- heap variable name, which the continuation receives.
+-- Monad (no heapVar — heap flows through function parameters)
 
 structure ElabState where
   freshCounter : Nat := 0
   currentProcReturnType : HighType := .TCore "Any"
-  heapVar : Option String := none
 
 abbrev ElabM := ReaderT TypeEnv (StateT ElabState Id)
 
@@ -90,9 +85,6 @@ def lookupFuncSig (name : String) : ElabM (Option FuncSig) := do
   match (← read).names[name]? with | some (.function sig) => pure (some sig) | _ => pure none
 
 -- HOAS Smart Constructors
--- mkEffectfulCall IS the `M to x. N` rule from FGCBV/Egger.
--- M = the effectful call. x = the bound output variables. N = the continuation.
--- For stateful calls, the outputs include the new heap variable.
 
 def mkEffectfulCall (callee : String) (args : List FGLValue)
     (outputSpecs : List (String × HighType))
@@ -140,29 +132,33 @@ def subsume (actual expected : LowType) : CoercionResult :=
 def applySubsume (val : FGLValue) (actual expected : LowType) : FGLValue :=
   match subsume actual expected with | .refl => val | .coerce c => c val | .unrelated => val
 
--- Heap helpers
+-- Effectful call builder (DRY: one function for all effect types)
+-- Takes the current heap (if any), builds args + outputs, calls mkEffectfulCall,
+-- returns (producer, resultValue, newHeap)
 
-def prependHeap (args : List FGLValue) : ElabM (List FGLValue) := do
-  match (← get).heapVar with
-  | some hv => pure (.var hv :: args)
-  | none => pure args
-
-def heapOutput : ElabM (List (String × HighType)) := do
-  match (← get).heapVar with
-  | some _ => pure [("heap", .THeap)]
-  | none => pure []
-
-def updateHeapFrom (outs : List FGLValue) : ElabM Unit := do
-  if (← get).heapVar.isSome then
-    match outs[0]! with
-    | .var n => modify fun st => { st with heapVar := some n }
-    | _ => pure ()
+def buildEffectfulCall (callee : String) (checkedArgs : List FGLValue)
+    (effectType : EffectType) (heap : Option FGLValue)
+    (k : FGLValue → Option FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
+  let args := match heap with | some h => h :: checkedArgs | none => checkedArgs
+  let heapOut := match heap with | some _ => [("heap", HighType.THeap)] | none => []
+  let resultOut := [("result", effectType.resultType)]
+  let errOut := match effectType with
+    | .error _ e | .statefulError _ e => [("err", e)]
+    | _ => []
+  let outputs := heapOut ++ resultOut ++ errOut
+  mkEffectfulCall callee args outputs fun outs =>
+    let newHeap := if heap.isSome then some outs[0]! else none
+    let resultIdx := if heap.isSome then 1 else 0
+    k outs[resultIdx]! newHeap
 
 -- Elaboration
+-- The heap flows through function parameters: `heap : Option FGLValue`.
+-- Each function that touches the heap receives it and produces a new one.
+-- No mutable state. Pure threading through the CPS structure.
 
 mutual
 
-partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
+partial def synthValue (heap : Option FGLValue) (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
   match expr.val with
   | .LiteralInt n => pure (.litInt n, .TInt)
   | .LiteralBool b => pure (.litBool b, .TBool)
@@ -173,10 +169,10 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     | some (.function sig) => pure (.var id.text, eraseType sig.effectType.resultType)
     | _ => pure (.var id.text, .TCore "Any")
   | .FieldSelect obj field =>
-    let (ov, _) ← synthValue obj
-    match (← get).heapVar with
-    | some hv =>
-      let read := FGLValue.staticCall "readField" [.var hv, ov, .staticCall field.text []]
+    let (ov, _) ← synthValue heap obj
+    match heap with
+    | some h =>
+      let read := FGLValue.staticCall "readField" [h, ov, .staticCall field.text []]
       pure (.staticCall "Box..AnyVal!" [read], .TCore "Any")
     | none => pure (.fieldAccess ov field.text, .TCore "Any")
   | .StaticCall callee args =>
@@ -184,123 +180,113 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     match sig with
     | some s => match s.effectType with
       | .pure ty =>
-        let checkedArgs ← checkArgs args s.params
+        let checkedArgs ← checkArgs heap args s.params
         pure (.staticCall callee.text checkedArgs, eraseType ty)
       | _ => pure (.var callee.text, .TCore "Any")
     | none =>
-      let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
+      let checkedArgs ← args.mapM fun arg => checkValue heap arg (.TCore "Any")
       pure (.staticCall callee.text checkedArgs, .TCore "Any")
   | _ => pure (.var "_unknown", .TCore "Any")
 
-partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
-  let (val, actual) ← synthValue expr
+partial def checkValue (heap : Option FGLValue) (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
+  let (val, actual) ← synthValue heap expr
   pure (applySubsume val actual (eraseType expected))
 
-partial def checkArgs (args : List StmtExprMd) (params : List (String × HighType)) : ElabM (List FGLValue) :=
-  (args.zip (params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
+partial def checkArgs (heap : Option FGLValue) (args : List StmtExprMd) (params : List (String × HighType)) : ElabM (List FGLValue) :=
+  (args.zip (params.map (·.2))).mapM fun (arg, pty) => checkValue heap arg pty
 
-partial def checkProducer (expr : StmtExprMd) (expected : LowType) : ElabM FGLProducer := do
+partial def checkProducer (heap : Option FGLValue) (expr : StmtExprMd) (expected : LowType) : ElabM FGLProducer := do
   match expr.val with
   | .IfThenElse cond thn els =>
-    let cc ← checkValue cond .TBool
-    let tp ← checkProducer thn expected
-    let ep ← match els with | some e => checkProducer e expected | none => pure .unit
+    let cc ← checkValue heap cond .TBool
+    let tp ← checkProducer heap thn expected
+    let ep ← match els with | some e => checkProducer heap e expected | none => pure .unit
     pure (.ifThenElse cc tp ep)
   | .Return valueOpt =>
     let retTy := (← get).currentProcReturnType
     match valueOpt with
-    | some v => let cv ← checkValue v retTy; pure (.returnValue cv)
+    | some v => let cv ← checkValue heap v retTy; pure (.returnValue cv)
     | none => pure (.returnValue .fromNone)
   | .Block stmts label =>
-    let prod ← elaborateBlock stmts expected
+    let prod ← elaborateBlock heap stmts expected
     pure (match label with | some l => .labeledBlock l prod | none => prod)
   | _ =>
-    let (prod, _) ← synthProducer expr
+    let (prod, _) ← synthProducer heap expr
     pure prod
 
-partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) := do
+partial def synthProducer (heap : Option FGLValue) (expr : StmtExprMd) : ElabM (FGLProducer × LowType) := do
   match expr.val with
   | .StaticCall callee args =>
     if callee.text == "PAnd" || callee.text == "POr" then
-      shortCircuit callee.text args
+      shortCircuit heap callee.text args
     else
       let sig ← lookupFuncSig callee.text
       match sig with
       | some s =>
-        let checkedArgs ← checkArgs args s.params
+        let checkedArgs ← checkArgs heap args s.params
         match s.effectType with
         | .pure _ =>
-          let (val, ty) ← synthValue expr
+          let (val, ty) ← synthValue heap expr
           pure (.returnValue val, ty)
         | .error resultTy _ =>
-          let prod ← mkEffectfulCall callee.text checkedArgs
-            [("result", resultTy), ("err", .TCore "Error")]
-            fun outs => pure (.returnValue outs[0]!)
+          let prod ← buildEffectfulCall callee.text checkedArgs s.effectType none
+            fun rv _newHeap => pure (.returnValue rv)
           pure (prod, eraseType resultTy)
         | .stateful resultTy =>
-          let argsWithHeap ← prependHeap checkedArgs
-          let prod ← mkEffectfulCall callee.text argsWithHeap
-            ((← heapOutput) ++ [("result", resultTy)])
-            fun outs => do updateHeapFrom outs; pure (.returnValue (outs.getLast!))
+          let prod ← buildEffectfulCall callee.text checkedArgs s.effectType heap
+            fun rv _newHeap => pure (.returnValue rv)
           pure (prod, eraseType resultTy)
         | .statefulError resultTy _ =>
-          let argsWithHeap ← prependHeap checkedArgs
-          let prod ← mkEffectfulCall callee.text argsWithHeap
-            ((← heapOutput) ++ [("result", resultTy), ("err", .TCore "Error")])
-            fun outs => do updateHeapFrom outs; pure (.returnValue outs[1]!)
+          let prod ← buildEffectfulCall callee.text checkedArgs s.effectType heap
+            fun rv _newHeap => pure (.returnValue rv)
           pure (prod, eraseType resultTy)
       | none =>
-        let (val, ty) ← synthValue expr
+        let (val, ty) ← synthValue heap expr
         pure (.returnValue val, ty)
   | .New classId =>
-    match (← get).heapVar with
-    | some hv =>
-      -- alloc: increment heap, construct MkComposite(nextRef, TypeTag)
-      let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
-      let newHeap := FGLValue.staticCall "increment" [.var hv]
+    match heap with
+    | some h =>
+      let ref := FGLValue.staticCall "Heap..nextReference!" [h]
+      let newHeap := FGLValue.staticCall "increment" [h]
       let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
-      -- Update heap state, return obj
-      let newHv ← freshVar "heap"
-      modify fun st => { st with heapVar := some newHv }
-      let cont ← extendEnv newHv .THeap (pure (.returnValue obj))
-      pure (.assign (.var newHv) newHeap cont, .TCore "Composite")
+      -- assign $heap := newHeap, then return obj
+      pure (.assign (.var "$heap") newHeap (.returnValue obj), .TCore "Composite")
     | none =>
-      -- No heap threading: emit as effectfulCall placeholder
       let prod ← mkEffectfulCall (classId.text ++ "@new") []
         [("obj", .UserDefined (Identifier.mk classId.text none))]
         fun outs => pure (.returnValue outs[0]!)
       pure (prod, .TCore "Composite")
   | .Assign targets value => match targets with
-    | [target] => elaborateAssign target value (pure .unit)
+    | [target] => elaborateAssign heap target value (pure .unit)
     | _ => pure (.unit, .TVoid)
   | .LocalVariable nameId typeMd initOpt =>
-    let ci ← elaborateInit initOpt typeMd.val
+    let ci ← elaborateInit heap initOpt typeMd.val
     let prod ← mkVarDecl nameId.text (eraseType typeMd.val) ci fun _ => pure .unit
     pure (prod, .TVoid)
   | .While cond _invs _dec body =>
-    let cc ← checkValue cond .TBool
-    let bp ← checkProducer body .TVoid
+    let cc ← checkValue heap cond .TBool
+    let bp ← checkProducer heap body .TVoid
     pure (.whileLoop cc bp .unit, .TVoid)
   | .Assert cond =>
-    let cc ← checkValue cond .TBool
+    let cc ← checkValue heap cond .TBool
     pure (.assert cc .unit, .TVoid)
   | .Assume cond =>
-    let cc ← checkValue cond .TBool
+    let cc ← checkValue heap cond .TBool
     pure (.assume cc .unit, .TVoid)
   | .Block stmts label =>
-    let prod ← elaborateBlock stmts .TVoid
+    let prod ← elaborateBlock heap stmts .TVoid
     pure (match label with | some l => (.labeledBlock l prod, .TVoid) | none => (prod, .TVoid))
   | .Exit target => pure (.exit target, .TVoid)
   | .Return valueOpt =>
     let retTy := (← get).currentProcReturnType
     match valueOpt with
-    | some v => let cv ← checkValue v retTy; pure (.returnValue cv, eraseType retTy)
+    | some v => let cv ← checkValue heap v retTy; pure (.returnValue cv, eraseType retTy)
     | none => pure (.returnValue .fromNone, .TVoid)
   | .IfThenElse _ _ _ =>
-    let p ← checkProducer expr .TVoid
+    let p ← checkProducer heap expr .TVoid
     pure (p, .TVoid)
   | .FieldSelect _ _ =>
-    let (v, t) ← synthValue expr
+    let (v, t) ← synthValue heap expr
     pure (.returnValue v, t)
   | .Hole deterministic _ =>
     if deterministic then do
@@ -311,75 +297,70 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
         pure (.returnValue hv)
       pure (prod, .TCore "Any")
   | _ =>
-    let (v, t) ← synthValue expr
+    let (v, t) ← synthValue heap expr
     pure (.returnValue v, t)
 
-partial def elaborateBlock (stmts : List StmtExprMd) (expected : LowType) : ElabM FGLProducer := do
+partial def elaborateBlock (heap : Option FGLValue) (stmts : List StmtExprMd) (expected : LowType) : ElabM FGLProducer := do
   match stmts with
   | [] => pure .unit
-  | [last] => checkProducer last expected
-  | stmt :: rest => elaborateStmt stmt (elaborateBlock rest expected)
+  | [last] => checkProducer heap last expected
+  | stmt :: rest => elaborateStmt heap stmt (elaborateBlock heap rest expected)
 
-partial def elaborateStmt (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM FGLProducer := do
+partial def elaborateStmt (heap : Option FGLValue) (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM FGLProducer := do
   match expr.val with
   | .StaticCall callee args =>
     if callee.text == "PAnd" || callee.text == "POr" then do
-      let (p, _) ← shortCircuit callee.text args
+      let (p, _) ← shortCircuit heap callee.text args
       pure (.seq p (← cont))
     else
       let sig ← lookupFuncSig callee.text
       match sig with
       | some s =>
-        let checkedArgs ← checkArgs args s.params
+        let checkedArgs ← checkArgs heap args s.params
         match s.effectType with
         | .pure _ => cont
-        | .error resultTy _ =>
-          mkEffectfulCall callee.text checkedArgs
-            [("result", resultTy), ("err", .TCore "Error")]
-            fun _outs => cont
-        | .stateful resultTy =>
-          let argsWithHeap ← prependHeap checkedArgs
-          mkEffectfulCall callee.text argsWithHeap
-            ((← heapOutput) ++ [("result", resultTy)])
-            fun outs => do updateHeapFrom outs; cont
-        | .statefulError resultTy _ =>
-          let argsWithHeap ← prependHeap checkedArgs
-          mkEffectfulCall callee.text argsWithHeap
-            ((← heapOutput) ++ [("result", resultTy), ("err", .TCore "Error")])
-            fun outs => do updateHeapFrom outs; cont
+        | .error _ _ =>
+          buildEffectfulCall callee.text checkedArgs s.effectType none
+            fun _rv _newHeap => cont
+        | .stateful _ =>
+          buildEffectfulCall callee.text checkedArgs s.effectType heap
+            fun _rv _newHeap => cont
+        | .statefulError _ _ =>
+          buildEffectfulCall callee.text checkedArgs s.effectType heap
+            fun _rv _newHeap => cont
       | none => cont
   | .Assign targets value => match targets with
     | [target] =>
-      let (prod, _) ← elaborateAssign target value cont
+      let (prod, _) ← elaborateAssign heap target value cont
       pure prod
     | _ => cont
   | .LocalVariable nameId typeMd initOpt =>
-    let ci ← elaborateInit initOpt typeMd.val
+    let ci ← elaborateInit heap initOpt typeMd.val
     mkVarDecl nameId.text (eraseType typeMd.val) ci fun _ => cont
   | .While cond _invs _dec body =>
-    let cc ← checkValue cond .TBool
-    let bp ← checkProducer body .TVoid
+    let cc ← checkValue heap cond .TBool
+    let bp ← checkProducer heap body .TVoid
     pure (.whileLoop cc bp (← cont))
   | .Assert cond =>
-    let cc ← checkValue cond .TBool
+    let cc ← checkValue heap cond .TBool
     pure (.assert cc (← cont))
   | .Assume cond =>
-    let cc ← checkValue cond .TBool
+    let cc ← checkValue heap cond .TBool
     pure (.assume cc (← cont))
   | .Block stmts label =>
-    let inner ← elaborateBlock stmts .TVoid
+    let inner ← elaborateBlock heap stmts .TVoid
     let c ← cont
     pure (match label with | some l => .seq (.labeledBlock l inner) c | none => .seq inner c)
   | .Exit target => pure (.exit target)
   | .Return valueOpt =>
     let retTy := (← get).currentProcReturnType
     match valueOpt with
-    | some v => let cv ← checkValue v retTy; pure (.returnValue cv)
+    | some v => let cv ← checkValue heap v retTy; pure (.returnValue cv)
     | none => pure (.returnValue .fromNone)
   | .IfThenElse cond thn els =>
-    let cc ← checkValue cond .TBool
-    let tp ← checkProducer thn .TVoid
-    let ep ← match els with | some e => checkProducer e .TVoid | none => pure .unit
+    let cc ← checkValue heap cond .TBool
+    let tp ← checkProducer heap thn .TVoid
+    let ep ← match els with | some e => checkProducer heap e .TVoid | none => pure .unit
     pure (.seq (.ifThenElse cc tp ep) (← cont))
   | .Hole deterministic _ =>
     if deterministic then do
@@ -389,11 +370,11 @@ partial def elaborateStmt (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM
       mkVarDecl "_havoc" (.TCore "Any") none fun _ => cont
   | _ => cont
 
-partial def elaborateAssign (target value : StmtExprMd) (cont : ElabM FGLProducer) : ElabM (FGLProducer × LowType) := do
+partial def elaborateAssign (heap : Option FGLValue) (target value : StmtExprMd) (cont : ElabM FGLProducer) : ElabM (FGLProducer × LowType) := do
   let targetTy ← match target.val with
     | .Identifier id => match (← lookupEnv id.text) with | some (.variable t) => pure t | _ => pure (.TCore "Any")
     | _ => pure (.TCore "Any")
-  let (tv, _) ← synthValue target
+  let (tv, _) ← synthValue heap target
   match value.val with
   | .Hole false _ =>
     let prod ← mkVarDecl "_havoc" (eraseType targetTy) none fun hv => do
@@ -405,16 +386,13 @@ partial def elaborateAssign (target value : StmtExprMd) (cont : ElabM FGLProduce
     let prod ← mkVarDecl name (eraseType targetTy) (some (.staticCall hv [])) fun _ => cont
     pure (prod, .TVoid)
   | .New classId =>
-    match (← get).heapVar with
-    | some hv =>
-      -- alloc: increment heap, construct MkComposite, assign to target
-      let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
-      let newHeap := FGLValue.staticCall "increment" [.var hv]
+    match heap with
+    | some h =>
+      let ref := FGLValue.staticCall "Heap..nextReference!" [h]
+      let newHeap := FGLValue.staticCall "increment" [h]
       let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
-      let newHv ← freshVar "heap"
-      modify fun st => { st with heapVar := some newHv }
-      let c ← extendEnv newHv .THeap cont
-      pure (.assign (.var newHv) newHeap (.assign tv obj c), .TVoid)
+      let c ← cont
+      pure (.assign (.var "$heap") newHeap (.assign tv obj c), .TVoid)
     | none =>
       let prod ← mkEffectfulCall (classId.text ++ "@new") []
         [("obj", .UserDefined (Identifier.mk classId.text none))]
@@ -426,56 +404,49 @@ partial def elaborateAssign (target value : StmtExprMd) (cont : ElabM FGLProduce
     let sig ← lookupFuncSig callee.text
     match sig with
     | some s => match s.effectType with
-      | .error resultTy _ =>
-        let checkedArgs ← checkArgs args s.params
-        let prod ← mkEffectfulCall callee.text checkedArgs
-          [("result", resultTy), ("err", .TCore "Error")]
-          fun outs => do
-            let coerced := applySubsume outs[0]! (eraseType resultTy) (eraseType targetTy)
-            pure (.assign tv coerced (← cont))
-        pure (prod, .TVoid)
-      | .statefulError resultTy _ =>
-        let checkedArgs ← checkArgs args s.params
-        let argsWithHeap ← prependHeap checkedArgs
-        let prod ← mkEffectfulCall callee.text argsWithHeap
-          ((← heapOutput) ++ [("result", resultTy), ("err", .TCore "Error")])
-          fun outs => do
-            updateHeapFrom outs
-            let coerced := applySubsume outs[1]! (eraseType resultTy) (eraseType targetTy)
-            pure (.assign tv coerced (← cont))
-        pure (prod, .TVoid)
-      | .stateful resultTy =>
-        let checkedArgs ← checkArgs args s.params
-        let argsWithHeap ← prependHeap checkedArgs
-        let prod ← mkEffectfulCall callee.text argsWithHeap
-          ((← heapOutput) ++ [("result", resultTy)])
-          fun outs => do
-            updateHeapFrom outs
-            let coerced := applySubsume (outs.getLast!) (eraseType resultTy) (eraseType targetTy)
-            pure (.assign tv coerced (← cont))
-        pure (prod, .TVoid)
-      | _ =>
-        let cr ← checkValue value targetTy
+      | .pure _ =>
+        let cr ← checkValue heap value targetTy
         pure (.assign tv cr (← cont), .TVoid)
+      | .error _ _ =>
+        let checkedArgs ← checkArgs heap args s.params
+        let prod ← buildEffectfulCall callee.text checkedArgs s.effectType none
+          fun rv _newHeap => do
+            let coerced := applySubsume rv (eraseType s.effectType.resultType) (eraseType targetTy)
+            pure (.assign tv coerced (← cont))
+        pure (prod, .TVoid)
+      | .stateful _ =>
+        let checkedArgs ← checkArgs heap args s.params
+        let prod ← buildEffectfulCall callee.text checkedArgs s.effectType heap
+          fun rv _newHeap => do
+            let coerced := applySubsume rv (eraseType s.effectType.resultType) (eraseType targetTy)
+            pure (.assign tv coerced (← cont))
+        pure (prod, .TVoid)
+      | .statefulError _ _ =>
+        let checkedArgs ← checkArgs heap args s.params
+        let prod ← buildEffectfulCall callee.text checkedArgs s.effectType heap
+          fun rv _newHeap => do
+            let coerced := applySubsume rv (eraseType s.effectType.resultType) (eraseType targetTy)
+            pure (.assign tv coerced (← cont))
+        pure (prod, .TVoid)
     | none =>
-      let cr ← checkValue value targetTy
+      let cr ← checkValue heap value targetTy
       pure (.assign tv cr (← cont), .TVoid)
   | _ =>
-    let cr ← checkValue value targetTy
+    let cr ← checkValue heap value targetTy
     pure (.assign tv cr (← cont), .TVoid)
 
-partial def elaborateInit (initOpt : Option StmtExprMd) (declTy : HighType) : ElabM (Option FGLValue) := do
+partial def elaborateInit (heap : Option FGLValue) (initOpt : Option StmtExprMd) (declTy : HighType) : ElabM (Option FGLValue) := do
   match initOpt with
   | some ⟨.Hole false _, _⟩ => pure none
   | some ⟨.Hole true _, _⟩ => do let hv ← freshVar "hole"; pure (some (.staticCall hv []))
-  | some i => do let v ← checkValue i declTy; pure (some v)
+  | some i => do let v ← checkValue heap i declTy; pure (some v)
   | none => pure none
 
-partial def shortCircuit (op : String) (args : List StmtExprMd) : ElabM (FGLProducer × LowType) := do
+partial def shortCircuit (heap : Option FGLValue) (op : String) (args : List StmtExprMd) : ElabM (FGLProducer × LowType) := do
   match args with
   | [a, b] =>
-    let av ← checkValue a (.TCore "Any")
-    let bv ← checkValue b (.TCore "Any")
+    let av ← checkValue heap a (.TCore "Any")
+    let bv ← checkValue heap b (.TCore "Any")
     let cond := FGLValue.staticCall "Any_to_bool" [av]
     if op == "PAnd" then
       pure (.ifThenElse cond (.returnValue bv) (.returnValue av), .TCore "Any")
@@ -484,7 +455,6 @@ partial def shortCircuit (op : String) (args : List StmtExprMd) : ElabM (FGLProd
   | _ => pure (.unit, .TCore "Any")
 
 end
-
 
 -- Projection
 
@@ -545,29 +515,26 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
     match proc.body with
     | .Transparent bodyExpr =>
       let retTy : HighType := .TCore "Any"
-      -- Determine if proc is stateful
-      let isStateful := match typeEnv.names[proc.name.text]? with
-        | some (.function sig) => match sig.effectType with
-          | .stateful _ | .statefulError _ _ => true | _ => false
-        | _ => false
-      let heapVar := if isStateful then some "$heap" else none
-      let st : ElabState := { freshCounter := 0, currentProcReturnType := retTy, heapVar }
-      let extEnv := (proc.inputs ++ proc.outputs).foldl
+      let st : ElabState := { freshCounter := 0, currentProcReturnType := retTy }
+      let baseEnv := (proc.inputs ++ proc.outputs).foldl
         (fun env p => { env with names := env.names.insert p.name.text (.variable p.type.val) }) typeEnv
-      -- If stateful, extend Γ with $heap_in and $heap
-      let extEnv := if isStateful then
-        { extEnv with names := extEnv.names.insert "$heap_in" (.variable .THeap) |>.insert "$heap" (.variable .THeap) }
-      else extEnv
-      let (fglRaw, _) := (checkProducer bodyExpr (eraseType retTy)).run extEnv |>.run st
-      -- If stateful, prepend $heap := $heap_in
-      let fgl := if isStateful then .assign (.var "$heap") (.var "$heap_in") fglRaw else fglRaw
-      -- If stateful, add $heap_in (input) and $heap (output)
-      let heapTy : HighTypeMd := ⟨.THeap, #[]⟩
-      let heapIn : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := heapTy }
-      let heapOut : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := heapTy }
-      let inputs' := if isStateful then heapIn :: proc.inputs else proc.inputs
-      let outputs' := if isStateful then heapOut :: proc.outputs else proc.outputs
-      procs := procs ++ [{ proc with inputs := inputs', outputs := outputs', body := .Transparent (projectBody bodyExpr.md fgl) }]
+      let heap := match typeEnv.names[proc.name.text]? with
+        | some (.function sig) => match sig.effectType with
+          | .stateful _ | .statefulError _ _ => some (FGLValue.var "$heap")
+          | _ => none
+        | _ => none
+      match heap with
+      | some h =>
+        let extEnv := { baseEnv with names := baseEnv.names.insert "$heap_in" (.variable .THeap) |>.insert "$heap" (.variable .THeap) }
+        let (fglRaw, _) := (checkProducer (some h) bodyExpr (eraseType retTy)).run extEnv |>.run st
+        let fgl := FGLProducer.assign (.var "$heap") (.var "$heap_in") fglRaw
+        let heapTy : HighTypeMd := ⟨.THeap, #[]⟩
+        let heapIn : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := heapTy }
+        let heapOut : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := heapTy }
+        procs := procs ++ [{ proc with inputs := heapIn :: proc.inputs, outputs := heapOut :: proc.outputs, body := .Transparent (projectBody bodyExpr.md fgl) }]
+      | none =>
+        let (fgl, _) := (checkProducer none bodyExpr (eraseType retTy)).run baseEnv |>.run st
+        procs := procs ++ [{ proc with body := .Transparent (projectBody bodyExpr.md fgl) }]
     | _ => procs := procs ++ [proc]
   let compositeType : TypeDefinition := .Datatype { name := "Composite", typeArgs := [], constructors := [{ name := "MkComposite", args := [{ name := "ref", type := ⟨.TInt, #[]⟩ }] }] }
   pure { program with staticProcedures := procs, types := [compositeType] ++ program.types }
