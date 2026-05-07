@@ -40,10 +40,11 @@ object-level and meta-level operations:
    by structural fold over the Python AST. This is induction on the input term —
    each Python constructor maps to a Laurel typing rule application.
 3. **Meta-level induction (Elaboration):** Given the derivation `Γ ⊢ e : A` constructed
-   by Translation, produce a new derivation `Γ ⊢ e' : A` in a richer system
-   (FineGrainLaurel) by induction on the structure of the *first derivation*. This
-   is an action on derivations, not on terms — it transforms how the term is typed,
-   inserting coercions where the object-level derivation uses subsumption implicitly.
+   by Translation, produce a new derivation `Γ ⊢ e' : A & e` in a richer system
+   (GradedFineGrainLaurel) by induction on the structure of the *first derivation*.
+   This is an action on derivations, not on terms — it transforms how the term is
+   typed, inserting coercions where subsumption is used implicitly AND assigning
+   effect grades `e` that track which effects each computation performs.
 
 The distinction: Translation builds a derivation (object-level). Elaboration
 transforms that derivation into one in a more explicit system (meta-level). This is
@@ -65,11 +66,11 @@ Laurel.Program (effects re-implicit, coercions/bindings as Laurel nodes, ready f
 Core
 ```
 
-The stratification is REPRESENTATIONAL: `Laurel.Program` and `FineGrainLaurel.Program`
+The stratification is REPRESENTATIONAL: `Laurel.Program` and `GFGL.Program`
 are different Lean types. You cannot accidentally pass un-elaborated Laurel to Core —
-the type system prevents it. FineGrainLaurel separates Values (pure expressions
-including coercions) from Producers (effectful procedure calls, control flow, assignment).
-Only procedures with effectful return types (error/stateful/statefulError) produce true let-bindings.
+the type system prevents it. GFGL separates Values (pure, grade 1) from Producers
+(graded: each producer carries its effect grade). The grade determines the calling
+convention at each use site — subgrading coercions produce the correct bindings.
 
 ---
 
@@ -82,7 +83,7 @@ induction** — it transforms that derivation into one in a richer system.
 
 - Resolution produces **Γ** (the typing context)
 - Translation constructs **D : Γ ⊢_Laurel e : A** (a derivation in Laurel's type system)
-- Elaboration transforms **D ↦ D' : Γ ⊢_FGL e' : A** (a derivation in FineGrainLaurel)
+- Elaboration transforms **D ↦ D' : Γ ⊢_GFGL e' : A & e** (a graded derivation in GFGL)
 
 ### Elaboration as Meta-Induction on Derivations
 
@@ -409,29 +410,29 @@ def eraseType : HighType → LowType
 
 ### What is a Value vs a Producer?
 
-In FGCBV, the distinction is about **elaboration effects**:
+In graded FGCBV, the distinction is about **grades**:
 
-- **Values:** Pure expressions. No elaboration effects. Can be nested freely.
-  Includes: literals, variables, pure function calls (effectType = .pure),
-  coercions (both upcasts and narrowing — narrowing is partial but that's a
-  verification concern, not a runtime control flow concern).
+- **Values:** Grade `1` (pure). No effects. Can be nested freely.
+  Includes: literals, variables, pure function calls (callee has grade `1`),
+  coercions (both upcasts and narrowing — grade `1`, value-level).
 
-- **Producers:** Expressions with elaboration effects. Must be bound via `let`.
-  Only: effectful procedure calls (effectType = .error/.stateful/.statefulError),
-  mutation (assignment), control flow (if, while, return, exit).
+- **Producers:** Grade `> 1` (effectful). Must be bound via `M to x. N`.
+  Includes: effectful procedure calls (callee has grade `err`/`heap`/`heap·err`),
+  mutation (assignment), control flow (if, while, return, exit), heap operations
+  (`.New`, `.FieldSelect`, field write).
 
-Pure function calls (arithmetic, coercions, field reads) are VALUES even though
+Pure function calls (arithmetic, coercions) are VALUES (grade `1`) even though
 they may be partial. Partiality is modeled via preconditions (`requires`), not
-via error-value binding. The verifier handles it via SMT, not runtime branching.
+via effect grades. The verifier handles it via SMT, not runtime branching.
 
 ### The Typing Rules
 
-**Value synthesis (atoms + pure calls):**
+**Value synthesis (atoms + grade-1 calls):**
 ```
 ───────────────        ─────────────────
 Γ ⊢_v n ⇒ int         Γ ⊢_v x ⇒ Γ(x)
 
-vᵢ ⇐ paramTyᵢ    f.effectType = .pure ty
+vᵢ ⇐ paramTyᵢ    f has grade 1
 ────────────────────────────────────────────
 Γ ⊢_v f(v₁,...,vₙ) ⇒ returnType(f)              (pure call — stays nested)
 ```
@@ -443,14 +444,14 @@ vᵢ ⇐ paramTyᵢ    f.effectType = .pure ty
 Γ ⊢_v c(v) ⇐ B
 ```
 
-**Producer synthesis:**
+**Producer synthesis (graded):**
 ```
-vᵢ ⇐ paramTyᵢ    f.effectType = .error resultTy errTy
+vᵢ ⇐ paramTyᵢ    f has grade d (from callee's elaborated signature)
 ──────────────────────────────────────────────
-Γ ⊢_p f(v₁,...,vₙ) ⇒ returnType(f)              (effectful call — TRUE let)
+Γ ⊢_p f(v₁,...,vₙ) ⇒ returnType(f) & d          (effectful call — grade d)
 
 ─────────────────────────
-Γ ⊢_p (new Foo) ⇒ Composite
+Γ ⊢_p (new Foo) ⇒ Composite & heap               (allocation has grade heap)
 
 v ⇐ Γ(x)
 ─────────────────────────
