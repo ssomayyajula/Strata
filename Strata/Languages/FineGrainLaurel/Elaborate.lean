@@ -161,9 +161,10 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
       -- Check for Hole RHS (absorbed into varDecl per architecture)
       match value.val with
       | .Hole false _ =>
+        -- Re-havoc: fresh var with no init, then assign to target
         let (tv, _) ← synthValue target
-        let name := match target.val with | .Identifier id => id.text | _ => "_unknown"
-        pure (.varDecl name (eraseType targetTy) none .unit, .TVoid)
+        let hv ← freshVar "havoc"
+        pure (.varDecl hv (eraseType targetTy) none (.assign tv (.var hv) .unit), .TVoid)
       | .Hole true _ =>
         let (tv, _) ← synthValue target
         let name := match target.val with | .Identifier id => id.text | _ => "_unknown"

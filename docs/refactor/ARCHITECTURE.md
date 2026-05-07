@@ -1252,9 +1252,18 @@ projectProducer : FGLProducer → StmtExprMd
   ...
 ```
 
-**Projected variable types use their actual LowType.** Precise types from elaboration
-Projection uses `liftType` to convert LowType back to HighType for
-variable declarations. No type erasure in projection.
+**All projected types are `Any`.** Core's Laurel→Core contract requires uniform `Any`
+typing: all procedure inputs, outputs, and local variables are `Core(Any)`. Precise
+types are expressed as `requires`/`ensures` annotations (not Laurel-level types).
+The coercions (`from_int`, `Any_to_bool`) carry the type information at value level.
+
+Projection erases all LowTypes to `Any` (or `Error` for the error variable).
+The precise types from elaboration's LowType system are INTERNAL — they drive
+coercion insertion but never appear in the output.
+
+**Known tech debt:** This uniform-Any contract prevents Core from doing precise type
+checking at the Laurel level. Ideally Core would support precise types and the
+coercions would be verified against them. For now we match the existing contract.
 
 **Uninitialized variables use `Hole`.** Core expects `<?>` for declarations without
 a meaningful initial value.
