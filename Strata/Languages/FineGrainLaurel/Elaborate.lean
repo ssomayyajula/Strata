@@ -237,6 +237,13 @@ def subsume (actual expected : LowType) : CoercionResult :=
 def applySubsume (val : FGLValue) (actual expected : LowType) : FGLValue :=
   match subsume actual expected with | .refl => val | .coerce c => c val | .unrelated => val
 
+-- Defunctionalized producer synthesis result.
+-- Describes what an expression produces WITHOUT needing the rest of the block.
+inductive SynthResult where
+  | value (val : FGLValue) (ty : LowType)
+  | call (callee : String) (args : List FGLValue) (retTy : HighType) (grade : Grade)
+  deriving Inhabited
+
 -- Elaboration
 -- checkProducer is THE entry point. It takes remaining statements as continuation.
 -- Each FGL node threads the rest into its body field.
@@ -286,6 +293,27 @@ partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValu
   let (val, actual) ← synthValue expr
   pure (applySubsume val actual (eraseType expected))
 
+-- synthExpr: synthesize an expression as value OR producer (defunctionalized)
+-- Returns SynthResult without needing the continuation.
+partial def synthExpr (expr : StmtExprMd) : ElabM SynthResult := do
+  match expr.val with
+  | .StaticCall callee args =>
+    let sig ← lookupFuncSig callee.text
+    match sig with
+    | some s =>
+      let g ← discoverGrade callee.text
+      let checkedArgs ← checkArgs args s.params
+      if g == .pure then
+        pure (.value (.staticCall callee.text checkedArgs) (eraseType s.returnType))
+      else
+        pure (.call callee.text checkedArgs s.returnType g)
+    | none =>
+      let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
+      pure (.value (.staticCall callee.text checkedArgs) (.TCore "Any"))
+  | _ =>
+    let (val, ty) ← synthValue expr
+    pure (.value val ty)
+
 partial def checkArgs (args : List StmtExprMd) (params : List (String × HighType)) : ElabM (List FGLValue) := do
   let paramTypes := params.map (·.2)
   let rec go : List StmtExprMd → List HighType → ElabM (List FGLValue)
@@ -300,52 +328,36 @@ partial def checkArgs (args : List StmtExprMd) (params : List (String × HighTyp
       pure (v :: vs)
   go args paramTypes
 
--- checkArgsK: like checkArgs but with continuation — lifts effectful args via binding
--- When an arg is an effectful StaticCall (grade > 1), binds it and passes the bound value.
+-- checkArgsK: like checkArgs but with continuation — lifts effectful args via binding.
+-- Uses synthExpr (defunctionalized) to determine if an arg is a value or producer.
 partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighType))
     (grade : Grade) (cont : List FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
   let paramTypes := params.map (·.2)
   let rec go : List StmtExprMd → List HighType → List FGLValue → ElabM FGLProducer
     | [], _, acc => cont acc.reverse
     | arg :: rest, [], acc => do
-      -- Excess args (e.g. self): synth without coercion
       let (v, _) ← synthValue arg
       go rest [] (v :: acc)
     | arg :: rest, pty :: ptysRest, acc => do
-      match arg.val with
-      | .StaticCall callee innerArgs =>
-        let innerSig ← lookupFuncSig callee.text
-        match innerSig with
-        | some s =>
-          let innerGrade ← discoverGrade callee.text
-          let innerChecked ← checkArgs innerArgs s.params
-          match innerGrade with
-          | .pure =>
-            let val := FGLValue.staticCall callee.text innerChecked
-            let coerced := applySubsume val (eraseType s.returnType) (eraseType pty)
-            go rest ptysRest (coerced :: acc)
-          | .err => do
-            guard (Grade.leq .err grade)
-            mkErrorCall callee.text innerChecked s.returnType fun rv =>
-              go rest ptysRest (applySubsume rv (eraseType s.returnType) (eraseType pty) :: acc)
-          | .heap => do
-            guard (Grade.leq .heap grade)
-            mkHeapCall callee.text innerChecked s.returnType fun rv =>
-              go rest ptysRest (applySubsume rv (eraseType s.returnType) (eraseType pty) :: acc)
-          | .heapErr => do
-            guard (Grade.leq .heapErr grade)
-            mkHeapErrorCall callee.text innerChecked s.returnType fun rv =>
-              go rest ptysRest (applySubsume rv (eraseType s.returnType) (eraseType pty) :: acc)
-        | none => do
-          -- No sig: runtime function, always pure
-          let innerChecked ← innerArgs.mapM fun a => checkValue a (.TCore "Any")
-          let val := FGLValue.staticCall callee.text innerChecked
-          let coerced := applySubsume val (.TCore "Any") (eraseType pty)
-          go rest ptysRest (coerced :: acc)
-      | _ => do
-        -- Non-StaticCall arg: regular value check
-        let v ← checkValue arg pty
-        go rest ptysRest (v :: acc)
+      let result ← synthExpr arg
+      match result with
+      | .value val ty =>
+        let coerced := applySubsume val ty (eraseType pty)
+        go rest ptysRest (coerced :: acc)
+      | .call callee checkedArgs retTy callGrade =>
+        if !Grade.leq callGrade grade then failure
+        else if callGrade == .err then
+          mkErrorCall callee checkedArgs retTy fun rv =>
+            go rest ptysRest (applySubsume rv (eraseType retTy) (eraseType pty) :: acc)
+        else if callGrade == .heap then
+          mkHeapCall callee checkedArgs retTy fun rv =>
+            go rest ptysRest (applySubsume rv (eraseType retTy) (eraseType pty) :: acc)
+        else if callGrade == .heapErr then
+          mkHeapErrorCall callee checkedArgs retTy fun rv =>
+            go rest ptysRest (applySubsume rv (eraseType retTy) (eraseType pty) :: acc)
+        else do
+          let val := FGLValue.staticCall callee checkedArgs
+          go rest ptysRest (applySubsume val (eraseType retTy) (eraseType pty) :: acc)
   go args paramTypes []
 
 -- checkProducer: the main recursive function.
@@ -606,12 +618,24 @@ partial def discoverGrade (callee : String) : ElabM Grade := do
     -- Functions (isFunctional) are always pure — skip grade discovery
     -- Also: procs without heap/error outputs whose body we'd cascade into
     let env ← read
-    let isFn := env.program.staticProcedures.any fun p =>
-      p.name.text == callee && p.isFunctional
-    let runtimeFn := env.runtime.staticProcedures.any fun p =>
-      p.name.text == callee && p.isFunctional
-    if isFn || runtimeFn then pure .pure
-    else
+    -- Grade from output signature structure (proof-relevant: outputs ARE the grade)
+    let env ← read
+    let findProc (procs : List Laurel.Procedure) := procs.find? (fun p => p.name.text == callee)
+    let proc := findProc env.program.staticProcedures |>.orElse fun _ => findProc env.runtime.staticProcedures
+    let gradeFromOutputs (outputs : List Laurel.Parameter) : Grade :=
+      let hasError := outputs.any fun o => match o.type.val with | .TCore "Error" => true | _ => false
+      let hasHeap := outputs.any fun o => match o.type.val with | .THeap => true | _ => false
+      match hasHeap, hasError with
+      | true, true => .heapErr
+      | true, false => .heap
+      | false, true => .err
+      | false, false => .pure
+    -- Only use signature-based grade for RUNTIME procs (already correctly configured)
+    let runtimeProc := findProc env.runtime.staticProcedures
+    match runtimeProc with
+    | some p => pure (gradeFromOutputs p.outputs)
+    | none =>
+      -- User proc or not found: discover from body
       let body ← lookupProcBody callee
       match body with
       | some bodyExpr =>
