@@ -272,8 +272,19 @@ partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValu
   let (val, actual) ← synthValue expr
   pure (applySubsume val actual (eraseType expected))
 
-partial def checkArgs (args : List StmtExprMd) (params : List (String × HighType)) : ElabM (List FGLValue) :=
-  (args.zip (params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
+partial def checkArgs (args : List StmtExprMd) (params : List (String × HighType)) : ElabM (List FGLValue) := do
+  let paramTypes := params.map (·.2)
+  let rec go : List StmtExprMd → List HighType → ElabM (List FGLValue)
+    | [], _ => pure []
+    | arg :: rest, pty :: ptys => do
+      let v ← checkValue arg pty
+      let vs ← go rest ptys
+      pure (v :: vs)
+    | arg :: rest, [] => do
+      let (v, _) ← synthValue arg
+      let vs ← go rest []
+      pure (v :: vs)
+  go args paramTypes
 
 -- checkProducer: the main recursive function.
 -- `rest` is the remaining statements after this one (the continuation).
