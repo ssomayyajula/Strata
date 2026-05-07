@@ -86,6 +86,7 @@ inductive FGLProducer where
 structure ElabEnv where
   typeEnv : TypeEnv
   program : Laurel.Program
+  runtime : Laurel.Program := default
   procGrades : Std.HashMap String Grade := {}
 
 structure ElabState where
@@ -143,12 +144,18 @@ def extendEnv (name : String) (ty : HighType) (action : ElabM α) : ElabM α :=
 def lookupFuncSig (name : String) : ElabM (Option FuncSig) := do
   match (← read).typeEnv.names[name]? with | some (.function sig) => pure (some sig) | _ => pure none
 def lookupProcBody (name : String) : ElabM (Option StmtExprMd) := do
-  match (← read).program.staticProcedures.find? (fun p => p.name.text == name) with
-  | some proc => match proc.body with
-    | .Transparent b => pure (some b)
-    | .Opaque _ (some impl) _ => pure (some impl)
-    | _ => pure none
-  | none => pure none
+  let env ← read
+  let findIn (procs : List Laurel.Procedure) : Option StmtExprMd :=
+    match procs.find? (fun p => p.name.text == name) with
+    | some proc => match proc.body with
+      | .Transparent b => some b
+      | .Opaque _ (some impl) _ => some impl
+      | _ => none
+    | none => none
+  match findIn env.program.staticProcedures with
+  | some b => pure (some b)
+  | none =>
+    pure none
 
 def lookupFieldType (className fieldName : String) : ElabM (Option HighType) := do
   match (← read).typeEnv.classFields[className]? with
@@ -675,8 +682,8 @@ def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) 
 
 -- fullElaborate: entry point
 
-def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String Laurel.Program := do
-  let baseEnv : ElabEnv := { typeEnv := typeEnv, program := program }
+def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laurel.Program := default) : Except String Laurel.Program := do
+  let baseEnv : ElabEnv := { typeEnv := typeEnv, program := program, runtime := runtime }
   let mut procs : List Laurel.Procedure := []
   let mut knownGrades : Std.HashMap String Grade := {}
   let mut allBoxConstructors : List (String × String × HighType) := []
