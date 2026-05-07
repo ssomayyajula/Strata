@@ -1,7 +1,5 @@
 # Python → Laurel Translation Architecture (v2)
 
-**Single source of truth for the refactored translation pipeline.**
-
 ---
 
 ## The Pipeline
@@ -14,7 +12,7 @@ Python AST + library stubs
 Python AST (user code)
   ↓ [Translation: fold over AST, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
-  ↓ [Elaboration: impure CBV → Graded FGCBV]
+  ↓ [Elaboration: impure CBV → Graded FGCBV, dependency order]
 e' : GFGL.Program (graded fine-grain Laurel — effects explicit via grades)
   ↓ [Projection: forget grading, trivial cata]
 Laurel.Program (ready for Core)
@@ -24,17 +22,10 @@ Core
 
 ---
 
-## Resolution (Building Γ)
+## Resolution
 
 **Input:** Python AST + stubs  
-**Output:** TypeEnv (= Γ)
-
-Resolution answers: "what is this name?" For each name, it records:
-- Class, function, or variable
-- Parameter names + types, defaults, return type
-- Class fields
-
-Resolution does NOT determine effects. Effects are inferred by elaboration.
+**Output:** `TypeEnv` (= Γ)
 
 ```lean
 structure FuncSig where
@@ -44,37 +35,50 @@ structure FuncSig where
   returnType : HighType
   hasKwargs : Bool
 
+structure TypeEnv where
+  names : Std.HashMap String NameInfo
+  classFields : Std.HashMap String (List (String × HighType))
+  overloadTable : Std.HashMap String (Std.HashMap String String)
+  builtinMap : Std.HashMap String String
+
 inductive NameInfo where
   | class_ (name : String) (fields : List (String × HighType))
   | function (sig : FuncSig)
   | variable (ty : HighType)
+  | module_ (fullName : String)
 ```
 
----
-
-## Translation (Python AST → Laurel)
-
-A fold over the Python AST. Each constructor maps to one Laurel construction.
-Translation handles Python-specific desugarings (scope hoisting, object construction,
-context managers, for-loop abstraction, calling convention normalization).
-
-Translation does NOT insert coercions or determine effects.
+Resolution does NOT determine effects. Effects are inferred by elaboration.
 
 ---
 
-## Elaboration (Impure CBV → Graded FGCBV)
+## Translation
 
-### Overview
+A catamorphism over the Python AST. One case per constructor. Deterministic.
 
-Elaboration is an action on derivations. Given a derivation `D : Γ ⊢_Laurel e : A`,
-it produces `D' : Γ ⊢_GFGL e' : A & e` where `e` is the effect grade.
+**Does:** scope hoisting, object construction (.New + __init__), context managers,
+for-loop abstraction (havoc + assume), loop labels, calling convention (kwargs +
+defaults via Γ), module-level wrapping (__main__), mutable param copies.
 
-The target (GFGL) is a graded fine-grain call-by-value calculus in the sense of
-McDermott (2025, "Grading call-by-push-value, explicitly and implicitly"). Grades
-form an ordered monoid tracking effects. The grading is implicit: grades are a
-PROPERTY of terms computed by the elaborator, not syntactic annotations.
+**Does NOT:** cast insertion, literal wrapping, effect determination.
 
-### The Grade Monoid (Residuated)
+---
+
+## Elaboration
+
+### Two Type Systems
+
+**HighType** (Translation's output): has `UserDefined "Foo"`.  
+**LowType** (GFGL's type system): has only `Composite`.
+
+```lean
+def eraseType : HighType → LowType
+  | .UserDefined _ => .TCore "Composite"
+  | .TInt => .TInt | .TBool => .TBool | .TString => .TString
+  | .TFloat64 => .TFloat64 | .TVoid => .TVoid | .TCore n => .TCore n
+```
+
+### The Grade Monoid (Residuated Partially-Ordered)
 
 ```
 (E, ≤, 1, ·, \) where E = {1, err, heap, heap·err}
@@ -86,93 +90,69 @@ Order:
 Multiplication:
   1 · e = e · 1 = e
   err · heap = heap · err = heap·err
-  e · e = e  (idempotent)
+  e · e = e
 
-Left residual (d \ e = largest e' such that d · e' ≤ e):
+Left residual (d \ e):
   1 \ e = e
-  err \ err = 1
-  err \ heap·err = heap
-  heap \ heap = 1
-  heap \ heap·err = err
+  err \ err = 1        err \ heap·err = heap
+  heap \ heap = 1      heap \ heap·err = err
   heap·err \ heap·err = 1
-  d \ e = undefined when d ≰ e  (ill-typed: can't sequence a heap op in a pure context)
-```
-
-The residual makes the sequencing rule mode-correct: given input grade `e` and
-synthesized prefix grade `d`, the continuation checks against `d \ e`.
-
-### Types
-
-**Value types:**
-```
-A, B ::= TInt | TBool | TString | TFloat64 | TVoid | TCore name | Composite
-```
-
-**Graded computation types:** A computation that returns type `A` with grade `e`:
-```
-A & e
 ```
 
 ### Judgments
 
 ```
-Γ ⊢_v V ⇒ A                 (value synthesis)
-Γ ⊢_v V ⇐ A                 (value checking)
-Γ ⊢_p M ⇒ A & e             (producer synthesis — type AND grade both output)
-Γ ⊢_p M ⇐ A & e             (producer checking — type AND grade both input)
+Γ ⊢_v V ⇒ A                 value synthesis (no grade)
+Γ ⊢_v V ⇐ A                 value checking (no grade)
+Γ ⊢_p M ⇒ A & e             producer synthesis (type + grade output)
+Γ ⊢_p M ⇐ A & e             producer checking (type + grade input)
 ```
 
 Grade mode agrees with type mode.
 
-### Value Rules (ungraded — values have no effects)
+### Value Rules
 
 ```
-───────────────────────────
+───────────────
 Γ ⊢_v n ⇒ int
 
 (x : A) ∈ Γ
-───────────────────────────
+───────────────
 Γ ⊢_v x ⇒ A
 
-f : (A₁,...,Aₙ) → B & 1        vᵢ ⇐ Aᵢ
-──────────────────────────────────────────
-Γ ⊢_v f(v₁,...,vₙ) ⇒ B                     (grade-1 call is a value)
+f : (A₁,...,Aₙ) → B & 1    vᵢ ⇐ Aᵢ
+──────────────────────────────────────
+Γ ⊢_v f(v₁,...,vₙ) ⇒ B
 
 Γ ⊢_v V ⇒ A    subsume(A, B) = c
 ──────────────────────────────────
-Γ ⊢_v c(V) ⇐ B                             (subsumption — type coercion)
+Γ ⊢_v c(V) ⇐ B
 ```
 
-### Producer Rules
-
-**Synthesis (type and grade both output):**
+### Producer Synthesis
 
 ```
 f : (A₁,...,Aₙ) → B & d    d > 1    vᵢ ⇐ Aᵢ
 ───────────────────────────────────────────────
-Γ ⊢_p f(v₁,...,vₙ) ⇒ B & d                    (effectful call)
+Γ ⊢_p f(v₁,...,vₙ) ⇒ B & d
 
 ───────────────────────────
-Γ ⊢_p (new C) ⇒ Composite & heap              (allocation)
+Γ ⊢_p (new C) ⇒ Composite & heap
 
 Γ ⊢_v V ⇐ Γ(x)
 ───────────────────────────
-Γ ⊢_p (x := V) ⇒ TVoid & 1                   (assignment to variable)
+Γ ⊢_p (x := V) ⇒ TVoid & 1
 
 Γ ⊢_v V ⇐ bool
 ───────────────────────────
 Γ ⊢_p (assert V) ⇒ TVoid & 1
-
-Γ ⊢_v V ⇐ bool
-───────────────────────────
-Γ ⊢_p (assume V) ⇒ TVoid & 1
 
 Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇐ TVoid & e
 ─────────────────────────────────────────
 Γ ⊢_p (while V do M) ⇒ TVoid & e
 ```
 
-**Checking (type and grade both input):**
+### Producer Checking
 
 ```
 Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇐ A & e    Γ ⊢_p N ⇐ A & e
@@ -187,12 +167,12 @@ f : (A₁,...,Aₙ) → B & d    d > 1    vᵢ ⇐ Aᵢ
 ──────────────────────────────────────────────────
 Γ ⊢_p (M to x. N) ⇐ A & e
 
-Γ ⊢_v V ⇐ returnType
+Γ ⊢_v V ⇐ A
 ───────────────────────────
-Γ ⊢_p (return V) ⇐ returnType & 1
+Γ ⊢_p (return V) ⇐ A & e
 ```
 
-**Subsumption (synth meets check — type coercion + subgrading):**
+### Subsumption
 
 ```
 Γ ⊢_p M ⇒ A & d    A <: B    d ≤ e
@@ -200,88 +180,106 @@ f : (A₁,...,Aₙ) → B & d    d > 1    vᵢ ⇐ Aᵢ
 Γ ⊢_p M ⇐ B & e
 ```
 
-Type coercion (`A <: B`) produces a value-level witness (`from_int`, etc.).
-Subgrading (`d ≤ e`) is admissible — no syntax produced, the term is unchanged.
-A less-effectful computation is always valid in a more-effectful context.
+Type coercion (`A <: B`) produces a witness. Subgrading (`d ≤ e`) is admissible.
 
-### Procedure Entry Point
+### Subsumption Table (Type Coercions)
 
+```lean
+def subsume (actual expected : LowType) : CoercionResult :=
+  if actual == expected then .refl else match actual, expected with
+  | .TInt, .TCore "Any"         => .coerce .fromInt
+  | .TBool, .TCore "Any"        => .coerce .fromBool
+  | .TString, .TCore "Any"      => .coerce .fromStr
+  | .TFloat64, .TCore "Any"     => .coerce .fromFloat
+  | .TCore "Composite", .TCore "Any" => .coerce .fromComposite
+  | .TCore "ListAny", .TCore "Any"   => .coerce .fromListAny
+  | .TCore "DictStrAny", .TCore "Any" => .coerce .fromDictStrAny
+  | .TVoid, .TCore "Any"        => .coerce (fun _ => .fromNone)
+  | .TCore "Any", .TBool        => .coerce (fun v => .staticCall "Any_to_bool" [v])
+  | .TCore "Any", .TInt         => .coerce (fun v => .staticCall "Any..as_int!" [v])
+  | .TCore "Any", .TString      => .coerce (fun v => .staticCall "Any..as_string!" [v])
+  | .TCore "Any", .TFloat64     => .coerce (fun v => .staticCall "Any..as_float!" [v])
+  | .TCore "Any", .TCore "Composite" => .coerce (fun v => .staticCall "Any..as_Composite!" [v])
+  | .TCore "Box", .TCore "Any"  => .coerce (fun v => .staticCall "Box..AnyVal!" [v])
+  | _, _ => .unrelated
 ```
-Γ, x₁:A₁, ..., xₙ:Aₙ ⊢_p body ⇐ returnType & e
-───────────────────────────────────────────────────
-procedure f(x₁:A₁,...,xₙ:Aₙ) → returnType & e
-```
 
-The procedure body is CHECKED against `returnType & e`. But where does `e` come
-from? It comes from the BODY ITSELF — elaboration first synthesizes the body's
-grade, then uses subsumption to check it against the declared grade.
+### Calling Convention (Grade → Binding Shape)
 
-In practice: elaborate the body in SYNTH mode to discover its grade `d`. The
-procedure's grade IS `d`. Callers read `d` from the effect map. If a caller
-checks against a higher grade `e ≥ d`, subsumption handles it (admissible).
-
-### Dependency Order
-
-Callees must be elaborated before callers so that the callee's grade is available
-at the call site. Procedures are processed in topological order of the call graph.
-
-### The Calling Convention (Subgrading Coercion Made Manifest)
-
-Although subgrading is admissible (no coercion syntax), it has an OBSERVABLE
-EFFECT on the elaborated output: the STRUCTURE of the `effectfulCall` node.
-
-The callee's grade determines what gets bound at the call site:
-
-| Grade | Args | Outputs bound |
-|-------|------|---------------|
-| `1` | `[args]` | none (value call) |
+| Callee grade | Args | Outputs bound |
+|---|---|---|
+| `1` | `[args]` | none (value) |
 | `err` | `[args]` | `[result, error]` |
 | `heap` | `[heap, args]` | `[heap', result]` |
 | `heap·err` | `[heap, args]` | `[heap', result, error]` |
 
-This IS the proof-relevance of subgrading: the grade determines the shape of
-the binding form. `mkEffectfulCall` takes the callee's grade and produces the
-correctly-shaped `effectfulCall` node.
+### Heap Operations
 
-### Heap Threading
+| Source | Grade | Elaborated |
+|---|---|---|
+| `.New classId` | `heap` | `increment($heap)` → `MkComposite(ref, TypeTag)` |
+| `.FieldSelect obj field` | `heap` | `Box..AnyVal!(readField($heap, obj, field))` |
+| `Assign [FieldSelect obj f] v` | `heap` | `$heap := updateField($heap, obj, f, Box..Any(v))` |
 
-The heap variable flows through the HOAS closures:
+### Dependency Order
 
-```
-mkEffectfulCall f [heap, args...]
-  [("heap", THeap), ("result", resultTy)]
-  fun [heap', rv] =>
-    -- continuation has heap' in scope for the next operation
-    mkEffectfulCall g [heap', args2...]
-      [("heap", THeap), ("result", resultTy2)]
-      fun [heap'', rv2] => ...
-```
+Procedures elaborated in topological order of call graph. Callee's grade known
+before caller's elaboration. Effect map: `procName → Grade`.
 
-Each stateful call produces a NEW heap binding. The continuation receives it.
-The next call uses it. No mutable state — pure CPS threading via HOAS.
+### Procedure Entry
 
-### What Elaboration Does NOT Do
+Body synth'd to discover grade. That grade becomes the procedure's effect signature.
+Callers read it from the effect map.
 
-- No Python-specific logic (language-independent)
-- No administrative let-bindings (grade-1 calls stay nested)
-- No mutable state for heap tracking (HOAS closures thread it)
-- No EffectType from Resolution (grades inferred from the walk)
+### Holes
+
+- Nondeterministic (`.Hole false`): `varDecl x T none body`
+- Deterministic (`.Hole true`): `varDecl x T (some (staticCall "$hole_N" [])) body`
+
+After elaboration, no Hole nodes remain.
 
 ---
 
-## Projection (GFGL → Laurel)
+## Projection
 
-Trivial catamorphism. Forget grades, map each GFGL constructor to Laurel.
-The `effectfulCall` node projects to multi-output assignment (outputs determined
-by the grade, which determined the output list during elaboration).
+Trivial catamorphism. Forget grades. Map GFGL → Laurel:
+
+- `effectfulCall f args outputs body` → `[decl outputs; Assign [outputs] (StaticCall f args); body]`
+- `assign target val body` → `[Assign [target] val; body]`
+- `varDecl x ty init body` → `[LocalVariable x ty init; body]`
+- Values map to their Laurel equivalents directly.
+
+---
+
+## Engineering Principles
+
+| Principle | Eliminates |
+|---|---|
+| Representation invariants | Runtime checks, dead branches |
+| Proof-relevant elimination | Boolean blindness |
+| Catamorphisms | Traversal choices |
+| Correct by construction | Post-hoc rewrites |
+| Separation of concerns | Decisions in wrong place |
+| Monad carries context | Ad-hoc parameter passing |
+| Types flow down | Bottom-up guessing |
+
+---
+
+## Files
+
+```
+NameResolution.lean    -- Build Γ
+Translation.lean       -- Fold over AST → Laurel
+Elaborate.lean         -- Graded bidirectional elaboration
+Pipeline.lean          -- Wire passes, CLI
+```
 
 ---
 
 ## References
 
-- **Levy, P.B.** (2003). *Call-By-Push-Value.* — Value/Producer separation.
-- **Egger, Møgelberg, Staton** (2014). "Linear Usage of State." — State-passing translation.
-- **McDermott, D.** (2025). "Grading call-by-push-value, explicitly and implicitly." — Graded CBPV, implicit grading, coherence.
-- **Dunfield & Krishnaswami** (2021). "Bidirectional Typing." — Synth/check discipline.
-- **Moggi** (1991). "Notions of computation and monads." — Monadic effects.
-- **Plotkin & Pretnar** (2009). "Handlers of Algebraic Effects." — Effect operations.
+- **Levy** (2003). *Call-By-Push-Value.* Value/Producer.
+- **Egger, Møgelberg, Staton** (2014). "Linear Usage of State." State-passing translation.
+- **McDermott** (2025). "Grading call-by-push-value." Graded CBPV, implicit grading, coherence.
+- **Dunfield & Krishnaswami** (2021). "Bidirectional Typing." Synth/check/subsumption.
+- **Harper & Morrisett** (1995). "Compiling Polymorphism." Type-directed compilation.
