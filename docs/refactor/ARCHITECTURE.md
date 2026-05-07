@@ -240,6 +240,9 @@ Python.For(x, iter, body)
 
 ### What Translation DOES Do (Python-Specific Desugarings)
 
+- **Module-level wrapping:** Non-function/class top-level statements are collected
+  into a `__main__` procedure. This is the entry point for module-level code.
+  Includes `__name__ := "__main__"` injection and `if __name__ == "__main__"` guard.
 - **Scope hoisting:** Pre-declares all function-local variables at body top (Python scoping).
 - **Calling convention:** Normalizes kwargs to positional using Γ's FuncSig.
 - **Mutable parameter copies:** `var x := $in_x` for method params.
