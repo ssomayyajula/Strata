@@ -528,6 +528,26 @@ def buildTypeEnv (stmts : Array (Python.stmt SourceRange)) : TypeEnv := Id.run d
                       hasKwargs := false
                     })
         | none => pure ()
+    | .If _ _ body orelse =>
+        -- Descend into If blocks to find nested FunctionDefs/ClassDefs
+        -- (handles `if __name__ == "__main__":` pattern)
+        for innerStmt in body.val do
+          match innerStmt with
+          | .FunctionDef _ name args innerBody _ returns _ _ =>
+              let (n, info) := resolveFunctionDef name args innerBody returns
+              names := names.insert n info
+          | .ClassDef _ name _ _ innerBody _ _ =>
+              let (entries, (className, fields)) := resolveClassDef name innerBody
+              for (n, info) in entries do
+                names := names.insert n info
+              classFields := classFields.insert className fields
+          | _ => pure ()
+        for innerStmt in orelse.val do
+          match innerStmt with
+          | .FunctionDef _ name args innerBody _ returns _ _ =>
+              let (n, info) := resolveFunctionDef name args innerBody returns
+              names := names.insert n info
+          | _ => pure ()
     | _ => pure ()
   return { names := names, classFields := classFields,
            overloadTable := {}, builtinMap := defaultBuiltinMap }

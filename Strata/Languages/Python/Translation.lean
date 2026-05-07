@@ -693,6 +693,13 @@ partial def translateClass (s : Python.stmt SourceRange) : TransM (Option (TypeD
     pure (some (.Composite compositeType, methods))
   | _ => pure none
 
+partial def collectNestedDefs (stmts : List (Python.stmt SourceRange)) : List (Python.stmt SourceRange) :=
+  stmts.flatMap fun stmt => match stmt with
+    | .FunctionDef .. => [stmt]
+    | .ClassDef .. => [stmt]
+    | .If _ _ body orelse => collectNestedDefs body.val.toList ++ collectNestedDefs orelse.val.toList
+    | _ => []
+
 partial def translateModule (stmts : Array (Python.stmt SourceRange)) : TransM Laurel.Program := do
   let mut procedures : List Procedure := []
   let mut types : List TypeDefinition := []
@@ -702,6 +709,12 @@ partial def translateModule (stmts : Array (Python.stmt SourceRange)) : TransM L
     | .FunctionDef .. => if let some proc ← translateFunction stmt then procedures := procedures ++ [proc]
     | .ClassDef .. => if let some (td, ms) ← translateClass stmt then types := types ++ [td]; procedures := procedures ++ ms
     | _ => otherStmts := otherStmts ++ [stmt]
+  -- Extract FunctionDefs/ClassDefs nested inside If blocks (e.g., if __name__ == "__main__")
+  for nested in collectNestedDefs otherStmts do
+    match nested with
+    | .FunctionDef .. => if let some proc ← translateFunction nested then procedures := procedures ++ [proc]
+    | .ClassDef .. => if let some (td, ms) ← translateClass nested then types := types ++ [td]; procedures := procedures ++ ms
+    | _ => pure ()
   if !otherStmts.isEmpty then
     let sr : SourceRange := default
     let nameDecl ← mkExpr sr (.LocalVariable "__name__" (mkTypeDefault .TString) (some (mkExprDefault (.LiteralString "__main__"))))
