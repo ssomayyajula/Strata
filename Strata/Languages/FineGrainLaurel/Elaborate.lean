@@ -86,11 +86,11 @@ inductive FGLProducer where
 structure ElabEnv where
   typeEnv : TypeEnv
   program : Laurel.Program
+  procGrades : Std.HashMap String Grade := {}
 
 structure ElabState where
   freshCounter : Nat := 0
   heapVar : Option String := none
-  procGrades : Std.HashMap String Grade := {}
   usedBoxConstructors : List (String × String × HighType) := []
 
 abbrev ElabM := ReaderT ElabEnv (StateT ElabState Option)
@@ -532,8 +532,9 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
         pure (.assign tv cv after)
 
 -- discoverGrade: typing rules as oracle
+-- Reads procGrades from the reader (no state mutation). Uses `local` for coinduction.
 partial def discoverGrade (callee : String) : ElabM Grade := do
-  match (← get).procGrades[callee]? with
+  match (← read).procGrades[callee]? with
   | some g => pure g
   | none =>
     let body ← lookupProcBody callee
@@ -546,9 +547,7 @@ partial def discoverGrade (callee : String) : ElabM Grade := do
         | some s => s.params.foldl (fun e (n, t) =>
             { e with typeEnv := { e.typeEnv with names := e.typeEnv.names.insert n (.variable t) } }) env
         | none => env
-      let grade ← tryGrades callee paramEnv bodyExpr retTy [.pure, .err, .heap, .heapErr]
-      modify fun s => { s with procGrades := s.procGrades.insert callee grade }
-      pure grade
+      tryGrades callee paramEnv bodyExpr retTy [.pure, .err, .heap, .heapErr]
     | none => pure .pure
 
 partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd) (retTy : LowType) (grades : List Grade) : ElabM Grade := do
@@ -558,12 +557,11 @@ partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd) (ret
     let st ← get
     let trialSt : ElabState := { st with
       freshCounter := 0
-      heapVar := if g == .heap || g == .heapErr then some "$heap" else none
-      procGrades := st.procGrades.insert callee g }
-    match (checkProducer body [] g).run env |>.run trialSt with
-    | some (_, st') =>
-      modify fun s => { s with procGrades := st'.procGrades }
-      pure g
+      heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+    -- Use local to add coinductive sentinel: callee assumed at grade g
+    let trialEnv := { env with procGrades := env.procGrades.insert callee g }
+    match (checkProducer body [] g).run trialEnv |>.run trialSt with
+    | some _ => pure g
     | none => tryGrades callee env body retTy rest
 
 end
@@ -612,36 +610,37 @@ def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) 
 -- fullElaborate: entry point
 
 def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String Laurel.Program := do
-  let env : ElabEnv := { typeEnv := typeEnv, program := program }
+  let baseEnv : ElabEnv := { typeEnv := typeEnv, program := program }
   let mut procs : List Laurel.Procedure := []
-  let mut globalState : ElabState := {}
+  let mut knownGrades : Std.HashMap String Grade := {}
+  let mut allBoxConstructors : List (String × String × HighType) := []
   for proc in program.staticProcedures do
     match proc.body with
     | .Transparent bodyExpr =>
       let extEnv := (proc.inputs ++ proc.outputs).foldl
         (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
-      let procEnv : ElabEnv := { env with typeEnv := extEnv }
+      let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
       -- Discover grade by trying checkProducer at each level
       let grade := [Grade.pure, Grade.err, Grade.heap, Grade.heapErr].findSome? fun g =>
-        let st : ElabState := { globalState with
+        let st : ElabState := {
           freshCounter := 0
           heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
-        match (checkProducer bodyExpr [] g).run procEnv |>.run st with
+        let trialEnv := { procEnv with procGrades := knownGrades.insert proc.name.text g }
+        match (checkProducer bodyExpr [] g).run trialEnv |>.run st with
         | some _ => some g
         | none => none
       match grade with
       | some g =>
-        -- Bug fix: multi-output procedures (result + error) need at least err grade
         let g := if proc.outputs.length > 1 then Grade.join g .err else g
-        let st : ElabState := { globalState with
+        knownGrades := knownGrades.insert proc.name.text g
+        let st : ElabState := {
           freshCounter := 0
           heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
-        match (checkProducer bodyExpr [] g).run procEnv |>.run st with
+        let elabEnv := { procEnv with procGrades := knownGrades }
+        match (checkProducer bodyExpr [] g).run elabEnv |>.run st with
         | some (fgl, st') =>
-          globalState := { globalState with
-            procGrades := st'.procGrades
-            usedBoxConstructors := globalState.usedBoxConstructors ++ st'.usedBoxConstructors.filter
-              (fun (c, _, _) => !globalState.usedBoxConstructors.any (fun (c2, _, _) => c == c2)) }
+          allBoxConstructors := allBoxConstructors ++ st'.usedBoxConstructors.filter
+            (fun (c, _, _) => !allBoxConstructors.any (fun (c2, _, _) => c == c2))
           let projected := projectBody bodyExpr.md fgl
           if g == .heap || g == .heapErr then
             let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd bodyExpr.md .THeap }
@@ -657,7 +656,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
         | none => procs := procs ++ [proc]
       | none => procs := procs ++ [proc]
     | _ => procs := procs ++ [proc]
-  let hasHeap := globalState.procGrades.toList.any fun (_, g) => g == .heap || g == .heapErr
+  let hasHeap := knownGrades.toList.any fun (_, g) => g == .heap || g == .heapErr
   let compositeNames := typeEnv.classFields.toList.map (·.1)
   let typeTagDatatype : TypeDefinition := .Datatype {
     name := "TypeTag", typeArgs := [],
@@ -672,7 +671,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
       { name := Identifier.mk (className ++ "." ++ fieldName) none, args := [] : DatatypeConstructor }) []
   let fieldDatatype : TypeDefinition := .Datatype {
     name := "Field", typeArgs := [], constructors := fieldConstructors }
-  let boxConstructors := globalState.usedBoxConstructors.map fun (ctorName, _, ty) =>
+  let boxConstructors := allBoxConstructors.map fun (ctorName, _, ty) =>
     { name := Identifier.mk ctorName none, args := [
       { name := Identifier.mk (boxFieldName ty) none, type := ⟨boxFieldType ty, #[]⟩ }] : DatatypeConstructor }
   let boxDatatype : TypeDefinition := .Datatype {
