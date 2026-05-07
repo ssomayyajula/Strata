@@ -529,14 +529,16 @@ but that's a verification concern. No bindings introduced by coercion.
 
 ### Key Properties
 
-- **Pure calls are values.** `PAdd(from_int(x), from_int(y))` is ONE nested value
+- **Grade-1 calls are values.** `PAdd(from_int(x), from_int(y))` is ONE nested value
   expression. No intermediate variables. Stays inline.
-- **Only `hasErrorOutput` calls produce true lets.** These are the ONLY bindings
-  that elaboration introduces (beyond user-written assignments/locals).
+- **Grade > 1 calls produce true lets.** These are the ONLY bindings that elaboration
+  introduces (beyond user-written assignments/locals). The subgrading coercion
+  determines the calling convention (which outputs to bind).
 - **Narrowing is value-level.** `Any_to_bool(x)` is a value expression (partial
-  function with precondition). Not a producer binding.
-- **Projection is a trivial cata.** FGL maps directly to Laurel with no restructuring.
-- **All coercion is value-level.** The `subsume` table decides everything.
+  function with precondition). Not a producer binding. No grade contribution.
+- **Projection is a trivial cata.** GFGL maps directly to Laurel with no restructuring.
+- **All type coercion is value-level.** The `subsume` table decides type coercions.
+  Effect coercions (calling conventions) are decided by subgrading.
 
 ### Coercion Table (validated against PythonRuntimeLaurelPart.lean)
 
@@ -574,24 +576,33 @@ but that's a verification concern. No bindings introduced by coercion.
 - Process `LocalVariable x : T` → extend Γ with `x : T` for continuation
 - Uses `withReader` on the reader monad. No mutable state. One Γ.
 
-### Heap (State-Passing via the CBV→FGCBV Embedding)
+### Heap (Grade `heap` — State Effect)
 
-The CBV→FGCBV embedding (Levy 2003, Egger/Møgelberg/Staton 2014) makes ALL
-effects explicit by threading monadic state through the continuation structure.
-We already instantiate this for error (via `effectfulCall`). Heap is the SAME
-mechanism instantiated for the state monad: `T(A) = Heap → (A × Heap)`.
+We perform Egger et al.'s (2014) effect-passing translation, but into a
+GRADED target (McDermott 2025). The grade monoid tracks which effects each
+computation performs. The subgrading coercion `d ≤ e` produces the correct
+calling convention at each call site — state-passing for `heap`, error-binding
+for `err`.
 
-**Elaboration INFERS effects.** Resolution does NOT determine which procedures are
-stateful. Elaboration discovers this by processing procedures in DEPENDENCY ORDER:
+Heap operations carry grade `heap`. The subgrading coercion for `heap` is
+state-passing: thread the heap linearly (pass in, receive out).
 
-1. Build call graph from the Laurel program (post-Translation)
-2. Topologically sort (leaves first, callers later; SCCs as units)
-3. Elaborate each proc. If its body contains `.New`, `.FieldSelect`, or calls to
-   an already-elaborated stateful proc → this proc is stateful
-4. Record the discovered effect for each proc. Callers see callees' effects.
+**Effect grades are INFERRED by elaboration.** Resolution does NOT determine
+which procedures are stateful. The grade emerges from the typing rules:
 
-This is type INFERENCE, not type CHECKING. The effect annotation emerges from
-the elaboration walk. Resolution only provides parameter types and return types.
+- `return V` has grade `1`
+- `.New` has grade `heap` (allocation)
+- `.FieldSelect` has grade `heap` (heap read)
+- `Assign [FieldSelect ...] val` has grade `heap` (heap write)
+- Call to proc with grade `d` contributes grade `d` to the sequencing
+- `M to x. N` has grade `d · e` (M's grade composed with N's grade)
+
+The final grade of a procedure body IS its effect signature — computed
+from the inside out by the typing rules. No separate inference pass.
+
+**Dependency order:** Callees must be elaborated before callers so that the
+callee's grade is known at the call site. Procedures are processed in
+topological order of the call graph (leaves first, callers later).
 
 **Heap operations (state access operations in the sense of Møgelberg & Staton):**
 
@@ -687,15 +698,16 @@ Box) and break Core. `heapConstants.types` is NOT added unconditionally.
 ### What Elaboration Does NOT Do
 
 - No Python-specific logic (language-independent)
-- No administrative let-bindings (only true lets from hasErrorOutput + user code)
-- No ANF transformation (pure calls stay nested)
+- No administrative let-bindings (only true lets from grade > 1 calls + user code)
+- No ANF transformation (grade-1 calls stay nested as values)
 - No type equality dispatch in the walk (subsume decides everything)
 
-**Elaboration = CBV→FGCBV Embedding (Levy 2003 §3.2)**
+**Elaboration = CBV→Graded FGCBV Embedding (Levy 2003, Egger 2014, McDermott 2025)**
 
-Elaboration IS the standard embedding of CBV (Laurel) into FGCBV (FineGrainLaurel).
+Elaboration IS the embedding of impure CBV (Laurel) into graded FGCBV (GFGL).
 This embedding is deterministic — no choices, no routing decisions. Every CBV term
-has exactly one FGCBV translation.
+has exactly one graded FGCBV translation. The grade of the output is determined
+by which operations appear in the term.
 
 **The embedding:**
 ```
@@ -709,12 +721,12 @@ has exactly one FGCBV translation.
 ⟦if c then a else b⟧  = ⟦c⟧ to cond. narrow(cond,bool) to b. if b then ⟦a⟧ else ⟦b⟧
 ```
 
-**Type preservation (the embedding preserves typability):**
+**Type preservation (the embedding preserves typability and assigns grades):**
 
 The embedding is an action on DERIVATIONS. If `D : Γ ⊢_Laurel e : A` is a typing
-derivation in Laurel (which uses implicit subsumption: `int` flows into `Any`
-positions without explicit cast), then `⟦D⟧ : Γ ⊢_FGL e' : A` is a derivation
-in FGL where every subsumption step is witnessed by an explicit coercion.
+derivation in Laurel (which uses implicit subsumption and implicit effects), then
+`⟦D⟧ : Γ ⊢_GFGL e' : A & e` is a derivation in GFGL where every subsumption
+step is witnessed by an explicit coercion AND every effect is tracked by a grade.
 
 The key: Laurel's type system has `int <: Any` (implicit subsumption). When the
 source derivation D applies the subsumption rule at a check boundary (e.g., passing
