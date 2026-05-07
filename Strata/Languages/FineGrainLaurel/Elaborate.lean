@@ -72,11 +72,27 @@ instance : ToString ElabError where
   toString | .typeError m => s!"type error: {m}" | .unsupported m => s!"unsupported: {m}"
 abbrev ElabM := ReaderT TypeEnv (StateT ElabState (Except ElabError))
 
-def freshVar (pfx : String := "tmp") : ElabM String := do
+private def freshVar (pfx : String := "tmp") : ElabM String := do
   let s ← get; set { s with freshCounter := s.freshCounter + 1 }; pure s!"{pfx}${s.freshCounter}"
+
 def lookupEnv (name : String) : ElabM (Option NameInfo) := do pure (← read).names[name]?
 def extendEnv (name : String) (ty : HighType) (action : ElabM α) : ElabM α :=
   withReader (fun env => { env with names := env.names.insert name (.variable ty) }) action
+
+-- HOAS smart constructors: the ONLY way to create binding forms.
+-- Each takes a closure, generates fresh names, extends Γ, calls closure with bound vars.
+
+def mkCallWithError (callee : String) (args : List FGLValue) (resultTy errTy : LowType)
+    (body : FGLValue → FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
+  let rv ← freshVar "result"
+  let ev ← freshVar "err"
+  let cont ← extendEnv rv (liftType resultTy) (extendEnv ev (.TCore "Error") (body (.var rv) (.var ev)))
+  pure (.callWithError callee args rv ev resultTy errTy cont)
+
+def mkVarDecl (name : String) (ty : LowType) (init : Option FGLValue)
+    (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
+  let cont ← extendEnv name (liftType ty) (body (.var name))
+  pure (.varDecl name ty init cont)
 def lookupFuncSig (name : String) : ElabM (Option FuncSig) := do
   match (← read).names[name]? with | some (.function sig) => pure (some sig) | _ => pure none
 
