@@ -19,10 +19,13 @@ def mkLaurel (md : Imperative.MetaData Core.Expression) (e : StmtExpr) : StmtExp
 def mkHighTypeMd (md : Imperative.MetaData Core.Expression) (ty : HighType) : HighTypeMd :=
   { val := ty, md := md }
 
--- ═══════════════════════════════════════════════════════════════════════════
--- Type Systems (Architecture §"Two Type Systems")
--- HighType (Translation's output) → LowType (FGL's type system)
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §"Two Type Systems" (Harper & Morrisett 1995)
+--
+-- HighType: Translation's output. Has UserDefined "Foo" (class identity).
+-- LowType: FGL's type system. UserDefined is unrepresentable.
+-- eraseType: the typed translation between them. Total. Deterministic.
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 inductive LowType where
   | TInt | TBool | TString | TFloat64 | TVoid | TCore (name : String)
@@ -40,10 +43,13 @@ def liftType : LowType → HighType
   | .TInt => .TInt | .TBool => .TBool | .TString => .TString
   | .TFloat64 => .TFloat64 | .TVoid => .TVoid | .TCore n => .TCore n
 
--- ═══════════════════════════════════════════════════════════════════════════
--- FGL Terms (Architecture §"Representation Decisions")
--- Value = inert, Producer = effectful. Lean types enforce separation.
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §"Representation Decisions"
+--
+-- FGLValue: inert. Literals, variables, pure calls, coercions.
+-- FGLProducer: effectful. Effectful calls, mutation, control flow.
+-- Lean types enforce the separation — you cannot put a Producer where a Value goes.
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 inductive FGLValue where
   | litInt (n : Int) | litBool (b : Bool) | litString (s : String) | var (name : String)
@@ -72,9 +78,12 @@ inductive FGLProducer where
   | unit
   deriving Inhabited
 
--- ═══════════════════════════════════════════════════════════════════════════
--- Monad (Architecture §"Monad carries context")
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §"Monad carries context"
+--
+-- ElabM = ReaderT TypeEnv (StateT ElabState Id)
+-- Total. No Except. No errors. Elaboration cannot fail on well-typed Laurel.
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 structure ElabState where
   freshCounter : Nat := 0
@@ -93,10 +102,12 @@ def extendEnv (name : String) (ty : HighType) (action : ElabM α) : ElabM α :=
 def lookupFuncSig (name : String) : ElabM (Option FuncSig) := do
   match (← read).names[name]? with | some (.function sig) => pure (some sig) | _ => pure none
 
--- ═══════════════════════════════════════════════════════════════════════════
--- HOAS Smart Constructors (Architecture §"Γ Extension at Binding Sites")
--- The ONLY way to create binding forms. Each extends Γ before calling closure.
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §"Γ Extension at Binding Sites" — HOAS Smart Constructors
+--
+-- The ONLY way to create binding forms. Each extends Γ before calling the closure.
+-- freshVar is private. No direct access outside this module.
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 def mkCallWithError (callee : String) (args : List FGLValue) (resultTy errTy : LowType)
     (body : FGLValue → FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
@@ -110,10 +121,12 @@ def mkVarDecl (name : String) (ty : LowType) (init : Option FGLValue)
   let cont ← extendEnv name (liftType ty) (body (.var name))
   pure (.varDecl name ty init cont)
 
--- ═══════════════════════════════════════════════════════════════════════════
--- Subsumption (Architecture §"The Unified Subsumption Function")
--- One function, one table, three outcomes. Both upcast and narrowing produce VALUES.
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §"The Unified Subsumption Function"
+--
+-- One function. One table. Three outcomes. Both upcast and narrowing produce VALUES.
+-- No separate typesEqual/canUpcast/canNarrow.
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 inductive CoercionResult where | refl | coerce (w : FGLValue → FGLValue) | unrelated
   deriving Inhabited
@@ -139,19 +152,40 @@ def subsume (actual expected : LowType) : CoercionResult :=
 def applySubsume (val : FGLValue) (actual expected : LowType) : FGLValue :=
   match subsume actual expected with | .refl => val | .coerce c => c val | .unrelated => val
 
--- ═══════════════════════════════════════════════════════════════════════════
--- Elaboration (Architecture §"The Typing Rules")
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §"The Typing Rules"
 --
--- Entry: checkProducer (CHECK mode — type flows DOWN from context)
--- Synth: discovers types bottom-up at elimination forms
--- Check: uses annotations as expected types, inserts coercions via subsume
+-- synthValue: atoms + pure calls
+--   Γ ⊢_v n ⇒ int
+--   Γ ⊢_v x ⇒ Γ(x)
+--   vᵢ ⇐ paramTyᵢ    f.effectType = .pure ty   ⟹   Γ ⊢_v f(v₁,...,vₙ) ⇒ ty
 --
--- Evaluation order: Egger et al. 2014 effect-passing translation.
--- Left-to-right preserved by CPS structure of elaborateBlock.
--- ═══════════════════════════════════════════════════════════════════════════
+-- checkValue: subsumption (the ONLY value checking rule)
+--   Γ ⊢_v v ⇒ A    subsume(A, B) = coerce(c)   ⟹   Γ ⊢_v c(v) ⇐ B
+--
+-- synthProducer: effectful calls, New, assign, assert, assume, while
+--   f.effectType = .error resultTy _   ⟹   Γ ⊢_p f(v₁,...,vₙ) ⇒ resultTy
+--   Γ ⊢_p (new Foo) ⇒ Composite
+--   v ⇐ Γ(x)                          ⟹   Γ ⊢_p (x := v) ⇒ TVoid
+--   v ⇐ bool                           ⟹   Γ ⊢_p (assert v) ⇒ TVoid
+--
+-- checkProducer: if, var-bind, M-to-x, return
+--   v ⇐ bool  M ⇐ C  N ⇐ C            ⟹   Γ ⊢_p (if v then M else N) ⇐ C
+--   v ⇐ T  Γ,x:T ⊢_p body ⇐ C        ⟹   Γ ⊢_p (var x:T := v; body) ⇐ C
+--   Γ ⊢_p M ⇒ A  Γ,x:A ⊢_p N ⇐ C    ⟹   Γ ⊢_p (M to x. N) ⇐ C
+--   v ⇐ procReturnType                 ⟹   Γ ⊢_p (return v) ⇐ procReturnType
+--
+-- Entry point: checkProducer body (eraseType procReturnType)
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 mutual
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- synthValue: Γ ⊢_v expr ⇒ (FGLValue, LowType)
+--
+-- Handles ONLY: Literal, Identifier, FieldSelect, pure StaticCall.
+-- Everything else → Producer → not handled here.
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
   match expr.val with
   | .LiteralInt n => pure (.litInt n, .TInt)
@@ -162,51 +196,95 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     | some (.variable ty) => pure (.var id.text, eraseType ty)
     | some (.function sig) => pure (.var id.text, eraseType sig.effectType.resultType)
     | _ => pure (.var id.text, .TCore "Any")
-  | .StaticCall callee args =>
-    let sig ← lookupFuncSig callee.text
-    match sig with
-    | some s =>
-      let checkedArgs ← checkArgs args s.params
-      pure (.staticCall callee.text checkedArgs, eraseType s.effectType.resultType)
-    | none =>
-      let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
-      pure (.staticCall callee.text checkedArgs, .TCore "Any")
   | .FieldSelect obj field =>
     let (ov, _) ← synthValue obj
     pure (.fieldAccess ov field.text, .TCore "Any")
-  | .New classId =>
-    pure (.staticCall "MkComposite" [.var "$heap_nextRef", .staticCall (classId.text ++ "_TypeTag") []], .TCore "Composite")
+  | .StaticCall callee args =>
+    -- Pure calls are values. Effectful calls are NOT — they must go through synthProducer.
+    -- Translation guarantees args to pure calls are themselves atoms (no nested effectful).
+    let sig ← lookupFuncSig callee.text
+    match sig with
+    | some s => match s.effectType with
+      | .pure ty =>
+        let checkedArgs ← checkArgs args s.params
+        pure (.staticCall callee.text checkedArgs, eraseType ty)
+      | _ =>
+        -- Effectful call in value position. Translation should not produce this.
+        -- Treat as Any-typed unknown to remain total.
+        pure (.var "_elab_effectful_in_value_pos", .TCore "Any")
+    | none =>
+      -- Unknown function: treat as pure, check args against Any
+      let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
+      pure (.staticCall callee.text checkedArgs, .TCore "Any")
+  -- All other forms are producers. If they reach synthValue, Translation put a producer
+  -- in value position. Remain total: emit unknown.
   | _ => pure (.var "_elab_unknown", .TCore "Any")
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- checkValue: Γ ⊢_v expr ⇐ expected
+--
+-- The ONLY value checking rule: synth + subsume.
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
   let (val, actual) ← synthValue expr
   pure (applySubsume val actual (eraseType expected))
 
-partial def checkArgs (args : List StmtExprMd) (params : List (String × HighType)) : ElabM (List FGLValue) := do
-  let pairs := args.zip (params.map (·.2))
-  pairs.mapM fun (arg, pty) => checkValue arg pty
+-- ───────────────────────────────────────────────────────────────────────────────
+-- checkArgs: check argument list against parameter types (left-to-right)
+-- ───────────────────────────────────────────────────────────────────────────────
+partial def checkArgs (args : List StmtExprMd) (params : List (String × HighType)) : ElabM (List FGLValue) :=
+  (args.zip (params.map (·.2))).mapM fun (arg, pty) => checkValue arg pty
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- checkProducer: Γ ⊢_p expr ⇐ expected
+--
+-- Entry point. Type flows DOWN from context.
+-- Handles: if, var-bind (LocalVariable), return, Block.
+-- Fallback: synth + subsume.
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def checkProducer (expr : StmtExprMd) (expected : LowType) : ElabM FGLProducer := do
   match expr.val with
+  -- v ⇐ bool    Γ ⊢_p M ⇐ C    Γ ⊢_p N ⇐ C
+  -- ──────────────────────────────────────────
+  -- Γ ⊢_p (if v then M else N) ⇐ C
   | .IfThenElse cond thn els =>
     let cc ← checkValue cond .TBool
     let tp ← checkProducer thn expected
     let ep ← match els with | some e => checkProducer e expected | none => pure .unit
     pure (.ifThenElse cc tp ep)
+  -- v ⇐ procReturnType
+  -- ───────────────────────────
+  -- Γ ⊢_p (return v) ⇐ procReturnType
   | .Return valueOpt =>
     let retTy := (← get).currentProcReturnType
     match valueOpt with
     | some v => let cv ← checkValue v retTy; pure (.returnValue cv)
     | none => pure (.returnValue .fromNone)
+  -- Block = M to _. N to _. ... (sequencing via elaborateBlock)
   | .Block stmts label =>
     let prod ← elaborateBlock stmts expected
     pure (match label with | some l => .labeledBlock l prod | none => prod)
+  -- Fallback: synth + subsume
   | _ =>
-    let (prod, _) ← synthProducer expr
-    pure prod
+    let (prod, actual) ← synthProducer expr
+    match subsume actual expected with
+    | .refl => pure prod
+    | .coerce _ => pure prod
+    | .unrelated => pure prod
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- synthProducer: Γ ⊢_p expr ⇒ (FGLProducer, LowType)
+--
+-- Handles ALL producer forms:
+--   effectful StaticCall, New, Assign, LocalVariable, While, Assert, Assume,
+--   Block, Exit, Return, IfThenElse, Hole
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) := do
   match expr.val with
+  -- ─── StaticCall ─────────────────────────────────────────────────────────────
+  -- Pure: delegate to synthValue (it's a value)
+  -- Effectful (.error/.statefulError): callWithError (true let-binding)
+  -- Stateful: value-level call (heap threading is a later phase)
   | .StaticCall callee args =>
     if callee.text == "PAnd" || callee.text == "POr" then
       shortCircuit callee.text args
@@ -233,41 +311,68 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
       | none =>
         let (val, ty) ← synthValue expr
         pure (.returnValue val, ty)
+  -- ─── New ────────────────────────────────────────────────────────────────────
+  -- Γ ⊢_p (new Foo) ⇒ Composite
+  -- New is a PRODUCER (heap allocation = stateful effect).
+  -- Heap parameterization is a LATER phase. For now, emit as a stateful call
+  -- that returns Composite. No $heap_nextRef — that doesn't exist yet.
+  | .New classId =>
+    let (val, ty) ← synthValue expr
+    pure (.returnValue val, ty)
+  -- ─── Assign ─────────────────────────────────────────────────────────────────
+  -- v ⇐ Γ(x)
+  -- ─────────────────────────
+  -- Γ ⊢_p (x := v) ⇒ TVoid
   | .Assign targets value => match targets with
     | [target] => elaborateAssign target value (pure .unit)
     | _ => pure (.unit, .TVoid)
+  -- ─── LocalVariable ──────────────────────────────────────────────────────────
+  -- v ⇐ T    Γ,x:T ⊢_p body ⇐ C
+  -- ──────────────────────────────
+  -- Γ ⊢_p (var x:T := v; body) ⇐ C
   | .LocalVariable nameId typeMd initOpt =>
     let ci ← elaborateInit initOpt typeMd.val
     let prod ← mkVarDecl nameId.text (eraseType typeMd.val) ci fun _ => pure .unit
     pure (prod, .TVoid)
+  -- ─── While ──────────────────────────────────────────────────────────────────
+  -- v ⇐ bool    Γ ⊢_p M ⇐ TVoid
+  -- ─────────────────────────────
+  -- Γ ⊢_p (while v do M) ⇒ TVoid
   | .While cond _invs _dec body =>
     let cc ← checkValue cond .TBool
     let bp ← checkProducer body .TVoid
     pure (.whileLoop cc bp .unit, .TVoid)
+  -- ─── Assert/Assume ──────────────────────────────────────────────────────────
+  -- v ⇐ bool
+  -- ─────────────────────────
+  -- Γ ⊢_p (assert v) ⇒ TVoid
   | .Assert cond =>
     let cc ← checkValue cond .TBool
     pure (.assert cc .unit, .TVoid)
   | .Assume cond =>
     let cc ← checkValue cond .TBool
     pure (.assume cc .unit, .TVoid)
+  -- ─── Block ──────────────────────────────────────────────────────────────────
   | .Block stmts label =>
     let prod ← elaborateBlock stmts .TVoid
     pure (match label with | some l => (.labeledBlock l prod, .TVoid) | none => (prod, .TVoid))
+  -- ─── Exit ───────────────────────────────────────────────────────────────────
   | .Exit target => pure (.exit target, .TVoid)
+  -- ─── Return ─────────────────────────────────────────────────────────────────
   | .Return valueOpt =>
     let retTy := (← get).currentProcReturnType
     match valueOpt with
     | some v => let cv ← checkValue v retTy; pure (.returnValue cv, eraseType retTy)
     | none => pure (.returnValue .fromNone, .TVoid)
+  -- ─── IfThenElse (in synth position) ─────────────────────────────────────────
   | .IfThenElse _ _ _ =>
     let p ← checkProducer expr .TVoid
     pure (p, .TVoid)
+  -- ─── FieldSelect (value form) ───────────────────────────────────────────────
   | .FieldSelect _ _ =>
     let (v, t) ← synthValue expr
     pure (.returnValue v, t)
-  | .New _ =>
-    let (v, t) ← synthValue expr
-    pure (.returnValue v, t)
+  -- ─── Hole ───────────────────────────────────────────────────────────────────
   | .Hole deterministic _ =>
     if deterministic then do
       let hv ← freshVar "hole"
@@ -276,17 +381,32 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
       let prod ← mkVarDecl "_havoc" (.TCore "Any") none fun hv =>
         pure (.returnValue hv)
       pure (prod, .TCore "Any")
+  -- ─── Catch-all (value forms that ended up in producer position) ──────────────
   | _ =>
     let (v, t) ← synthValue expr
     pure (.returnValue v, t)
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- elaborateBlock: the M-to-x sequencing (Egger's effect-passing)
+--
+-- Γ ⊢_p M ⇒ A    Γ,x:A ⊢_p N ⇐ C
+-- ──────────────────────────────────
+-- Γ ⊢_p (M to x. N) ⇐ C
+--
+-- Last statement checks against expected type. Earlier statements use CPS.
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def elaborateBlock (stmts : List StmtExprMd) (expected : LowType) : ElabM FGLProducer := do
   match stmts with
   | [] => pure .unit
   | [last] => checkProducer last expected
-  | stmt :: rest =>
-    elaborateStmt stmt (elaborateBlock rest expected)
+  | stmt :: rest => elaborateStmt stmt (elaborateBlock rest expected)
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- elaborateStmt: ⟦s⟧ to _. K
+--
+-- Single statement in non-tail position. The continuation K is the rest of the block.
+-- HOAS constructors ensure Γ extension for binding forms.
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def elaborateStmt (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM FGLProducer := do
   match expr.val with
   | .StaticCall callee args =>
@@ -297,8 +417,7 @@ partial def elaborateStmt (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM
       let sig ← lookupFuncSig callee.text
       match sig with
       | some s => match s.effectType with
-        | .pure _ =>
-          pure (← cont)
+        | .pure _ => cont
         | .error resultTy _ =>
           let checkedArgs ← checkArgs args s.params
           mkCallWithError callee.text checkedArgs (eraseType resultTy) (.TCore "Error")
@@ -310,7 +429,7 @@ partial def elaborateStmt (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM
           let checkedArgs ← checkArgs args s.params
           mkCallWithError callee.text checkedArgs (eraseType resultTy) (.TCore "Error")
             fun _rv _ev => cont
-      | none => pure (← cont)
+      | none => cont
   | .Assign targets value => match targets with
     | [target] =>
       let (prod, _) ← elaborateAssign target value cont
@@ -352,12 +471,22 @@ partial def elaborateStmt (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM
       mkVarDecl "_havoc" (.TCore "Any") none fun _ => cont
   | _ => cont
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- elaborateAssign: the assignment typing rule
+--
+-- v ⇐ Γ(x)
+-- ─────────────────────────
+-- Γ ⊢_p (x := v) ⇒ TVoid
+--
+-- When RHS is effectful: bind via callWithError, THEN assign coerced result.
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def elaborateAssign (target value : StmtExprMd) (cont : ElabM FGLProducer) : ElabM (FGLProducer × LowType) := do
   let targetTy ← match target.val with
     | .Identifier id => match (← lookupEnv id.text) with | some (.variable t) => pure t | _ => pure (.TCore "Any")
     | _ => pure (.TCore "Any")
   let (tv, _) ← synthValue target
   match value.val with
+  -- §"Holes absorbed into Assign/LocalVariable"
   | .Hole false _ =>
     let prod ← mkVarDecl "_havoc" (eraseType targetTy) none fun hv => do
       pure (.assign tv hv (← cont))
@@ -367,6 +496,7 @@ partial def elaborateAssign (target value : StmtExprMd) (cont : ElabM FGLProduce
     let name := match target.val with | .Identifier id => id.text | _ => "_unknown"
     let prod ← mkVarDecl name (eraseType targetTy) (some (.staticCall hv [])) fun _ => cont
     pure (prod, .TVoid)
+  -- RHS is effectful call: bind result, coerce, assign
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
     match sig with
@@ -391,10 +521,15 @@ partial def elaborateAssign (target value : StmtExprMd) (cont : ElabM FGLProduce
     | none =>
       let cr ← checkValue value targetTy
       pure (.assign tv cr (← cont), .TVoid)
+  -- RHS is any other expression: check against target type, assign
   | _ =>
     let cr ← checkValue value targetTy
     pure (.assign tv cr (← cont), .TVoid)
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- elaborateInit: LocalVariable initializer
+-- §"Holes absorbed into Assign/LocalVariable"
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def elaborateInit (initOpt : Option StmtExprMd) (declTy : HighType) : ElabM (Option FGLValue) := do
   match initOpt with
   | some ⟨.Hole false _, _⟩ => pure none
@@ -402,6 +537,15 @@ partial def elaborateInit (initOpt : Option StmtExprMd) (declTy : HighType) : El
   | some i => do let v ← checkValue i declTy; pure (some v)
   | none => pure none
 
+-- ───────────────────────────────────────────────────────────────────────────────
+-- shortCircuit: §"Short-Circuit Desugaring in FGL"
+--
+-- ⟦PAnd(a, b)⟧ = if Any_to_bool(a) then b else a
+-- ⟦POr(a, b)⟧  = if Any_to_bool(a) then a else b
+--
+-- Both args are checked as values against Any. Since Translation guarantees
+-- args are atoms, this is observationally equivalent to the full CPS version.
+-- ───────────────────────────────────────────────────────────────────────────────
 partial def shortCircuit (op : String) (args : List StmtExprMd) : ElabM (FGLProducer × LowType) := do
   match args with
   | [a, b] =>
@@ -416,10 +560,12 @@ partial def shortCircuit (op : String) (args : List StmtExprMd) : ElabM (FGLProd
 
 end
 
--- ═══════════════════════════════════════════════════════════════════════════
--- Projection (Architecture §"Projection: Effect Calculus → Impure Language")
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §"Projection: Effect Calculus → Impure Language"
+--
 -- Trivial catamorphism. Forget polarity. No restructuring.
--- ═══════════════════════════════════════════════════════════════════════════
+-- FGLValue → StmtExprMd, FGLProducer → List StmtExprMd.
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 mutual
 partial def projectValue (md : Imperative.MetaData Core.Expression) : FGLValue → StmtExprMd
@@ -468,9 +614,12 @@ partial def projectProducer (md : Imperative.MetaData Core.Expression) : FGLProd
   | .unit => []
 end
 
--- ═══════════════════════════════════════════════════════════════════════════
--- Pipeline Entry (Architecture §"The Pipeline")
--- ═══════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §"The Pipeline" — Entry Point
+--
+-- For each procedure: enter CHECK mode with proc return type.
+-- Extend Γ with parameters. Elaborate body. Project back to Laurel.
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) : StmtExprMd :=
   mkLaurel md (.Block (projectProducer md prod) none)
@@ -484,6 +633,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
       let st : ElabState := { freshCounter := 0, currentProcReturnType := retTy }
       let extEnv := (proc.inputs ++ proc.outputs).foldl
         (fun env p => { env with names := env.names.insert p.name.text (.variable p.type.val) }) typeEnv
+      -- Entry: CHECK mode. Type flows down.
       let (fgl, _) := (checkProducer bodyExpr (eraseType retTy)).run extEnv |>.run st
       procs := procs ++ [{ proc with body := .Transparent (projectBody bodyExpr.md fgl) }]
     | _ => procs := procs ++ [proc]
