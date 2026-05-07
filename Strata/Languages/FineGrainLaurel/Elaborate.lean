@@ -710,16 +710,19 @@ def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) 
 
 def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laurel.Program := default) (initialGrades : Std.HashMap String Grade := {}) : Except String Laurel.Program := do
   let baseEnv : ElabEnv := { typeEnv := typeEnv, program := program, runtime := runtime }
-  let mut procs : List Laurel.Procedure := []
+
+  -- PASS 1: SYNTH — discover all proc grades
   let mut knownGrades : Std.HashMap String Grade := initialGrades
-  let mut allBoxConstructors : List (String × String × HighType) := []
   for proc in program.staticProcedures do
-    match proc.body with
-    | .Transparent bodyExpr =>
+    let bodyOpt := match proc.body with
+      | .Transparent b => some b
+      | .Opaque _ (some impl) _ => some impl
+      | _ => none
+    match bodyOpt with
+    | some bodyExpr =>
       let extEnv := (proc.inputs ++ proc.outputs).foldl
         (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
       let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
-      -- Discover grade by trying checkProducer at each level
       let grade := [Grade.pure, Grade.err, Grade.heap, Grade.heapErr].findSome? fun g =>
         let st : ElabState := {
           freshCounter := 0
@@ -733,48 +736,39 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       | some g =>
         let g := if proc.outputs.length > 1 then Grade.join g .err else g
         knownGrades := knownGrades.insert proc.name.text g
-        let st : ElabState := {
-          freshCounter := 0
-          heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
-        let elabEnv := { procEnv with procGrades := knownGrades }
-        match (checkProducer bodyExpr [] g).run elabEnv |>.run st with
-        | some (fgl, st') =>
-          allBoxConstructors := allBoxConstructors ++ st'.usedBoxConstructors.filter
-            (fun (c, _, _) => !allBoxConstructors.any (fun (c2, _, _) => c == c2))
-          let projected := projectBody bodyExpr.md fgl
-          if g == .heap || g == .heapErr then
-            let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd bodyExpr.md .THeap }
-            let heapOutParam : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := mkHighTypeMd bodyExpr.md .THeap }
-            let heapInit := mkLaurel bodyExpr.md (.Assign [mkLaurel bodyExpr.md (.Identifier (Identifier.mk "$heap" none))] (mkLaurel bodyExpr.md (.Identifier (Identifier.mk "$heap_in" none))))
-            let newBody := mkLaurel bodyExpr.md (.Block ([heapInit] ++ (projectProducer bodyExpr.md fgl)) none)
-            procs := procs ++ [{ proc with
-              inputs := [heapInParam] ++ proc.inputs
-              outputs := [heapOutParam] ++ proc.outputs
-              body := .Transparent newBody }]
-          else
-            procs := procs ++ [{ proc with body := .Transparent projected }]
-        | none => procs := procs ++ [proc]
-      | none => procs := procs ++ [proc]
-    | .Opaque _ (some impl) _ =>
-      -- Opaque with implementation: discover grade but don't rewrite body
+      | none => pure ()
+    | none => pure ()
+
+  -- PASS 2: CHECK — elaborate each proc with all grades known
+  let mut procs : List Laurel.Procedure := []
+  let mut allBoxConstructors : List (String × String × HighType) := []
+  for proc in program.staticProcedures do
+    match proc.body with
+    | .Transparent bodyExpr =>
       let extEnv := (proc.inputs ++ proc.outputs).foldl
         (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
       let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
-      let grade := [Grade.pure, Grade.err, Grade.heap, Grade.heapErr].findSome? fun g =>
-        let st : ElabState := {
-          freshCounter := 0
-          heapVar := if g == .heap || g == .heapErr then some "$heap" else none
-          discoveryMode := true }
-        let trialEnv := { procEnv with procGrades := knownGrades.insert proc.name.text g }
-        match (checkProducer impl [] g).run trialEnv |>.run st with
-        | some _ => some g
-        | none => none
-      match grade with
-      | some g =>
-        let g := if proc.outputs.length > 1 then Grade.join g .err else g
-        knownGrades := knownGrades.insert proc.name.text g
-      | none => pure ()
-      procs := procs ++ [proc]
+      let g := knownGrades[proc.name.text]?.getD .pure
+      let st : ElabState := {
+        freshCounter := 0
+        heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+      match (checkProducer bodyExpr [] g).run procEnv |>.run st with
+      | some (fgl, st') =>
+        allBoxConstructors := allBoxConstructors ++ st'.usedBoxConstructors.filter
+          (fun (c, _, _) => !allBoxConstructors.any (fun (c2, _, _) => c == c2))
+        let projected := projectBody bodyExpr.md fgl
+        if g == .heap || g == .heapErr then
+          let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd bodyExpr.md .THeap }
+          let heapOutParam : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := mkHighTypeMd bodyExpr.md .THeap }
+          let heapInit := mkLaurel bodyExpr.md (.Assign [mkLaurel bodyExpr.md (.Identifier (Identifier.mk "$heap" none))] (mkLaurel bodyExpr.md (.Identifier (Identifier.mk "$heap_in" none))))
+          let newBody := mkLaurel bodyExpr.md (.Block ([heapInit] ++ (projectProducer bodyExpr.md fgl)) none)
+          procs := procs ++ [{ proc with
+            inputs := [heapInParam] ++ proc.inputs
+            outputs := [heapOutParam] ++ proc.outputs
+            body := .Transparent newBody }]
+        else
+          procs := procs ++ [{ proc with body := .Transparent projected }]
+      | none => procs := procs ++ [proc]
     | _ => procs := procs ++ [proc]
   let hasHeap := knownGrades.toList.any fun (_, g) => g == .heap || g == .heapErr
   let compositeNames := typeEnv.classFields.toList.map (·.1)
