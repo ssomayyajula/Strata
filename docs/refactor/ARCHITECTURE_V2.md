@@ -204,6 +204,47 @@ def subsume (actual expected : LowType) : CoercionResult :=
   | _, _ => .unrelated
 ```
 
+### Coercion Table (validated against PythonRuntimeLaurelPart.lean)
+
+**Subtyping (A <: B, infallible):**
+
+| A | B | Witness | Source |
+|---|---|---|---|
+| int | Any | `from_int` | Prelude |
+| bool | Any | `from_bool` | Prelude |
+| str | Any | `from_str` | Prelude |
+| real | Any | `from_float` | Prelude (note: `real` not `float64`) |
+| Composite | Any | `from_Composite` | Prelude |
+| ListAny | Any | `from_ListAny` | Prelude |
+| DictStrAny | Any | `from_DictStrAny` | Prelude |
+| TVoid | Any | `from_None` | Prelude |
+| Any | Box | `Box..Any` | Generated |
+
+**Narrowing (A ▷ B, partial — precondition-guarded):**
+
+| A | B | Witness | Source |
+|---|---|---|---|
+| Any | bool | `Any_to_bool` | Prelude (truthiness) |
+| Any | int | `Any..as_int!` | DDM-generated |
+| Any | str | `Any..as_string!` | DDM-generated |
+| Any | real | `Any..as_float!` | DDM-generated |
+| Any | Composite | `Any..as_Composite!` | DDM-generated |
+| Any | ListAny | `Any..as_ListAny!` | DDM-generated |
+| Any | DictStrAny | `Any..as_Dict!` | DDM-generated |
+| Box | Any | `Box..AnyVal!` | DDM-generated (infallible) |
+
+Both produce VALUES. Narrowing is partial (precondition-guarded).
+No grade contribution — these are value-level operations.
+
+### Composite and Any
+
+`Any` is a tagged union. `Composite` is a heap reference (`MkComposite(ref: int)`).
+`Composite <: Any` via `from_Composite` (pointer-preserving injection).
+`Any ▷ Composite` via `Any..as_Composite!`.
+
+Field access on Composite: `readField(heap, obj, field) → Box`, then `Box..AnyVal! → Any`,
+then narrow `Any ▷ T`.
+
 ### Calling Convention (Grade → Binding Shape)
 
 | Callee grade | Args | Outputs bound |
@@ -262,6 +303,49 @@ Trivial catamorphism. Forget grades. Map GFGL → Laurel:
 | Separation of concerns | Decisions in wrong place |
 | Monad carries context | Ad-hoc parameter passing |
 | Types flow down | Bottom-up guessing |
+
+---
+
+## Translation Desugarings
+
+| Python | Laurel |
+|---|---|
+| `x = expr` | `Assign [x] expr` |
+| `a, b = rhs` | `tmp := rhs; a := Get(tmp,0); b := Get(tmp,1)` |
+| `x += v` | `Assign [x] (PAdd x v)` |
+| `return e` | `LaurelResult := e; exit $body` |
+| `Foo(args)` (class) | `tmp := New Foo; Foo@__init__(tmp, args); tmp` |
+| `with mgr as v: body` | `v := Type@__enter__(mgr); body; Type@__exit__(mgr)` |
+| `for x in iter: body` | `x := Hole; Assume(PIn(x, iter)); body` (labeled blocks for break/continue) |
+| `[a, b, c]` | `from_ListAny(ListAny_cons(a, ListAny_cons(b, ListAny_cons(c, ListAny_nil()))))` |
+| `{k: v}` | `from_DictStrAny(DictStrAny_cons(k, v, DictStrAny_empty()))` |
+| `f"{expr}"` | `to_string_any(expr)` |
+| `str(x)` | `to_string_any(x)` (via builtinMap) |
+
+---
+
+## Known Tech Debt
+
+**Narrowing as pure function:** `Any_to_bool` etc. are modeled as pure (grade 1).
+In Python, `__bool__` can have side effects. If needed later, narrowing becomes
+grade > 1 and the coercion scheme changes.
+
+**Instance procedures:** Methods emitted as top-level statics with `self` as first param.
+`instanceProcedures` on CompositeType is empty.
+
+**Prelude data encodings:** Lists/dicts are recursive ADTs (`ListAny_cons`/`DictStrAny_cons`).
+Translation must emit these specific constructors.
+
+---
+
+## Success Criteria
+
+1. All 54 in-tree tests pass.
+2. Translation is a fold — no post-hoc rewrites.
+3. Elaboration is separate — translation emits no casts or grades.
+4. Types from annotations — `Any` only when annotation absent.
+5. One file per pass.
+6. Implementation reads as transcription of the typing rules.
 
 ---
 
