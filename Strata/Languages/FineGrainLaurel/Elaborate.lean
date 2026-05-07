@@ -48,7 +48,7 @@ inductive FGLValue where
 inductive FGLProducer where
   | returnValue (v : FGLValue)
   | assign (target : FGLValue) (val : FGLValue) (body : FGLProducer)
-  | varDecl (name : String) (ty : LowType) (init : FGLValue) (body : FGLProducer)
+  | varDecl (name : String) (ty : LowType) (init : Option FGLValue) (body : FGLProducer)
   | ifThenElse (cond : FGLValue) (thn : FGLProducer) (els : FGLProducer)
   | whileLoop (cond : FGLValue) (body : FGLProducer) (after : FGLProducer)
   | assert (cond : FGLValue) (body : FGLProducer)
@@ -158,12 +158,30 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
       let targetTy ← match target.val with
         | .Identifier id => match (← lookupEnv id.text) with | some (.variable t) => pure t | _ => pure (.TCore "Any")
         | _ => pure (.TCore "Any")
-      let (tv, _) ← synthValue target
-      let cr ← checkValue value targetTy
-      pure (.assign tv cr .unit, .TVoid)
+      -- Check for Hole RHS (absorbed into varDecl per architecture)
+      match value.val with
+      | .Hole false _ =>
+        let (tv, _) ← synthValue target
+        let name := match target.val with | .Identifier id => id.text | _ => "_unknown"
+        pure (.varDecl name (eraseType targetTy) none .unit, .TVoid)
+      | .Hole true _ =>
+        let (tv, _) ← synthValue target
+        let name := match target.val with | .Identifier id => id.text | _ => "_unknown"
+        let hv ← freshVar "hole"
+        pure (.varDecl name (eraseType targetTy) (some (.staticCall hv [])) .unit, .TVoid)
+      | _ =>
+        let (tv, _) ← synthValue target
+        let cr ← checkValue value targetTy
+        pure (.assign tv cr .unit, .TVoid)
     | _ => pure (.unit, .TCore "Any")
   | .LocalVariable nameId typeMd initOpt =>
-    let ci ← match initOpt with | some i => checkValue i typeMd.val | none => pure (.var "_hole")
+    let ci ← match initOpt with
+      | some ⟨.Hole false _, _⟩ => pure none  -- nondeterministic: havoc
+      | some ⟨.Hole true _, _⟩ => do  -- deterministic: uninterpreted function
+        let hv ← freshVar "hole"
+        pure (some (.staticCall hv []))
+      | some i => do let v ← checkValue i typeMd.val; pure (some v)
+      | none => pure none
     pure (.varDecl nameId.text (eraseType typeMd.val) ci .unit, eraseType typeMd.val)
   | .While cond _invs _dec body =>
     let cc ← checkValue cond .TBool; let bp ← checkProducer body .TVoid
@@ -182,7 +200,13 @@ partial def synthProducer (expr : StmtExprMd) : ElabM (FGLProducer × LowType) :
   | .IfThenElse _ _ _ => let p ← checkProducer expr .TVoid; pure (p, .TVoid)
   | .FieldSelect _ _ => let (v, t) ← synthValue expr; pure (.returnValue v, t)
   | .New _ => let (v, t) ← synthValue expr; pure (.returnValue v, t)
-  | .Hole _ _ => pure (.returnValue (.var "_hole"), .TCore "Any")
+  | .Hole deterministic _ =>
+    if deterministic then
+      let hv ← freshVar "hole"
+      pure (.returnValue (.staticCall hv []), .TCore "Any")
+    else
+      let hv ← freshVar "havoc"
+      pure (.varDecl hv (.TCore "Any") none (.returnValue (.var hv)), .TCore "Any")
   | _ => pure (.returnValue (.var "_unsupported"), .TCore "Any")
 
 partial def checkProducer (expr : StmtExprMd) (expected : LowType) : ElabM FGLProducer := do
@@ -193,7 +217,11 @@ partial def checkProducer (expr : StmtExprMd) (expected : LowType) : ElabM FGLPr
     let ep ← match els with | some e => checkProducer e expected | none => pure .unit
     pure (.ifThenElse cc tp ep)
   | .LocalVariable nameId typeMd initOpt =>
-    let ci ← match initOpt with | some i => checkValue i typeMd.val | none => pure (.var "_hole")
+    let ci ← match initOpt with
+      | some ⟨.Hole false _, _⟩ => pure none
+      | some ⟨.Hole true _, _⟩ => do let hv ← freshVar "hole"; pure (some (.staticCall hv []))
+      | some i => do let v ← checkValue i typeMd.val; pure (some v)
+      | none => pure none
     let body ← extendEnv nameId.text typeMd.val (checkProducer (mkLaurel #[] (.Block [] none)) expected)
     pure (.varDecl nameId.text (eraseType typeMd.val) ci body)
   | .Return valueOpt =>
@@ -248,7 +276,11 @@ partial def projectValue (md : Imperative.MetaData Core.Expression) : FGLValue �
 partial def projectProducer (md : Imperative.MetaData Core.Expression) : FGLProducer → List StmtExprMd
   | .returnValue v => [projectValue md v]
   | .assign target val body => [mkLaurel md (.Assign [projectValue md target] (projectValue md val))] ++ projectProducer md body
-  | .varDecl name ty init body => [mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (liftType ty)) (some (projectValue md init)))] ++ projectProducer md body
+  | .varDecl name ty init body =>
+    let projInit := match init with
+      | some v => some (projectValue md v)
+      | none => none
+    [mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (liftType ty)) projInit)] ++ projectProducer md body
   | .ifThenElse cond thn els => [mkLaurel md (.IfThenElse (projectValue md cond) (mkLaurel md (.Block (projectProducer md thn) none)) (some (mkLaurel md (.Block (projectProducer md els) none))))]
   | .whileLoop cond body after => [mkLaurel md (.While (projectValue md cond) [] none (mkLaurel md (.Block (projectProducer md body) none)))] ++ projectProducer md after
   | .assert cond body => [mkLaurel md (.Assert (projectValue md cond))] ++ projectProducer md body
