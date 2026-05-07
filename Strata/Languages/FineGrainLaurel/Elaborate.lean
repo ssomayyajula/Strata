@@ -322,9 +322,13 @@ partial def projectProducer (md : Imperative.MetaData Core.Expression) : FGLProd
   | .assume cond body => [mkLaurel md (.Assume (projectValue md cond))] ++ projectProducer md body
   | .callWithError callee args rv ev rTy _eTy body =>
     let call := mkLaurel md (.StaticCall (Identifier.mk callee none) (args.map (projectValue md)))
-    [mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md (liftType rTy)) (some call)),
-     mkLaurel md (.LocalVariable (Identifier.mk ev none) (mkHighTypeMd md (.TCore "Error")) (some (mkLaurel md (.StaticCall (Identifier.mk "NoError" none) []))))]
-    ++ projectProducer md body
+    -- Multi-output assignment: [rv, ev] := f(args) — matches Core's protocol
+    let rvTarget := mkLaurel md (.Identifier (Identifier.mk rv none))
+    let evTarget := mkLaurel md (.Identifier (Identifier.mk ev none))
+    let rvDecl := mkLaurel md (.LocalVariable (Identifier.mk rv none) (mkHighTypeMd md (liftType rTy)) (some (mkLaurel md (.Hole))))
+    let evDecl := mkLaurel md (.LocalVariable (Identifier.mk ev none) (mkHighTypeMd md (.TCore "Error")) (some (mkLaurel md (.Hole))))
+    let multiAssign := mkLaurel md (.Assign [rvTarget, evTarget] call)
+    [rvDecl, evDecl, multiAssign] ++ projectProducer md body
   | .exit label => [mkLaurel md (.Exit label)]
   | .labeledBlock label body => [mkLaurel md (.Block (projectProducer md body) (some label))]
   | .seq first second => projectProducer md first ++ projectProducer md second
