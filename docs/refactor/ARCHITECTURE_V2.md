@@ -287,13 +287,36 @@ def applyConvention (w : ConventionWitness) (callee : String) (args : List FGLVa
       [("heap", .TCore "Heap"), ("result", resultTy), ("err", .TCore "Error")] body
 ```
 
-### Producer Subsumption (both witnesses applied)
+### Producer Subsumption (HOAS: convention binds, coercion applied inside)
 
 ```
 Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    subgrade(d, e) = conv
 ────────────────────────────────────────────────────────────────
-Γ ⊢_p applyConvention(conv, coerce_c(M)) ⇐ B & e
+Γ ⊢_p applyConvention(conv, M, fun outs =>
+         let rv := result(outs)          -- HOAS: rv bound in extended Γ
+         return c(rv)                    -- coercion applied to bound value
+       ) ⇐ B & e
 ```
+
+**HOAS structure:** `applyConvention` generates fresh names for all outputs,
+extends Γ with each (`extendEnv rv A`, `extendEnv hv Heap`, etc.), then calls
+the body closure with the bound variables. The closure receives values that are
+IN SCOPE — no raw variable names, no mutable state.
+
+```lean
+-- mkEffectfulCall IS the HOAS M-to-x. It:
+-- 1. Generates fresh names
+-- 2. Extends Γ for each output
+-- 3. Calls body closure with bound FGLValues
+-- 4. Produces FGLProducer.effectfulCall node
+def mkEffectfulCall (callee : String) (args : List FGLValue)
+    (outputSpecs : List (String × HighType))
+    (body : List FGLValue → ElabM FGLProducer) : ElabM FGLProducer
+```
+
+The coercion `c` is applied to `rv` INSIDE the closure — after binding, before
+the continuation uses the value. This is the only correct place: `c` consumes
+a value, and `rv` becomes a value only after the producer is bound.
 
 ### Heap Operations
 
