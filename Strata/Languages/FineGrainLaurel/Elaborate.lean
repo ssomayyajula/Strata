@@ -182,7 +182,7 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
   | .Identifier id =>
     match (← lookupEnv id.text) with
     | some (.variable ty) => pure (.var id.text, eraseType ty)
-    | some (.function sig) => pure (.var id.text, eraseType sig.effectType.resultType)
+    | some (.function sig) => pure (.var id.text, eraseType sig.returnType)
     | _ => pure (.var id.text, .TCore "Any")
   | .FieldSelect obj field =>
     let (ov, _) ← synthValue obj
@@ -196,7 +196,7 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     match sig with
     | some s =>
       let checkedArgs ← checkArgs args s.params
-      pure (.staticCall callee.text checkedArgs, eraseType s.effectType.resultType)
+      pure (.staticCall callee.text checkedArgs, eraseType s.returnType)
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
       pure (.staticCall callee.text checkedArgs, .TCore "Any")
@@ -221,17 +221,8 @@ partial def synthProducer (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM
     match sig with
     | some s =>
       let checkedArgs ← checkArgs args s.params
-      match s.effectType with
-      | .pure _ =>
-        let val := FGLValue.staticCall callee.text checkedArgs
-        -- Pure call is a value, just continue
-        cont
-      | .error resultTy _ =>
-        mkErrorCall callee.text checkedArgs resultTy fun _rv => cont
-      | .stateful resultTy =>
-        mkHeapCall callee.text checkedArgs resultTy fun _rv => cont
-      | .statefulError resultTy _ =>
-        mkHeapErrorCall callee.text checkedArgs resultTy fun _rv => cont
+      -- TODO: on-demand grade discovery. For now treat all calls as pure.
+      cont
     | none => cont
   | .New classId =>
     match (← get).heapVar with

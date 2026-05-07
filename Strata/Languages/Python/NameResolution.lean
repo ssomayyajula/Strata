@@ -39,7 +39,7 @@ everything needed — no boolean-returning query functions.
 | Is `Foo` a class or a function? | `NameInfo.class_` vs `NameInfo.function` |
 | What are `Foo`'s fields? | `NameInfo.class_ _ fields` |
 | What are `f`'s parameter types and defaults? | `FuncSig.params`, `FuncSig.defaults` |
-| What effects does `f` have? | `FuncSig.effectType` (pattern match) |
+| What is `f`'s return type? | `FuncSig.returnType` |
 | What does `boto3.client("iam")` resolve to? | `overloadTable["client"]["iam"]` → `"IAMClient"` |
 | What does `str(x)` map to in Laurel? | `builtinMap["str"]` → `"to_string_any"` |
 | What type is `obj` for `obj.method()` dispatch? | `NameInfo.variable ty` → use `ty` to qualify method |
@@ -56,28 +56,15 @@ public section
 
 /-- Effect type: encodes what effects a function/procedure has.
     Pattern match on this — no boolean flags. -/
-inductive EffectType where
-  | pure (ty : HighType)
-  | error (resultTy : HighType) (errTy : HighType)
-  | stateful (resultTy : HighType)
-  | statefulError (resultTy : HighType) (errTy : HighType)
-
-/-- Extract the result type from an EffectType. -/
-def EffectType.resultType : EffectType → HighType
-  | .pure ty => ty
-  | .error resultTy _ => resultTy
-  | .stateful resultTy => resultTy
-  | .statefulError resultTy _ => resultTy
-
 structure FuncSig where
   name : String
   params : List (String × HighType)
   defaults : List (Option StmtExprMd)
-  effectType : EffectType
+  returnType : HighType
   hasKwargs : Bool
 
 instance : Inhabited FuncSig where
-  default := { name := "", params := [], defaults := [], effectType := .pure (.TCore "Any"), hasKwargs := false }
+  default := { name := "", params := [], defaults := [], returnType := .TCore "Any", hasKwargs := false }
 
 /-- Classification of a name after resolution.
     Each variant is proof-relevant: it carries the data that translation needs
@@ -319,37 +306,20 @@ private def extractReturnType (returns : Ann (Option (Python.expr SourceRange)) 
   | some retExpr => annotationToHighType retExpr
   | none => .TCore "Any"
 
-/-- Detect whether a function body contains a raise statement or has exception handler patterns
-    that indicate it may produce an error output.
-    This is a heuristic — PySpec data provides the definitive answer. -/
-private def detectEffectType (body : Array (Python.stmt SourceRange)) (retTy : HighType) : EffectType :=
-  let hasRaise := body.any fun s => match s with | .Raise _ _ _ => true | _ => false
-  let hasSelfAccess := body.any fun s => match s with
-    | .Assign _ targets _ _ => targets.val.any fun t => match t with
-        | .Attribute _ (.Name _ n _) _ _ => n.val == "self" | _ => false
-    | .AnnAssign _ (.Attribute _ (.Name _ n _) _ _) _ _ _ => n.val == "self"
-    | _ => false
-  match hasSelfAccess, hasRaise with
-  | true, true => .statefulError retTy (.TCore "Error")
-  | true, false => .stateful retTy
-  | false, true => .error retTy (.TCore "Error")
-  | false, false => .pure retTy
-
 /-- Process a top-level FunctionDef and produce a NameInfo.function entry. -/
 private def resolveFunctionDef (name : Ann String SourceRange)
     (args : Python.arguments SourceRange)
-    (body : Ann (Array (Python.stmt SourceRange)) SourceRange)
+    (_body : Ann (Array (Python.stmt SourceRange)) SourceRange)
     (returns : Ann (Option (Python.expr SourceRange)) SourceRange) : (String × NameInfo) :=
   let params := extractParams args
   let defaults := extractDefaults args
   let retTy := extractReturnType returns
   let hasKw := hasKwargsArg args
-  let effectType := detectEffectType body.val retTy
   let sig : FuncSig := {
     name := name.val,
     params := params,
     defaults := defaults,
-    effectType := effectType,
+    returnType := retTy,
     hasKwargs := hasKw
   }
   (name.val, .function sig)
@@ -382,13 +352,11 @@ private def resolveClassDef (name : Ann String SourceRange)
           | [] => []
         let retTy := extractReturnType methodReturns
         let hasKw := hasKwargsArg methodArgs
-        let effectType := if methodName.val == "__init__" then .stateful retTy
-          else detectEffectType methodBody.val retTy
         let sig : FuncSig := {
           name := qualName,
           params := params,
           defaults := defaults,
-          effectType := effectType,
+          returnType := retTy,
           hasKwargs := hasKw
         }
         methodEntries := methodEntries ++ [(qualName, .function sig)]
@@ -530,9 +498,9 @@ def buildTypeEnv (stmts : Array (Python.stmt SourceRange)) : TypeEnv := Id.run d
                   if !names.contains impName.val then
                     names := names.insert impName.val (.function {
                       name := funcName,
-                      params := [],  -- Unknown params
+                      params := [],
                       defaults := [],
-                      effectType := .pure (.TCore "Any"),
+                      returnType := .TCore "Any",
                       hasKwargs := false
                     })
         | none => pure ()
@@ -557,39 +525,6 @@ def buildTypeEnv (stmts : Array (Python.stmt SourceRange)) : TypeEnv := Id.run d
               names := names.insert n info
           | _ => pure ()
     | _ => pure ()
-  -- Propagate statefulness: any function that calls a class constructor OR
-  -- calls a stateful function is itself stateful (object construction = heap allocation)
-  -- Collect all function bodies (top-level + nested in If blocks)
-  let allFuncBodies : List (String × Array (Python.stmt SourceRange)) := Id.run do
-    let mut result : List (String × Array (Python.stmt SourceRange)) := []
-    for stmt in stmts do
-      match stmt with
-      | .FunctionDef _ n _ body _ _ _ _ => result := result ++ [(n.val, body.val)]
-      | .If _ _ ifBody ifElse =>
-        for s in ifBody.val do match s with
-          | .FunctionDef _ n _ body _ _ _ _ => result := result ++ [(n.val, body.val)]
-          | _ => pure ()
-        for s in ifElse.val do match s with
-          | .FunctionDef _ n _ body _ _ _ _ => result := result ++ [(n.val, body.val)]
-          | _ => pure ()
-      | _ => pure ()
-    result
-  for (funcName, info) in names.toList do
-    match info with
-    | .function sig => match sig.effectType with
-      | .pure retTy =>
-        let callsClass := match allFuncBodies.find? (·.1 == funcName) with
-          | some (_, body) => body.any fun s => match s with
-            | .Assign _ _ (.Call _ (.Name _ callee _) _ _) _ =>
-              match names[callee.val]? with | some (.class_ _ _) => true | _ => false
-            | .Expr _ (.Call _ (.Name _ callee _) _ _) =>
-              match names[callee.val]? with | some (.class_ _ _) => true | _ => false
-            | _ => false
-          | none => false
-        if callsClass then
-          names := names.insert funcName (.function { sig with effectType := .stateful retTy })
-      | _ => pure ()
-    | _ => pure ()
   return { names := names, classFields := classFields,
            overloadTable := {}, builtinMap := defaultBuiltinMap }
 
@@ -599,90 +534,90 @@ def buildTypeEnv (stmts : Array (Python.stmt SourceRange)) : TypeEnv := Id.run d
     These are the operations that Python's operators and builtins map to. -/
 def preludeSignatures : List (String × FuncSig) := [
   -- Arithmetic operators
-  ("PAdd", { name := "PAdd", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PSub", { name := "PSub", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PMul", { name := "PMul", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PDiv", { name := "PDiv", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PFloorDiv", { name := "PFloorDiv", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PMod", { name := "PMod", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PPow", { name := "PPow", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("PAdd", { name := "PAdd", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PSub", { name := "PSub", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PMul", { name := "PMul", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PDiv", { name := "PDiv", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PFloorDiv", { name := "PFloorDiv", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PMod", { name := "PMod", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PPow", { name := "PPow", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
   -- Bitwise operators
-  ("PBitAnd", { name := "PBitAnd", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PBitOr", { name := "PBitOr", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PBitXor", { name := "PBitXor", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PLShift", { name := "PLShift", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PRShift", { name := "PRShift", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("PBitAnd", { name := "PBitAnd", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PBitOr", { name := "PBitOr", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PBitXor", { name := "PBitXor", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PLShift", { name := "PLShift", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PRShift", { name := "PRShift", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
   -- Comparison operators
-  ("PEq", { name := "PEq", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PNEq", { name := "PNEq", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PLt", { name := "PLt", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PLe", { name := "PLe", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PGt", { name := "PGt", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PGe", { name := "PGe", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PIn", { name := "PIn", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PNotIn", { name := "PNotIn", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PIs", { name := "PIs", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PIsNot", { name := "PIsNot", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("PEq", { name := "PEq", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PNEq", { name := "PNEq", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PLt", { name := "PLt", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PLe", { name := "PLe", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PGt", { name := "PGt", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PGe", { name := "PGe", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PIn", { name := "PIn", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PNotIn", { name := "PNotIn", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PIs", { name := "PIs", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PIsNot", { name := "PIsNot", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
   -- Logical/unary operators
-  ("PAnd", { name := "PAnd", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("POr", { name := "POr", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PNot", { name := "PNot", params := [("operand", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PNeg", { name := "PNeg", params := [("operand", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PPos", { name := "PPos", params := [("operand", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("PInvert", { name := "PInvert", params := [("operand", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("PAnd", { name := "PAnd", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("POr", { name := "POr", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PNot", { name := "PNot", params := [("operand", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PNeg", { name := "PNeg", params := [("operand", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PPos", { name := "PPos", params := [("operand", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("PInvert", { name := "PInvert", params := [("operand", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
   -- Coercion functions (elaboration inserts these)
-  ("from_int", { name := "from_int", params := [("value", .TInt)], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("from_str", { name := "from_str", params := [("value", .TString)], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("from_bool", { name := "from_bool", params := [("value", .TBool)], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("from_float", { name := "from_float", params := [("value", .TFloat64)], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("from_Composite", { name := "from_Composite", params := [("value", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("from_int", { name := "from_int", params := [("value", .TInt)], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("from_str", { name := "from_str", params := [("value", .TString)], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("from_bool", { name := "from_bool", params := [("value", .TBool)], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("from_float", { name := "from_float", params := [("value", .TFloat64)], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("from_Composite", { name := "from_Composite", params := [("value", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
   -- Downcast functions
-  ("Any_to_bool", { name := "Any_to_bool", params := [("value", .TCore "Any")], defaults := [none], effectType := .pure (.TBool), hasKwargs := false }),
-  ("Any..as_int!", { name := "Any..as_int!", params := [("value", .TCore "Any")], defaults := [none], effectType := .pure (.TInt), hasKwargs := false }),
-  ("Any..as_string!", { name := "Any..as_string!", params := [("value", .TCore "Any")], defaults := [none], effectType := .pure (.TString), hasKwargs := false }),
+  ("Any_to_bool", { name := "Any_to_bool", params := [("value", .TCore "Any")], defaults := [none], returnType := .TBool, hasKwargs := false }),
+  ("Any..as_int!", { name := "Any..as_int!", params := [("value", .TCore "Any")], defaults := [none], returnType := .TInt, hasKwargs := false }),
+  ("Any..as_string!", { name := "Any..as_string!", params := [("value", .TCore "Any")], defaults := [none], returnType := .TString, hasKwargs := false }),
   -- Collection constructors: use .TCore "ListAny"/.TCore "DictStrAny" for correct
   -- type annotations in ANF bindings. Elaboration's isSubtype treats same-named
   -- TCore types as equal, so no spurious coercions are inserted between ListAny values.
-  ("ListAny_nil", { name := "ListAny_nil", params := [], defaults := [], effectType := .pure (.TCore "ListAny"), hasKwargs := false }),
-  ("ListAny_cons", { name := "ListAny_cons", params := [("head", .TCore "Any"), ("tail", .TCore "ListAny")], defaults := [none, none], effectType := .pure (.TCore "ListAny"), hasKwargs := false }),
-  ("DictStrAny_empty", { name := "DictStrAny_empty", params := [], defaults := [], effectType := .pure (.TCore "DictStrAny"), hasKwargs := false }),
-  ("DictStrAny_cons", { name := "DictStrAny_cons", params := [("key", .TString), ("val", .TCore "Any"), ("tail", .TCore "DictStrAny")], defaults := [none, none, none], effectType := .pure (.TCore "DictStrAny"), hasKwargs := false }),
-  ("from_ListAny", { name := "from_ListAny", params := [("list", .TCore "ListAny")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("from_DictStrAny", { name := "from_DictStrAny", params := [("dict", .TCore "DictStrAny")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("from_None", { name := "from_None", params := [], defaults := [], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("ListAny_nil", { name := "ListAny_nil", params := [], defaults := [], returnType := .TCore "ListAny", hasKwargs := false }),
+  ("ListAny_cons", { name := "ListAny_cons", params := [("head", .TCore "Any"), ("tail", .TCore "ListAny")], defaults := [none, none], returnType := .TCore "ListAny", hasKwargs := false }),
+  ("DictStrAny_empty", { name := "DictStrAny_empty", params := [], defaults := [], returnType := .TCore "DictStrAny", hasKwargs := false }),
+  ("DictStrAny_cons", { name := "DictStrAny_cons", params := [("key", .TString), ("val", .TCore "Any"), ("tail", .TCore "DictStrAny")], defaults := [none, none, none], returnType := .TCore "DictStrAny", hasKwargs := false }),
+  ("from_ListAny", { name := "from_ListAny", params := [("list", .TCore "ListAny")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("from_DictStrAny", { name := "from_DictStrAny", params := [("dict", .TCore "DictStrAny")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("from_None", { name := "from_None", params := [], defaults := [], returnType := .TCore "Any", hasKwargs := false }),
   -- Legacy collection constructors (for backward compatibility)
-  ("List_new", { name := "List_new", params := [], defaults := [], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("Dict_new", { name := "Dict_new", params := [], defaults := [], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("Tuple_new", { name := "Tuple_new", params := [], defaults := [], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("List_new", { name := "List_new", params := [], defaults := [], returnType := .TCore "Any", hasKwargs := false }),
+  ("Dict_new", { name := "Dict_new", params := [], defaults := [], returnType := .TCore "Any", hasKwargs := false }),
+  ("Tuple_new", { name := "Tuple_new", params := [], defaults := [], returnType := .TCore "Any", hasKwargs := false }),
   -- Subscript / slice
-  ("Any_get", { name := "Any_get", params := [("collection", .TCore "Any"), ("key", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("Get", { name := "Get", params := [("collection", .TCore "Any"), ("key", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("Slice_new", { name := "Slice_new", params := [("start", .TCore "Any"), ("stop", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("Any_get", { name := "Any_get", params := [("collection", .TCore "Any"), ("key", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("Get", { name := "Get", params := [("collection", .TCore "Any"), ("key", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("Slice_new", { name := "Slice_new", params := [("start", .TCore "Any"), ("stop", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
   -- String operations
-  ("StrConcat", { name := "StrConcat", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("ToString", { name := "ToString", params := [("value", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("to_string_any", { name := "to_string_any", params := [("value", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("StrConcat", { name := "StrConcat", params := [("left", .TCore "Any"), ("right", .TCore "Any")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("ToString", { name := "ToString", params := [("value", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("to_string_any", { name := "to_string_any", params := [("value", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
   -- Error handling: isError checks Error values, exception wraps Error into Any.
   -- Error constructors all take a string message and produce Error.
-  ("isError", { name := "isError", params := [("e", .TCore "Error")], defaults := [none], effectType := .pure (.TBool), hasKwargs := false }),
-  ("NoError", { name := "NoError", params := [], defaults := [], effectType := .pure (.TCore "Error"), hasKwargs := false }),
-  ("exception", { name := "exception", params := [("e", .TCore "Error")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("TypeError", { name := "TypeError", params := [("msg", .TString)], defaults := [none], effectType := .pure (.TCore "Error"), hasKwargs := false }),
-  ("AttributeError", { name := "AttributeError", params := [("msg", .TString)], defaults := [none], effectType := .pure (.TCore "Error"), hasKwargs := false }),
-  ("AssertionError", { name := "AssertionError", params := [("msg", .TString)], defaults := [none], effectType := .pure (.TCore "Error"), hasKwargs := false }),
-  ("UnimplementedError", { name := "UnimplementedError", params := [("msg", .TString)], defaults := [none], effectType := .pure (.TCore "Error"), hasKwargs := false }),
-  ("UndefinedError", { name := "UndefinedError", params := [("msg", .TString)], defaults := [none], effectType := .pure (.TCore "Error"), hasKwargs := false }),
-  ("IndexError", { name := "IndexError", params := [("msg", .TString)], defaults := [none], effectType := .pure (.TCore "Error"), hasKwargs := false }),
-  ("RePatternError", { name := "RePatternError", params := [("msg", .TString)], defaults := [none], effectType := .pure (.TCore "Error"), hasKwargs := false }),
+  ("isError", { name := "isError", params := [("e", .TCore "Error")], defaults := [none], returnType := .TBool, hasKwargs := false }),
+  ("NoError", { name := "NoError", params := [], defaults := [], returnType := .TCore "Error", hasKwargs := false }),
+  ("exception", { name := "exception", params := [("e", .TCore "Error")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("TypeError", { name := "TypeError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasKwargs := false }),
+  ("AttributeError", { name := "AttributeError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasKwargs := false }),
+  ("AssertionError", { name := "AssertionError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasKwargs := false }),
+  ("UnimplementedError", { name := "UnimplementedError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasKwargs := false }),
+  ("UndefinedError", { name := "UndefinedError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasKwargs := false }),
+  ("IndexError", { name := "IndexError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasKwargs := false }),
+  ("RePatternError", { name := "RePatternError", params := [("msg", .TString)], defaults := [none], returnType := .TCore "Error", hasKwargs := false }),
   -- Special
-  ("None", { name := "None", params := [], defaults := [], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("hasNext", { name := "hasNext", params := [("iter", .TCore "Any")], defaults := [none], effectType := .pure (.TBool), hasKwargs := false }),
-  ("next", { name := "next", params := [("iter", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("__enter__", { name := "__enter__", params := [("ctx", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("__exit__", { name := "__exit__", params := [("ctx", .TCore "Any")], defaults := [none], effectType := .pure (.TCore "Any"), hasKwargs := false }),
-  ("call", { name := "call", params := [], defaults := [], effectType := .pure (.TCore "Any"), hasKwargs := false }),
+  ("None", { name := "None", params := [], defaults := [], returnType := .TCore "Any", hasKwargs := false }),
+  ("hasNext", { name := "hasNext", params := [("iter", .TCore "Any")], defaults := [none], returnType := .TBool, hasKwargs := false }),
+  ("next", { name := "next", params := [("iter", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("__enter__", { name := "__enter__", params := [("ctx", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("__exit__", { name := "__exit__", params := [("ctx", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
+  ("call", { name := "call", params := [], defaults := [], returnType := .TCore "Any", hasKwargs := false }),
   -- timedelta: both params are optional (default None per prelude requires)
-  ("timedelta_func", { name := "timedelta_func", params := [("days", .TCore "Any"), ("hours", .TCore "Any")], defaults := [some ⟨.Hole, #[]⟩, some ⟨.Hole, #[]⟩], effectType := .error (.TCore "Any") (.TCore "Error"), hasKwargs := false })
+  ("timedelta_func", { name := "timedelta_func", params := [("days", .TCore "Any"), ("hours", .TCore "Any")], defaults := [some ⟨.Hole, #[]⟩, some ⟨.Hole, #[]⟩], returnType := .TCore "Any", hasKwargs := false })
 ]
 
 /-- Build the prelude TypeEnv containing all builtin operation signatures. -/
@@ -734,8 +669,7 @@ def TypeEnv.withRuntimeProgram (env : TypeEnv) (runtime : Laurel.Program) : Type
         | [out] => out.type.val
         | _ => HighType.TCore "Any"
       let defaults := params.map fun _ => (some (⟨StmtExpr.Hole, #[]⟩ : StmtExprMd))
-      let effectType := EffectType.pure retTy
-      let sig : FuncSig := { name := procName, params, defaults, effectType, hasKwargs := false }
+      let sig : FuncSig := { name := procName, params, defaults, returnType := retTy, hasKwargs := false }
       names := names.insert procName (.function sig)
   return { env with names := names }
 
@@ -757,7 +691,7 @@ def TypeEnv.mergeSpecs (env : TypeEnv)
       name := procName,
       params := params,
       defaults := defaults,
-      effectType := .pure retTy,
+      returnType := retTy,
       hasKwargs := false
     }
     names := names.insert procName (.function sig)
@@ -786,7 +720,7 @@ def TypeEnv.mergeSpecsWithErrors (env : TypeEnv)
       name := procName,
       params := params,
       defaults := defaults,
-      effectType := .pure retTy,
+      returnType := retTy,
       hasKwargs := false
     }
     names := names.insert procName (.function sig)

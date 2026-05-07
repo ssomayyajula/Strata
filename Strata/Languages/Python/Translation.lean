@@ -566,7 +566,7 @@ partial def translateFunction (s : Python.stmt SourceRange)
       pure (selfParam :: renamedParams, copies)
     else pure (allParams, [])
     let returnType ← match (← lookupName procName) with
-      | some (.function sig) => pure sig.effectType.resultType | _ => pure (.TCore "Any")
+      | some (.function sig) => pure sig.returnType | _ => pure (.TCore "Any")
     let outputs := [({ name := Identifier.mk "LaurelResult" none, type := mkTypeDefault returnType } : Parameter)]
     let inputNames := inputs.map (·.name.text)
     let originalParamNames := allParams.map (·.name.text)
