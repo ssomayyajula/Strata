@@ -1,83 +1,152 @@
-# Implementation Plan
+# Implementation Plan: Remove EffectType, Implement On-Demand Grade Discovery
 
-## Key Insight: ElabResult is dependent on Grade
+## Threat
 
+If any commit violates the architecture, doesn't build, or regresses: delete everything.
+No `git add -A`. No `git add .`. Only named files.
+
+## Overview
+
+Remove `EffectType` from Resolution. The elaborator discovers grades on-demand
+by elaborating callee bodies. Resolution provides only: name, params, defaults,
+returnType, hasKwargs.
+
+## Step 1: Change FuncSig (NameResolution.lean)
+
+**Remove:**
 ```lean
-def ElabResult (g : Grade) : Type :=
-  match g with
-  | .pure    => FGLProducer
-  | .err     => FGLProducer
-  | .heap    => FGLValue → ElabM FGLProducer
-  | .heapErr => FGLValue → ElabM FGLProducer
+inductive EffectType where
+  | pure (ty : HighType)
+  | error (resultTy : HighType) (errTy : HighType)
+  | stateful (resultTy : HighType)
+  | statefulError (resultTy : HighType) (errTy : HighType)
+
+def EffectType.resultType : EffectType → HighType
 ```
 
-- synthProducer returns: `(g : Grade) × LowType × ElabResult g`
-- checkProducer takes grade as input, returns: `ElabResult g`
-- Errors: output-only (effectfulCall with [rv, ev] built at synth time)
-- Heap: closure waiting for heap value (applied at sequencing point)
-
-## The Algorithm
-
-1. Entry: `checkProducer body returnType grade` where grade is discovered on-demand
-2. On-demand callee grade: at call site, elaborate callee body trying grades, store in Γ
-3. Total: bidirectional algorithm never fails on well-typed Laurel
-4. Failure ONLY during on-demand callee grade discovery (trying grades)
-5. ElabState = { freshCounter } only
-6. Return type flows DOWN via check mode (parameter, not state)
-7. No heap parameter threading — heap lives inside closures
-
-## The To-Rule (Sequencing)
-
-```
-M to x. N ⇐ A & e:
-  1. Synth M → (d, B, result_d : ElabResult d)
-  2. Apply result_d:
-     - if d ∈ {pure, err}: result_d IS the FGLProducer (use directly)
-     - if d ∈ {heap, heapErr}: result_d is closure, apply to current heap
-  3. Bind the produced result in HOAS
-  4. Compute d \ e (residual)
-  5. Check N ⇐ A & (d \ e), passing new heap if d produced one
-```
-
-## Monad
-
+**Change FuncSig:**
 ```lean
-abbrev ElabM := ReaderT TypeEnv (StateT ElabState Option)
--- Option for on-demand callee grade discovery (tryGrades can fail)
--- Main elaboration is total on well-typed input (never hits none)
+-- Before:
+structure FuncSig where
+  name : String
+  params : List (String × HighType)
+  defaults : List (Option StmtExprMd)
+  effectType : EffectType
+  hasKwargs : Bool
 
+-- After:
+structure FuncSig where
+  name : String
+  params : List (String × HighType)
+  defaults : List (Option StmtExprMd)
+  returnType : HighType
+  hasKwargs : Bool
+```
+
+**Remove:** `detectEffectType`, `touchesHeap`, `detectErrorOutput`, all propagation
+code in `buildTypeEnv` (the loop that marks functions stateful).
+
+**Update:** `resolveFunctionDef` and `resolveClassDef` to use `returnType` directly.
+
+**Update prelude signatures:** Replace `effectType := .pure (.TCore "Any")` with
+`returnType := .TCore "Any"` for all entries in `preludeSignatures`.
+
+**Update `withRuntimeProgram`:** Replace `effectType := EffectType.pure retTy` with
+`returnType := retTy`.
+
+## Step 2: Update Translation.lean
+
+**One change:** Line 569:
+```lean
+-- Before:
+| some (.function sig) => pure sig.effectType.resultType
+-- After:
+| some (.function sig) => pure sig.returnType
+```
+
+And any other `sig.effectType.resultType` → `sig.returnType`.
+
+## Step 3: Update Elaborate.lean
+
+**Remove:** All `match s.effectType with` dispatching.
+
+**Add to ElabState:**
+```lean
 structure ElabState where
   freshCounter : Nat := 0
+  heapVar : Option String := none
+  gradeOf : Std.HashMap String Grade := {}   -- discovered callee grades
+  program : Laurel.Program                    -- for on-demand body lookup
 ```
 
-## Synth vs Check Dispatch
+Wait — the architecture says grade is part of the procedure's TYPE, stored
+alongside its type info. So `gradeOf` should be in ElabState. And `program`
+is needed to find callee bodies for on-demand elaboration.
 
-SYNTH (produce type + grade + ElabResult):
-- effectful call (grade from callee)
-- .New (grade = heap)
-- assign (grade = pure)
-- assert/assume (grade = pure)
-- while (grade from body)
+**Add `discoverCalleeGrade`:**
+```lean
+def discoverCalleeGrade (callee : String) : ElabM Grade := do
+  -- Check if already discovered
+  match (← get).gradeOf[callee]? with
+  | some g => pure g
+  | none =>
+    -- Find body in program
+    let proc := (← get).program.staticProcedures.find? (·.name.text == callee)
+    match proc with
+    | some p => match p.body with
+      | .Transparent bodyExpr =>
+        -- Try grades smallest to largest
+        let grade := tryGrades bodyExpr [.pure, .err, .heap, .heapErr]
+        modify fun s => { s with gradeOf := s.gradeOf.insert callee grade }
+        pure grade
+      | _ => pure .pure
+    | none => pure .pure  -- unknown callee (prelude) treated as pure
+```
 
-CHECK (receive type + grade, return ElabResult):
-- if/else (both branches check at same grade)
-- var-bind (body checks at same grade)
-- M to x. N (M synths, N checks at residual grade)
-- return (check value against type, grade admissible)
-- subsumption fallback (synth, then d ≤ e admissible)
+**Replace effectType dispatch in synthProducer:**
+```lean
+-- Before:
+match s.effectType with
+| .pure _ => ...
+| .error resultTy _ => mkErrorCall ...
+| .stateful resultTy => mkHeapCall ...
+| .statefulError resultTy _ => mkHeapErrorCall ...
 
-## Implementation Order
+-- After:
+let grade ← discoverCalleeGrade callee.text
+match grade with
+| .pure => ... (value call, use synthValue)
+| .err => mkErrorCall callee.text checkedArgs s.returnType fun rv => cont
+| .heap => mkHeapCall callee.text checkedArgs s.returnType fun rv => cont
+| .heapErr => mkHeapErrorCall callee.text checkedArgs s.returnType fun rv => cont
+```
 
-1. Grade + ConventionWitness + residual
-2. Types + FGL terms
-3. ElabState + ElabM (Option-based)
-4. HOAS (mkEffectfulCall, mkVarDecl)
-5. Subsumption table
-6. ElabResult type family
-7. synthValue / checkValue
-8. synthProducer (returns Sigma grade + ElabResult)
-9. checkProducer (takes grade, returns ElabResult)
-10. elaborateBlock (sequences with residual, applies closures)
-11. On-demand callee grade discovery
-12. fullElaborate + projection
-13. Build + test
+**Update fullElaborate:**
+- Initialize `ElabState` with `program` field
+- After elaborating all procs, read `gradeOf` to determine which need heap params
+- Rewrite signatures for heap-grade procs
+
+## Step 4: Build + Test
+
+- `lake build` must pass
+- Run `diff_test.sh compare pyAnalyzeV2`
+- Must not regress from current 19 passing
+- Heap tests may improve (on-demand discovery finds correct grades)
+
+## Step 5: Commit
+
+Only commit if build passes and tests don't regress. Commit only named files:
+```
+git add Strata/Languages/Python/NameResolution.lean
+git add Strata/Languages/Python/Translation.lean
+git add Strata/Languages/FineGrainLaurel/Elaborate.lean
+```
+
+## Execution Order
+
+1. NameResolution: remove EffectType, add returnType, fix all usages
+2. Translation: sig.returnType
+3. Elaborate: add gradeOf + program to state, discoverCalleeGrade, remove effectType dispatch
+4. Build
+5. Test
+6. Commit (named files only)
