@@ -1350,6 +1350,7 @@ partial def translateClass (s : Python.stmt SourceRange)
 partial def translateModule (stmts : Array (Python.stmt SourceRange)) : TransM Laurel.Program := do
   let mut procedures : List Procedure := []
   let mut types : List TypeDefinition := []
+  let mut otherStmts : List (Python.stmt SourceRange) := []
 
   for stmt in stmts do
     match stmt with
@@ -1360,7 +1361,37 @@ partial def translateModule (stmts : Array (Python.stmt SourceRange)) : TransM L
         if let some (typeDef, classMethods) ← translateClass stmt then
           types := types ++ [typeDef]
           procedures := procedures ++ classMethods
-    | _ => pure ()  -- Other top-level statements handled by pipeline
+    | _ => otherStmts := otherStmts ++ [stmt]
+
+  -- Wrap module-level statements in __main__ procedure (per ARCHITECTURE.md)
+  if !otherStmts.isEmpty then
+    let sr : SourceRange := default
+    -- Inject __name__ := "__main__"
+    let nameDecl ← mkExpr sr (.LocalVariable "__name__"
+      (mkTypeDefault (.TString)) (some (mkExprDefault (.LiteralString "__main__"))))
+    -- Translate the module-level statements
+    let bodyStmts ← translateStmtList otherStmts
+    -- Scope hoisting for __main__ body
+    let paramNames : List String := []
+    let scopeDecls ← emitScopeDeclarations sr otherStmts.toArray paramNames
+    -- maybe_except variable
+    let noErrorInit ← mkExpr sr (.StaticCall "NoError" [])
+    let maybeExceptDecl ← mkExpr sr
+      (.LocalVariable "maybe_except" (mkTypeDefault (.TCore "Error")) (some noErrorInit))
+    let allStmts := [nameDecl] ++ scopeDecls ++ [maybeExceptDecl] ++ bodyStmts
+    let bodyBlock ← mkExpr sr (.Block allStmts none)
+    let mainProc : Procedure := {
+      name := Identifier.mk "__main__" none,
+      inputs := [],
+      outputs := [],
+      preconditions := [],
+      determinism := .deterministic none,
+      decreases := none,
+      isFunctional := false,
+      body := .Transparent bodyBlock,
+      md := #[]
+    }
+    procedures := procedures ++ [mainProc]
 
   return {
     staticProcedures := procedures,
