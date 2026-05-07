@@ -433,6 +433,7 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
     let targetTy ← match target.val with
       | .Identifier id => match (← lookupEnv id.text) with | some (.variable t) => pure t | _ => pure (.TCore "Any")
       | _ => pure (.TCore "Any")
+    let needsDecl := false
     let (tv, _) ← synthValue target
     match value.val with
     | .Hole false _ =>
@@ -452,8 +453,13 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
         let freshH ← freshVar "heap"
         modify fun s => { s with heapVar := some freshH }
         extendEnv freshH .THeap do
-          let after ← elabRest rest grade
-          pure (.varDecl freshH (.TCore "Heap") (some newHeap) (.assign tv obj after))
+          if needsDecl then
+            let name := match target.val with | .Identifier id => id.text | _ => "_x"
+            let cont ← extendEnv name (.UserDefined (Identifier.mk classId.text none)) (elabRest rest grade)
+            pure (.varDecl freshH (.TCore "Heap") (some newHeap) (.varDecl name (.TCore "Composite") (some obj) cont))
+          else do
+            let after ← elabRest rest grade
+            pure (.varDecl freshH (.TCore "Heap") (some newHeap) (.assign tv obj after))
       | none => failure
     | .StaticCall callee args =>
       let sig ← lookupFuncSig callee.text
@@ -462,24 +468,28 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
         | none => do let ca ← args.mapM fun a => checkValue a (.TCore "Any"); pure (ca, .TCore "Any")
       let callGrade ← discoverGrade callee.text
       guard (Grade.leq callGrade grade)
+      let assignOrDecl (val : FGLValue) : ElabM FGLProducer := do
+        if needsDecl then
+          let name := match target.val with | .Identifier id => id.text | _ => "_x"
+          mkVarDecl name (eraseType targetTy) (some val) fun _ => elabRest rest grade
+        else do let after ← elabRest rest grade; pure (.assign tv val after)
       match callGrade with
       | .pure =>
         let cv := FGLValue.staticCall callee.text checkedArgs
         let coerced := applySubsume cv (eraseType retHty) (eraseType targetTy)
-        let after ← elabRest rest grade
-        pure (.assign tv coerced after)
+        assignOrDecl coerced
       | .err =>
         mkErrorCall callee.text checkedArgs retHty fun rv => do
           let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
-          let after ← elabRest rest grade; pure (.assign tv coerced after)
+          assignOrDecl coerced
       | .heap =>
         mkHeapCall callee.text checkedArgs retHty fun rv => do
           let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
-          let after ← elabRest rest grade; pure (.assign tv coerced after)
+          assignOrDecl coerced
       | .heapErr =>
         mkHeapErrorCall callee.text checkedArgs retHty fun rv => do
           let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
-          let after ← elabRest rest grade; pure (.assign tv coerced after)
+          assignOrDecl coerced
     | .FieldSelect obj field =>
       guard (Grade.leq .heap grade)
       let (ov, objTy) ← synthValue obj
@@ -495,16 +505,22 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
         let read := FGLValue.staticCall "readField" [.var hv, compositeObj, .staticCall qualifiedName []]
         let unboxed := FGLValue.staticCall (boxDestructorName fieldTy) [read]
         let coerced := applySubsume unboxed (eraseType fieldTy) (eraseType targetTy)
-        let after ← elabRest rest grade
-        pure (.assign tv coerced after)
+        if needsDecl then
+          let name := match target.val with | .Identifier id => id.text | _ => "_x"
+          mkVarDecl name (eraseType targetTy) (some coerced) fun _ => elabRest rest grade
+        else do let after ← elabRest rest grade; pure (.assign tv coerced after)
       | none =>
         let fv := FGLValue.fieldAccess ov field.text
         let after ← elabRest rest grade
         pure (.assign tv fv after)
     | _ =>
       let cv ← checkValue value targetTy
-      let after ← elabRest rest grade
-      pure (.assign tv cv after)
+      if needsDecl then
+        let name := match target.val with | .Identifier id => id.text | _ => "_x"
+        mkVarDecl name (eraseType targetTy) (some cv) fun _ => elabRest rest grade
+      else do
+        let after ← elabRest rest grade
+        pure (.assign tv cv after)
 
 -- discoverGrade: typing rules as oracle
 partial def discoverGrade (callee : String) : ElabM Grade := do
