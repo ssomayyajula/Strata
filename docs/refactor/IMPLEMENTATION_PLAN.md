@@ -183,54 +183,57 @@ in `program.types`. Heap analysis + fixpoint propagation for signature rewriting
 
 ## Execution Tasks
 
-### 1. Write `subsume` + `CoercionResult` + `eraseType` + `LowType`
+### Done (29/54 tests pass)
 
-Replace canUpcast/canNarrow/lowTypesEqual with the unified function.
-`lake build`.
+- [x] Unified subsume (CoercionResult, eraseType, LowType)
+- [x] synthValue (atoms + pure calls), checkValue (subsume)
+- [x] synthProducer, checkProducer (typing rules from architecture)
+- [x] Projection (trivial cata, precise types, Hole → none)
+- [x] fullElaborate (extend Γ with inputs+outputs)
+- [x] Holes absorbed into Assign/LocalVariable rules
+- [x] Translation: module-level code wrapped in __main__
+- [x] Fix extractParams (args field, not posonlyargs)
+- [x] Composite type declared (for prelude's from_Composite)
 
-### 2. Write `synthValue` (atoms + pure calls)
+### Remaining (23 regressions)
 
-Handle: Literal, Identifier, StaticCall (pure only), FieldSelect, New.
-Args checked via checkValue inline. No intermediate bindings.
-`lake build`.
+**Default params / arg count mismatch (~3 tests: multi_function, default_params, optional_param_default)**
 
-### 3. Write `checkValue`
+Resolution records params correctly now, but Translation's `resolveKwargs` fills
+defaults with `from_None`. When a function has default params and is called with
+fewer args, the arg count should match param count after defaults are filled.
+The mismatch may be that Resolution's param count includes all params but the
+call provides fewer (relying on defaults). Need to verify kwargs resolution works.
 
-Call synthValue, then `subsume`. Three outcomes handled.
-`lake build`.
+**Type checking errors in loops/control flow (~5 tests: break_continue, for_loop, loops, power, procedure_in_assert)**
 
-### 4. Write `synthProducer` (effectful calls + statements)
+Core type checking rejects our output. Need per-test diagnosis — likely issues
+with how loop bodies or nested control flow interacts with precise types.
+One known issue: for-loop havoc variables may need special handling after our
+Hole changes.
 
-Handle: StaticCall (hasErrorOutput), Assign, LocalVariable, IfThenElse,
-While, Assert, Assume, Block, Exit, Return.
-Extend Γ at binding sites.
-`lake build`.
+**Class/heap tests (~10 tests: all class_*, with_*, composite_return)**
 
-### 5. Write `checkProducer`
+Full heap implementation not done. Need: Field/Box/TypeTag generation,
+FieldSelect→readField, Assign FieldSelect→updateField, New→MkComposite with
+typeTag, signature rewriting with heap param threading.
 
-Structural rules: if (propagate C), var-bind (propagate C), M-to-x, return.
-Fallback: synth, bind, coerce bound value.
-`lake build`.
+**test_method_param_reassign regression (1 test)**
 
-### 6. Write projection (two-pass cata)
+Was passing, now fails after extractParams fix. The fix changed what params
+Resolution reports for this test — needs investigation.
 
-Pass 1: collect declarations. Pass 2: emit body. All vars Any. Hole for uninit.
-`lake build`.
+**PySpec/stub tests (~2 tests: foo_client_folder, invalid_client_type)**
 
-### 7. Write `fullElaborate` entry point
+These depend on PySpec stub loading which is out of scope (Phase 7).
 
-For each proc: extend Γ with params, elaborate body, project.
-Heap analysis + infrastructure. `lake build`.
+### Next steps (priority order)
 
-### 8. Fix heap infrastructure
-
-Composite with typeTag. Box single constructor. Correct procedure names.
-`lake build`.
-
-### 9. End-to-end validation
-
-`diff_test.sh compare pyAnalyzeV2`. Diagnose remaining failures against
-architecture. Target: match or exceed 12/54 from earlier attempt.
+1. Diagnose type checking errors in non-class tests (break_continue, for_loop, power, procedure_in_assert) — these should be fixable without heap work
+2. Fix default param / arg count mismatch
+3. Investigate test_method_param_reassign regression
+4. Full heap implementation (class tests)
+5. End-to-end validation: target 40+/54
 
 ---
 
