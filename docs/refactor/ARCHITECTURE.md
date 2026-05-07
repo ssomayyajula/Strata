@@ -127,17 +127,11 @@ signature. They share one output type. This is not a coincidence — they both a
 the same question ("what is this name?"), so they must produce the same answer type.
 
 ```lean
-inductive EffectType where
-  | pure (ty : HighType)                                     -- value-level call
-  | error (resultTy : HighType) (errTy : HighType)           -- error monad
-  | stateful (resultTy : HighType)                           -- heap state
-  | statefulError (resultTy : HighType) (errTy : HighType)   -- heap + error
-
 structure FuncSig where
   name : String
   params : List (String × HighType)
   defaults : List (Option StmtExprMd)   -- default values for optional params
-  effectType : EffectType               -- return type + effects (no boolean flags)
+  returnType : HighType                 -- declared return type from annotation
   hasKwargs : Bool                      -- does this accept **kwargs?
 
 structure TypeEnv where
@@ -162,7 +156,7 @@ inductive NameInfo where
 | Is `Foo` a class or a function? | `NameInfo.class_` vs `NameInfo.function` |
 | What are `Foo`'s fields? | `NameInfo.class_ _ fields` |
 | What are `f`'s parameter types and defaults? | `FuncSig.params`, `FuncSig.defaults` |
-| What effects does `f` have? | `FuncSig.effectType` (pure/error/stateful/statefulError) |
+| What is `f`'s return type? | `FuncSig.returnType` |
 | What does `boto3.client("iam")` resolve to? | `overloadTable["client"]["iam"]` → `"IAMClient"` |
 | What does `str(x)` map to in Laurel? | `builtinMap["str"]` → `"to_string_any"` |
 | What type is `obj` for `obj.method()` dispatch? | `NameInfo.variable ty` → use `ty` to qualify method |
@@ -486,64 +480,57 @@ but that's a verification concern. No bindings introduced by coercion.
 
 The CBV→FGCBV embedding (Levy 2003, Egger/Møgelberg/Staton 2014) makes ALL
 effects explicit by threading monadic state through the continuation structure.
-We already instantiate this for error (via `callWithError`). Heap is the SAME
+We already instantiate this for error (via `effectfulCall`). Heap is the SAME
 mechanism instantiated for the state monad: `T(A) = Heap → (A × Heap)`.
 
-Elaboration handles heap in the SAME walk as coercions and errors. When the
-elaborator encounters a stateful operation, it threads the heap variable through
-the CPS structure — exactly as it threads error variables. There is no separate
-"heap phase." Resolution's `EffectType` tells the elaborator which procedures
-are stateful; the elaborator reads this and acts accordingly.
+**Elaboration INFERS effects.** Resolution does NOT determine which procedures are
+stateful. Elaboration discovers this by processing procedures in DEPENDENCY ORDER:
+
+1. Build call graph from the Laurel program (post-Translation)
+2. Topologically sort (leaves first, callers later; SCCs as units)
+3. Elaborate each proc. If its body contains `.New`, `.FieldSelect`, or calls to
+   an already-elaborated stateful proc → this proc is stateful
+4. Record the discovered effect for each proc. Callers see callees' effects.
+
+This is type INFERENCE, not type CHECKING. The effect annotation emerges from
+the elaboration walk. Resolution only provides parameter types and return types.
 
 **Heap operations (state access operations in the sense of Møgelberg & Staton):**
 
-| Operation | Source (Laurel) | Elaborated (FGL) |
-|-----------|-----------------|------------------|
-| Allocate | `.New classId` | `increment($heap)` → new heap; `MkComposite($heap_nextRef, TypeTag)` → result |
-| Field read | `.FieldSelect obj field` | `readField($heap, obj, field)` → Box; unwrap via `Box..AnyVal!` |
-| Field write | `Assign [FieldSelect obj field] val` | `$heap := updateField($heap, obj, field, Box..Any(val))` |
-| Call stateful | `f(args)` where f is `.stateful` | `($result, $heap) := f($heap, args)` |
+| Operation | Source (Laurel) | How elaboration recognizes it | Elaborated (FGL) |
+|-----------|-----------------|-------------------------------|------------------|
+| Allocate | `.New classId` | Syntactic (`.New` node) | `increment($heap)` → new heap; `MkComposite(ref, TypeTag)` → result |
+| Field read | `.FieldSelect obj field` | Syntactic (`.FieldSelect` node) | `readField($heap, obj, field)` → Box; unwrap via `Box..AnyVal!` |
+| Field write | `Assign [FieldSelect obj field] val` | Syntactic (`.FieldSelect` in assign target) | `$heap := updateField($heap, obj, field, Box..Any(val))` |
+| Call stateful | `f(args)` where f was elaborated as stateful | Lookup in effect map | `($result, $heap) := f($heap, args)` |
 
 **Heap threading in the CPS structure:**
 
-The heap variable `$heap` is threaded linearly through producers. Each stateful
-operation consumes the current heap and produces a new one. The continuation
-receives the updated heap. This is identical to how `callWithError` threads
-error variables — it's the same M-to-x binding, just for a different effect.
+The heap variable `$heap` flows through the HOAS closures as a parameter — same
+as every other value. Each effectful call that touches state produces a new heap
+as one of its outputs. The continuation receives it via `mkEffectfulCall`'s
+closure. No mutable state in the elaborator. The heap IS a bound variable.
 
 ```
--- Allocation (New):
-synthProducer (.New classId) =
-  let heap' = increment($heap)
-  let ref = Heap..nextReference!($heap)
-  let obj = MkComposite(ref, classId_TypeTag())
-  $heap := heap'
-  return obj
+-- Allocation (New): produces (obj, newHeap)
+mkEffectfulCall "alloc" [$heap]
+  [("heap", THeap), ("obj", Composite)]
+  fun [heap', obj] => ... continuation uses heap' and obj ...
 
--- Field read (pure given explicit heap):
-synthValue (.FieldSelect obj field) =
-  Box..AnyVal!(readField($heap, obj, qualifiedField))
-
--- Field write:
-elaborateStmt (Assign [FieldSelect obj field] val) cont =
-  $heap := updateField($heap, obj, qualifiedField, Box..Any(from_T(val)))
-  cont
-
--- Call to stateful procedure:
-elaborateStmt (StaticCall f args) cont  [where f.effectType = .stateful] =
-  ($result, $heap) := f($heap, coerced_args)
-  cont
+-- Call to stateful procedure: produces (newHeap, result)
+mkEffectfulCall f [$heap, args...]
+  [("heap", THeap), ("result", resultTy)]
+  fun [heap', rv] => ... continuation uses heap' for next operation ...
 ```
 
-**The heap variable is introduced at the procedure level.** For procedures with
-`.stateful` or `.statefulError` effect types, elaboration adds `$heap : Heap` as
-an input parameter and `$heap : Heap` as an output parameter. The procedure body
-threads `$heap` through all stateful operations.
+**The heap variable is introduced at the procedure level.** When elaboration
+determines a procedure is stateful, it adds `$heap_in : Heap` as input and
+`$heap : Heap` as output. The body starts with `$heap := $heap_in` and
+threads `$heap` through all stateful operations via the CPS structure.
 
-**Transitivity:** If procedure A calls stateful procedure B, then A must also
-thread the heap (even if A doesn't directly touch it). Resolution's `EffectType`
-already encodes this — a procedure is `.stateful` if it OR any of its transitive
-callees touches the heap. The elaborator just reads this from Γ.
+**No propagation in Resolution.** Resolution does NOT compute "which procs are
+stateful." Elaboration discovers this bottom-up during the dependency-ordered walk.
+A proc is stateful if its elaborated body contains heap operations. Period.
 
 ### Metadata
 
@@ -1021,21 +1008,19 @@ nothing to re-resolve because the derivation tree IS the resolution.
 ### Effect-Passing: One Walk, All Effects
 
 All effects are handled by the same mechanism: the CBV→FGCBV embedding threads
-monadic state through the continuation structure. There is ONE elaboration walk.
-It handles coercions, errors, AND heap simultaneously:
+monadic state through the continuation structure. There is ONE elaboration walk
+(per procedure, in dependency order). It handles coercions, errors, AND heap:
 
-| Effect | What elaboration does |
-|---|---|
-| Coercions | Insert witness at CHECK boundary (subsume table) |
-| Exceptions | Thread error variable via `callWithError` |
-| Heap (state) | Thread `$heap` variable via state-passing |
+| Effect | How elaboration recognizes it | What it does |
+|---|---|---|
+| Coercions | Type mismatch at CHECK boundary | Insert witness (subsume table) |
+| Exceptions | Callee's elaborated signature has error output | Thread error via `effectfulCall` |
+| Heap (state) | `.New`, `.FieldSelect`, or callee already stateful | Thread `$heap` via `effectfulCall` |
 
-All three happen in the SAME bidirectional walk. The `EffectType` from Γ tells
-the elaborator which mechanism to use for each call:
-- `.pure` → value-level call, no threading
-- `.error` → thread error variable
-- `.stateful` → thread heap variable
-- `.statefulError` → thread both
+Elaboration INFERS which mechanism to use. For calls to already-elaborated procs,
+it reads the callee's discovered effect from the effect map. For `.New` and
+`.FieldSelect`, it recognizes them syntactically. No pre-computed EffectType
+from Resolution is needed.
 
 ---
 
@@ -1200,15 +1185,15 @@ emits `LocalVariable` declarations at function top because Γ says they exist th
 Translation emits calls with args in the order Γ's signature specifies. No runtime
 reordering needed — Γ already normalized it.
 
-#### Effect Signatures
+#### Effects (NOT determined by Resolution)
 
-| Question | Resolution answer |
-|---|---|
-| Does calling `f` produce an error output? | `FuncSig.hasErrorOutput` |
-| What exception types can `f` raise? | Encoded in FuncSig (from PySpec) |
+Resolution does NOT determine effects. It provides return types and parameter types.
+Elaboration INFERS effects during its dependency-ordered walk:
+- Error: elaboration discovers this when elaborating the callee (callee has error outputs)
+- Heap: elaboration discovers this when it sees `.New`/`.FieldSelect` in the callee's body
 
-Translation emits plain calls. Elaboration inserts the error-handling protocol
-(`prodCallWithError`) because Γ says the callee has an error output.
+Translation emits plain calls. Elaboration inserts effect handling based on what
+it discovered about the callee during the callee's own elaboration.
 
 #### Mutability
 
