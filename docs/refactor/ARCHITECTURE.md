@@ -57,9 +57,9 @@ Python AST + library stubs (both .python.st.ion)
 Python AST (user code only)
   ↓ [translate: source-to-source fold, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
-  ↓ [elaborate: effect-passing translation — coercions, errors, heap made explicit]
-e' : FineGrainLaurel.Program (enriched FGCBV — effects explicit)
-  ↓ [project: effect calculus → impure language (trivial cata)]
+  ↓ [elaborate: graded type-checking — coercions, errors, heap assigned grades]
+e' : GradedFineGrainLaurel.Program (GFGL — graded FGCBV, effects tracked by grades)
+  ↓ [project: graded effect calculus → impure language (trivial cata)]
 Laurel.Program (effects re-implicit, coercions/bindings as Laurel nodes, ready for Core)
   ↓ [Core translation]
 Core
@@ -255,10 +255,10 @@ If you find a decision point in translation, the design is wrong.
 
 ---
 
-## Elaboration (Effect-Passing Translation: Laurel → FineGrainLaurel)
+## Elaboration (Graded FGCBV Type-Checking: Laurel → FineGrainLaurel)
 
 **Input:** Laurel (impure CBV — effects implicit) + TypeEnv (= **Γ**)  
-**Output:** FineGrainLaurel (enriched FGCBV — effects explicit)
+**Output:** FineGrainLaurel (graded FGCBV — effects tracked by grades)
 
 ### The Unifying Principle
 
@@ -266,26 +266,123 @@ If you find a decision point in translation, the design is wrong.
 implicit in the syntax. `f(x)` might throw, read the heap, or need a coercion —
 you can't tell from the term alone.
 
-**FineGrainLaurel is an effect calculus.** Each effect has an explicit implementation.
-The effect structure is visible in the syntax.
+**FineGrainLaurel is a graded FGCBV** (McDermott 2025, "Grading call-by-push-value,
+explicitly and implicitly"). Every computation carries a *grade* that records its
+effects. The grade is an element of an ordered monoid `(E, ≤, 1, ·)`.
 
-**Elaboration is effect-passing translation:** it commits to an implementation
-for each implicit effect, making them explicit in the target calculus. The target
-is plain FGCBV (Levy 2003) — not enriched FGCBV. The only computation type is
-`↑A` (producer of A). The methodology of translating impure CBV to FGCBV via
-explicit effect passing follows Egger et al. 2014, but our target is simpler
-(no linear computation types).
+**Elaboration is type-checking in the graded system.** It assigns grades to
+computations and inserts coercions where subgrading is needed. The grade of a
+procedure body IS its effect type — computed from the inside out by the typing
+rules. There is no separate effect inference pass. The typing rules ARE the
+inference.
 
-| Implicit in Laurel | Explicit in FGL | Mechanism |
+### The Grade Monoid
+
+Our grades form the ordered monoid:
+
+```
+E = {1, err, heap, heap·err}
+
+1 ≤ err ≤ heap·err
+1 ≤ heap ≤ heap·err
+
+Multiplication:
+1 · e = e · 1 = e
+err · heap = heap · err = heap·err
+e · e = e  (idempotent — running two error ops is still error)
+```
+
+Each grade tracks WHICH effects a computation may perform:
+- `1` — pure (no effects)
+- `err` — may produce an error
+- `heap` — may read/write/allocate on the heap
+- `heap·err` — both
+
+### Graded FGCBV Typing Rules
+
+The computation typing judgment is:
+
+```
+Γ ⊢ M : τ & e
+```
+
+M is a computation that returns type τ with grade e. The rules:
+
+```
+───────────────────────────
+Γ ⊢ return V : τ & 1                            (return is pure)
+
+Γ ⊢ M : τ & d    Γ, x : τ ⊢ N : τ' & e
+──────────────────────────────────────────
+Γ ⊢ M to x. N : τ' & (d · e)                   (sequencing composes grades)
+
+op has grade d
+──────────────────────────────
+Γ ⊢ op(V) : τ & d                               (operation carries its grade)
+
+Γ ⊢ M : τ & d    d ≤ e
+────────────────────────────
+Γ ⊢ coerce_e M : τ & e                          (subgrading — proof-relevant)
+```
+
+### Effect Operations and Their Grades
+
+| Operation | Grade | What it does |
+|-----------|-------|--------------|
+| `from_int(v)`, `Any_to_bool(v)` | `1` | Coercion (pure, value-level) |
+| `PAdd(x, y)`, pure StaticCall | `1` | Pure function call |
+| `f(args)` where f has error output | `err` | May produce error |
+| `.New classId` | `heap` | Allocates on heap |
+| `.FieldSelect obj field` | `heap` | Reads from heap |
+| `Assign [FieldSelect obj f] v` | `heap` | Writes to heap |
+| `f(args)` where f is stateful | `heap` | Calls stateful proc |
+| `f(args)` where f is stateful+error | `heap·err` | Both effects |
+
+### Subgrading IS the Calling Convention
+
+The subgrading coercion `d ≤ e` is PROOF-RELEVANT — it tells you HOW to call
+a computation of grade `d` from a context of grade `e`:
+
+| Callee grade | Context grade | Calling convention (subgrading coercion) |
 |---|---|---|
-| Error (procedure may throw) | Error-passing: `A × Error` | `prodCallWithError` (true let-binding) |
-| Heap (field read/write, allocation) | State-passing: heap threaded as parameter | Signature rewriting + `readField`/`updateField` |
-| Type mismatch at boundary | Partial function calls | `from_int(v)`, `Any_to_bool(v)` (inline values) |
+| `1` | any | Value-level call. No binding needed. |
+| `err` | `err` or `heap·err` | Bind result + error: `[rv, ev] := f(args)` |
+| `heap` | `heap` or `heap·err` | Thread heap: `[heap', rv] := f(heap, args)` |
+| `heap·err` | `heap·err` | Thread heap + error: `[heap', rv, ev] := f(heap, args)` |
 
-Errors and heap are genuine effects made explicit via effect-passing translation.
-Coercions are not effects — they're just value-level function calls inserted at
-type boundaries by subsumption. They happen to be partial (narrowing has
-preconditions), but they're bog-standard function application, not effect-passing.
+The `mkEffectfulCall` HOAS constructor implements this: given the callee's grade,
+it produces the right output bindings and calling convention.
+
+### How Elaboration Works (Bidirectional + Graded)
+
+Elaboration walks the Laurel term bidirectionally. At each node it SYNTHESIZES
+the grade:
+
+1. `synthValue` — values have no grade (no effects). Returns `(FGLValue, LowType)`.
+2. `synthProducer` — producers have a grade. Returns `(FGLProducer, LowType, Grade)`.
+3. `checkValue` — coercion insertion at type boundaries (subsumption). Grade stays `1`.
+4. `checkProducer` — same as synth but with expected type flowing down.
+
+The grade accumulates through sequencing (`elaborateBlock`/`elaborateStmt`):
+each statement's grade multiplies with the continuation's grade.
+
+**Dependency order:** Callees must be elaborated BEFORE callers so that the
+callee's grade is known when the caller is type-checked. Procedures are processed
+in topological order of the call graph.
+
+### Coercions vs Effects
+
+Coercions (subsumption witnesses like `from_int`) are NOT effects. They are
+value-level and have grade `1`. They fire at CHECK boundaries when synth type ≠
+expected type. The subsume table produces the witness.
+
+Effects (error, heap) are producer-level and have grade > `1`. They fire at
+CALL boundaries when the callee has grade > `1`. The subgrading coercion produces
+the calling convention.
+
+Both are inserted by elaboration. Both are "making implicit things explicit."
+But they live at different levels: coercions at value type boundaries, effects at
+computation grade boundaries.
 
 **Elaboration is language-independent.** It knows about Laurel's type system and
 FineGrainLaurel's requirements — nothing about Python specifically. If we translate
