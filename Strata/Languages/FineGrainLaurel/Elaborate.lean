@@ -557,21 +557,10 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
           mkHeapErrorCall callee.text checkedArgs retHty fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
-      -- Try checkArgs. If it fails, check if any arg is effectful and use checkArgsK.
-      let env ← read; let st ← get
-      let trySimple := match sig with
-        | some s => (checkArgs args s.params).run env |>.run st
-        | none => (args.mapM fun a => checkValue a (.TCore "Any")).run env |>.run st
-      match trySimple with
-      | some (checkedArgs, st') => set st'; doWithArgs checkedArgs
-      | none =>
-        -- checkArgs failed. Check if any arg is a known effectful call.
-        let hasEffectfulArg := args.any fun a => match a.val with
-          | .StaticCall c _ => match env.procGrades[c.text]? with | some g => g != .pure | _ => false
-          | _ => false
-        if hasEffectfulArg then
-          checkArgsK args params grade doWithArgs
-        else failure
+      let checkedArgs ← match sig with
+        | some s => checkArgs args s.params
+        | none => args.mapM fun a => checkValue a (.TCore "Any")
+      doWithArgs checkedArgs
     | .FieldSelect obj field =>
       guard (Grade.leq .heap grade)
       let (ov, objTy) ← synthValue obj
