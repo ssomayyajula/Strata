@@ -93,6 +93,7 @@ structure ElabState where
   freshCounter : Nat := 0
   heapVar : Option String := none
   usedBoxConstructors : List (String × String × HighType) := []
+  discoveryMode : Bool := false
 
 abbrev ElabM := ReaderT ElabEnv (StateT ElabState Option)
 
@@ -270,8 +271,9 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     let sig ← lookupFuncSig callee.text
     match sig with
     | some s =>
-      let g ← discoverGrade callee.text
-      guard (g == .pure)
+      unless (← get).discoveryMode do
+        let g ← discoverGrade callee.text
+        guard (g == .pure)
       let checkedArgs ← checkArgs args s.params
       pure (.staticCall callee.text checkedArgs, eraseType s.returnType)
     | none =>
@@ -619,7 +621,8 @@ partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd) (ret
     let st ← get
     let trialSt : ElabState := { st with
       freshCounter := 0
-      heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+      heapVar := if g == .heap || g == .heapErr then some "$heap" else none
+      discoveryMode := true }
     -- Use local to add coinductive sentinel: callee assumed at grade g
     let trialEnv := { env with procGrades := env.procGrades.insert callee g }
     match (checkProducer body [] g).run trialEnv |>.run trialSt with
@@ -686,7 +689,8 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       let grade := [Grade.pure, Grade.err, Grade.heap, Grade.heapErr].findSome? fun g =>
         let st : ElabState := {
           freshCounter := 0
-          heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+          heapVar := if g == .heap || g == .heapErr then some "$heap" else none
+          discoveryMode := true }
         let trialEnv := { procEnv with procGrades := knownGrades.insert proc.name.text g }
         match (checkProducer bodyExpr [] g).run trialEnv |>.run st with
         | some _ => some g
@@ -725,7 +729,8 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       let grade := [Grade.pure, Grade.err, Grade.heap, Grade.heapErr].findSome? fun g =>
         let st : ElabState := {
           freshCounter := 0
-          heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+          heapVar := if g == .heap || g == .heapErr then some "$heap" else none
+          discoveryMode := true }
         let trialEnv := { procEnv with procGrades := knownGrades.insert proc.name.text g }
         match (checkProducer impl [] g).run trialEnv |>.run st with
         | some _ => some g
