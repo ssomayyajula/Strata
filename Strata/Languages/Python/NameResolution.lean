@@ -557,24 +557,35 @@ def buildTypeEnv (stmts : Array (Python.stmt SourceRange)) : TypeEnv := Id.run d
               names := names.insert n info
           | _ => pure ()
     | _ => pure ()
-  -- Propagate statefulness: any function that calls a class constructor is stateful
-  -- (object construction = heap allocation)
+  -- Propagate statefulness: any function that calls a class constructor OR
+  -- calls a stateful function is itself stateful (object construction = heap allocation)
+  -- Collect all function bodies (top-level + nested in If blocks)
+  let allFuncBodies : List (String × Array (Python.stmt SourceRange)) := Id.run do
+    let mut result : List (String × Array (Python.stmt SourceRange)) := []
+    for stmt in stmts do
+      match stmt with
+      | .FunctionDef _ n _ body _ _ _ _ => result := result ++ [(n.val, body.val)]
+      | .If _ _ ifBody ifElse =>
+        for s in ifBody.val do match s with
+          | .FunctionDef _ n _ body _ _ _ _ => result := result ++ [(n.val, body.val)]
+          | _ => pure ()
+        for s in ifElse.val do match s with
+          | .FunctionDef _ n _ body _ _ _ _ => result := result ++ [(n.val, body.val)]
+          | _ => pure ()
+      | _ => pure ()
+    result
   for (funcName, info) in names.toList do
     match info with
     | .function sig => match sig.effectType with
       | .pure retTy =>
-        -- Check if this function's body calls any class (i.e., constructs objects)
-        let callsClass := stmts.any fun stmt => match stmt with
-          | .FunctionDef _ n _ body _ _ _ _ =>
-            if n.val == funcName then
-              body.val.any fun s => match s with
-                | .Assign _ _ (.Call _ (.Name _ callee _) _ _) _ =>
-                  match names[callee.val]? with | some (.class_ _ _) => true | _ => false
-                | .Expr _ (.Call _ (.Name _ callee _) _ _) =>
-                  match names[callee.val]? with | some (.class_ _ _) => true | _ => false
-                | _ => false
-            else false
-          | _ => false
+        let callsClass := match allFuncBodies.find? (·.1 == funcName) with
+          | some (_, body) => body.any fun s => match s with
+            | .Assign _ _ (.Call _ (.Name _ callee _) _ _) _ =>
+              match names[callee.val]? with | some (.class_ _ _) => true | _ => false
+            | .Expr _ (.Call _ (.Name _ callee _) _ _) =>
+              match names[callee.val]? with | some (.class_ _ _) => true | _ => false
+            | _ => false
+          | none => false
         if callsClass then
           names := names.insert funcName (.function { sig with effectType := .stateful retTy })
       | _ => pure ()
