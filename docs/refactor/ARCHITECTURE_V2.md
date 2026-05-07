@@ -74,18 +74,32 @@ McDermott (2025, "Grading call-by-push-value, explicitly and implicitly"). Grade
 form an ordered monoid tracking effects. The grading is implicit: grades are a
 PROPERTY of terms computed by the elaborator, not syntactic annotations.
 
-### The Grade Monoid
+### The Grade Monoid (Residuated)
 
 ```
-(E, ≤, 1, ·) where E = {1, err, heap, heap·err}
+(E, ≤, 1, ·, \) where E = {1, err, heap, heap·err}
 
-1 ≤ err ≤ heap·err
-1 ≤ heap ≤ heap·err
+Order:
+  1 ≤ err ≤ heap·err
+  1 ≤ heap ≤ heap·err
 
-1 · e = e · 1 = e
-err · heap = heap · err = heap·err
-e · e = e
+Multiplication:
+  1 · e = e · 1 = e
+  err · heap = heap · err = heap·err
+  e · e = e  (idempotent)
+
+Left residual (d \ e = largest e' such that d · e' ≤ e):
+  1 \ e = e
+  err \ err = 1
+  err \ heap·err = heap
+  heap \ heap = 1
+  heap \ heap·err = err
+  heap·err \ heap·err = 1
+  d \ e = undefined when d ≰ e  (ill-typed: can't sequence a heap op in a pure context)
 ```
+
+The residual makes the sequencing rule mode-correct: given input grade `e` and
+synthesized prefix grade `d`, the continuation checks against `d \ e`.
 
 ### Types
 
@@ -169,9 +183,9 @@ f : (A₁,...,Aₙ) → B & d    d > 1    vᵢ ⇐ Aᵢ
 ──────────────────────────────────────────
 Γ ⊢_p (var x:T := V; body) ⇐ A & e
 
-Γ ⊢_p M ⇒ B & d    Γ, x:B ⊢_p N ⇐ A & e
-───────────────────────────────────────────
-Γ ⊢_p (M to x. N) ⇐ A & (d · e)
+Γ ⊢_p M ⇒ B & d    Γ, x:B ⊢_p N ⇐ A & (d \ e)
+──────────────────────────────────────────────────
+Γ ⊢_p (M to x. N) ⇐ A & e
 
 Γ ⊢_v V ⇐ returnType
 ───────────────────────────
