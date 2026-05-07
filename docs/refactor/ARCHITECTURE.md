@@ -410,16 +410,16 @@ def eraseType : HighType → LowType
 
 ### What is a Value vs a Producer?
 
-In graded FGCBV, the distinction is about **grades**:
+In graded FGCBV, the distinction is fundamental:
 
-- **Values:** Grade `1` (pure). No effects. Can be nested freely.
-  Includes: literals, variables, pure function calls (callee has grade `1`),
-  coercions (both upcasts and narrowing — grade `1`, value-level).
+- **Values:** UNGRADED. Pure, inert expressions. No grade annotation.
+  Includes: literals, variables, pure function calls, coercions.
+  Values are promoted to producers via `return V` which has grade `1`.
 
-- **Producers:** Grade `> 1` (effectful). Must be bound via `M to x. N`.
-  Includes: effectful procedure calls (callee has grade `err`/`heap`/`heap·err`),
-  mutation (assignment), control flow (if, while, return, exit), heap operations
-  (`.New`, `.FieldSelect`, field write).
+- **Producers:** GRADED. Each producer carries a grade `e ∈ E` tracking its effects.
+  `return V` has grade `1`. Operations have their declared grade. Sequencing
+  (`M to x. N`) multiplies grades (`d · e`).
+  Includes: effectful calls, mutation, control flow, heap operations.
 
 Pure function calls (arithmetic, coercions) are VALUES (grade `1`) even though
 they may be partial. Partiality is modeled via preconditions (`requires`), not
