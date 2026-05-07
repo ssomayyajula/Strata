@@ -510,24 +510,25 @@ partial def discoverGrade (callee : String) : ElabM Grade := do
         | some s => s.params.foldl (fun e (n, t) =>
             { e with typeEnv := { e.typeEnv with names := e.typeEnv.names.insert n (.variable t) } }) env
         | none => env
-      let grade ← tryGrades paramEnv bodyExpr retTy [.pure, .err, .heap, .heapErr]
+      let grade ← tryGrades callee paramEnv bodyExpr retTy [.pure, .err, .heap, .heapErr]
       modify fun s => { s with procGrades := s.procGrades.insert callee grade }
       pure grade
     | none => pure .pure
 
-partial def tryGrades (env : ElabEnv) (body : StmtExprMd) (retTy : LowType) (grades : List Grade) : ElabM Grade := do
+partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd) (retTy : LowType) (grades : List Grade) : ElabM Grade := do
   match grades with
   | [] => pure .heapErr
   | g :: rest =>
     let st ← get
     let trialSt : ElabState := { st with
       freshCounter := 0
-      heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+      heapVar := if g == .heap || g == .heapErr then some "$heap" else none
+      procGrades := st.procGrades.insert callee g }
     match (checkProducer body [] g).run env |>.run trialSt with
     | some (_, st') =>
       modify fun s => { s with procGrades := st'.procGrades }
       pure g
-    | none => tryGrades env body retTy rest
+    | none => tryGrades callee env body retTy rest
 
 end
 
