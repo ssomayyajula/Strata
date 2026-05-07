@@ -144,7 +144,10 @@ def lookupFuncSig (name : String) : ElabM (Option FuncSig) := do
   match (← read).typeEnv.names[name]? with | some (.function sig) => pure (some sig) | _ => pure none
 def lookupProcBody (name : String) : ElabM (Option StmtExprMd) := do
   match (← read).program.staticProcedures.find? (fun p => p.name.text == name) with
-  | some proc => match proc.body with | .Transparent b => pure (some b) | _ => pure none
+  | some proc => match proc.body with
+    | .Transparent b => pure (some b)
+    | .Opaque _ (some impl) _ => pure (some impl)
+    | _ => pure none
   | none => pure none
 
 def lookupFieldType (className fieldName : String) : ElabM (Option HighType) := do
@@ -520,9 +523,8 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
       | none => failure
     | .StaticCall callee args =>
       let sig ← lookupFuncSig callee.text
-      let (checkedArgs, retHty) ← match sig with
-        | some s => do let ca ← checkArgs args s.params; pure (ca, s.returnType)
-        | none => do let ca ← args.mapM fun a => checkValue a (.TCore "Any"); pure (ca, .TCore "Any")
+      let retHty := match sig with | some s => s.returnType | none => .TCore "Any"
+      let params := match sig with | some s => s.params | none => []
       let callGrade ← discoverGrade callee.text
       guard (Grade.leq callGrade grade)
       let assignOrDecl (val : FGLValue) : ElabM FGLProducer := do
@@ -530,23 +532,39 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
           let name := match target.val with | .Identifier id => id.text | _ => "_x"
           mkVarDecl name (eraseType targetTy) (some val) fun _ => elabRest rest grade
         else do let after ← elabRest rest grade; pure (.assign tv val after)
-      match callGrade with
-      | .pure =>
-        let cv := FGLValue.staticCall callee.text checkedArgs
-        let coerced := applySubsume cv (eraseType retHty) (eraseType targetTy)
-        assignOrDecl coerced
-      | .err =>
-        mkErrorCall callee.text checkedArgs retHty fun rv => do
-          let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
+      let doWithArgs (checkedArgs : List FGLValue) : ElabM FGLProducer := do
+        match callGrade with
+        | .pure =>
+          let cv := FGLValue.staticCall callee.text checkedArgs
+          let coerced := applySubsume cv (eraseType retHty) (eraseType targetTy)
           assignOrDecl coerced
-      | .heap =>
-        mkHeapCall callee.text checkedArgs retHty fun rv => do
-          let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
-          assignOrDecl coerced
-      | .heapErr =>
-        mkHeapErrorCall callee.text checkedArgs retHty fun rv => do
-          let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
-          assignOrDecl coerced
+        | .err =>
+          mkErrorCall callee.text checkedArgs retHty fun rv => do
+            let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
+            assignOrDecl coerced
+        | .heap =>
+          mkHeapCall callee.text checkedArgs retHty fun rv => do
+            let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
+            assignOrDecl coerced
+        | .heapErr =>
+          mkHeapErrorCall callee.text checkedArgs retHty fun rv => do
+            let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
+            assignOrDecl coerced
+      -- Try checkArgs. If it fails, check if any arg is effectful and use checkArgsK.
+      let env ← read; let st ← get
+      let trySimple := match sig with
+        | some s => (checkArgs args s.params).run env |>.run st
+        | none => (args.mapM fun a => checkValue a (.TCore "Any")).run env |>.run st
+      match trySimple with
+      | some (checkedArgs, st') => set st'; doWithArgs checkedArgs
+      | none =>
+        -- checkArgs failed. Check if any arg is a known effectful call.
+        let hasEffectfulArg := args.any fun a => match a.val with
+          | .StaticCall c _ => match env.procGrades[c.text]? with | some g => g != .pure | _ => false
+          | _ => false
+        if hasEffectfulArg then
+          checkArgsK args params grade doWithArgs
+        else failure
     | .FieldSelect obj field =>
       guard (Grade.leq .heap grade)
       let (ov, objTy) ← synthValue obj
@@ -703,6 +721,25 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) : Except String
             procs := procs ++ [{ proc with body := .Transparent projected }]
         | none => procs := procs ++ [proc]
       | none => procs := procs ++ [proc]
+    | .Opaque _ (some impl) _ =>
+      -- Opaque with implementation: discover grade but don't rewrite body
+      let extEnv := (proc.inputs ++ proc.outputs).foldl
+        (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
+      let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
+      let grade := [Grade.pure, Grade.err, Grade.heap, Grade.heapErr].findSome? fun g =>
+        let st : ElabState := {
+          freshCounter := 0
+          heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+        let trialEnv := { procEnv with procGrades := knownGrades.insert proc.name.text g }
+        match (checkProducer impl [] g).run trialEnv |>.run st with
+        | some _ => some g
+        | none => none
+      match grade with
+      | some g =>
+        let g := if proc.outputs.length > 1 then Grade.join g .err else g
+        knownGrades := knownGrades.insert proc.name.text g
+      | none => pure ()
+      procs := procs ++ [proc]
     | _ => procs := procs ++ [proc]
   let hasHeap := knownGrades.toList.any fun (_, g) => g == .heap || g == .heapErr
   let compositeNames := typeEnv.classFields.toList.map (·.1)
