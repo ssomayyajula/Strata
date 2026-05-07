@@ -257,6 +257,21 @@ partial def synthProducer (expr : StmtExprMd) (cont : ElabM FGLProducer) : ElabM
       | .Hole true _ => do
         let hv ← freshVar "hole"
         mkVarDecl (match target.val with | .Identifier id => id.text | _ => "_x") (eraseType targetTy) (some (.staticCall hv [])) fun _ => cont
+      | .New classId =>
+        -- .New is a producer (grade heap). Allocate directly.
+        match (← get).heapVar with
+        | some hv =>
+          let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
+          let newHeap := FGLValue.staticCall "increment" [.var hv]
+          let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
+          let freshH ← freshVar "heap"
+          modify fun s => { s with heapVar := some freshH }
+          let c ← extendEnv freshH .THeap (do let k ← cont; pure (.assign tv obj k))
+          pure (.varDecl freshH (.TCore "Heap") (some newHeap) c)
+        | none =>
+          -- No heap available — pass through as-is (will fail at Core)
+          let c ← cont
+          pure (.assign tv (.staticCall "MkComposite" []) c)
       | _ =>
         let cr ← checkValue value targetTy
         let c ← cont
