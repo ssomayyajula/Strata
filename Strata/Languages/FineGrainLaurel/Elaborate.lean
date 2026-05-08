@@ -544,10 +544,10 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (grade : 
       let hv ← freshVar "hole"
       pure (.returnValue md (.staticCall md hv []))
     else
-      mkVarDecl md "_havoc" (.TCore "Any") none fun _ => elabRest rest grade
+      do let hv ← freshVar "havoc"; mkVarDecl md hv (.TCore "Any") none fun _ => elabRest rest grade
 
   -- Architecture §"Core Interface": must not fail. Emit havoc for unhandled.
-  | _ => mkVarDecl md "_unhandled" (.TCore "Any") none fun _ => elabRest rest grade
+  | _ => do let hv ← freshVar "unhandled"; mkVarDecl md hv (.TCore "Any") none fun _ => elabRest rest grade
 
 -- elabRest: elaborate remaining statements
 partial def elabRest (stmts : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
@@ -617,7 +617,7 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
         let name := match target.val with | .Identifier id => id.text | _ => "_havoc"
         mkVarDecl md name (eraseType targetTy) none fun _ => elabRest rest grade
       else
-        mkVarDecl md "_havoc" (eraseType targetTy) none fun hv => do
+        do let hvName ← freshVar "havoc"; mkVarDecl md hvName (eraseType targetTy) none fun hv => do
           let after ← elabRest rest grade; pure (.assign md tv hv after)
     | .Hole true _ =>
       let hv ← freshVar "hole"

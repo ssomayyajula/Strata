@@ -19,8 +19,8 @@ This separation means the elaborator can reason precisely about which
 subexpressions have effects and insert the correct calling conventions.
 
 **Graded effects** refine this further: instead of a binary pure/effectful
-distinction, each producer carries a *grade* from a monoid `{1, err, heap,
-heap·err}` that classifies exactly which effects it performs. The grade
+distinction, each producer carries a *grade* from a monoid `{1, proc, err,
+heap, heap·err}` that classifies exactly which effects it performs. The grade
 determines the calling convention (extra heap parameters, error outputs)
 and the grade monoid's algebraic structure ensures compositionality —
 sequencing two producers joins their grades.
@@ -70,6 +70,54 @@ program.
 **Projection** forgets the grading — a trivial structural map from GFGL
 back to Laurel syntax. The effect information is now encoded in the
 procedure signatures and calling conventions, not in the type system.
+
+---
+
+## Engineering Principles
+
+| Principle | Eliminates |
+|---|---|
+| Representation invariants | Runtime checks, dead branches |
+| Proof-relevant elimination | Boolean blindness |
+| Catamorphisms | Traversal choices |
+| Correct by construction | Post-hoc rewrites |
+| Separation of concerns | Decisions in wrong place |
+| Monad carries context | Ad-hoc parameter passing |
+| Types flow down | Bottom-up guessing |
+| Illegal states unrepresentable | Undefined name references, invalid calls |
+| No strings | Type-level resolution, not runtime checks |
+
+### Illegal States Unrepresentable
+
+**Resolution → Translation contract:** Translation CANNOT emit a `StaticCall`
+to a name that is not in Γ. This is enforced representationally:
+
+```lean
+-- Resolution produces resolved names, not strings
+structure ResolvedCall where
+  sig : FuncSig            -- proof that the callee exists in Γ
+  resolvedArgs : List StmtExprMd  -- args already matched to params
+
+-- Translation's StaticCall takes a ResolvedCall, not an Identifier
+-- If lookupName returns none → emit Hole (undefined = nondeterministic)
+-- There is NO path that produces StaticCall with an unresolved name
+```
+
+This eliminates an entire class of bugs:
+- Undefined function calls (→ Core "not found" errors)
+- Arity mismatches (args checked against sig at construction time)
+- Type-level module resolution failures silently producing garbage names
+
+**No strings for types:** Types flow through the pipeline as `HighType`
+values, never as strings. `extractTypeStr` + `pythonTypeToLaurel` is
+ABOLISHED. Type annotations go directly from Python AST → `HighType`
+via `Resolution.annotationToHighType`. Union types that can't be
+represented → `.TCore "Any"` (handled in Resolution, not Translation).
+
+**No boolean blindness in Resolution:** `NameInfo` is an inductive —
+pattern matching on it gives you the data you need. There is no
+`isResolved : String → Bool` followed by a separate lookup. The lookup
+IS the check. `Option NameInfo` is the only interface.
 
 ---
 
@@ -156,11 +204,13 @@ replaces implicit left-to-right evaluation. Our `effectfulCall` node is
 exactly this construct specialized to procedure calls.
 
 **Graded effects** (Gaboardi et al. 2016, Orchard et al. 2019) annotate
-each producer with a grade from an effect monoid. Our monoid has four
-elements: `pure` (no effects), `err` (may raise exceptions), `heap`
-(reads/writes heap), and `heapErr` (both). The grade tells us the calling
-convention: a `heap`-graded call must receive the current heap and return
-a new one; an `err`-graded call returns an extra error output.
+each producer with a grade from an effect monoid. Our monoid has five
+elements: `pure` (no effects), `proc` (must be at statement level),
+`err` (may raise exceptions), `heap` (reads/writes heap), and `heapErr`
+(both). The grade tells us the calling convention: a `heap`-graded call
+must receive the current heap and return a new one; an `err`-graded call
+returns an extra error output; a `proc`-graded call is bound at statement
+level with its declared outputs.
 
 **Bidirectional typing** (Pierce & Turner 2000) makes the algorithm
 syntax-directed. There are two modes:
@@ -504,7 +554,7 @@ proof-relevant: it determines the FGL term produced at the call site.
 ```lean
 inductive ConventionWitness where
   | pureCall                -- grade 1: value-level, no binding
-  | procCall                -- grade proc: bind [result] (statement-level, no extra outputs)
+  | procCall                -- grade proc: bind with proc's declared outputs (statement-level)
   | errorCall               -- grade err: bind [result, error]
   | heapCall                -- grade heap: pass heap, bind [heap', result]
   | heapErrorCall           -- grade heap·err: pass heap, bind [heap', result, error]
@@ -528,8 +578,8 @@ binds the procedure's DECLARED outputs (read from Laurel.Procedure.outputs
 or derived from the runtime program). No extra error/heap added. The outputs
 are NOT determined by the grade alone — they come from the proc's signature.
 
-This is the only witness that requires runtime information. The others
-(errorCall, heapCall, heapErrorCall) have fixed output patterns.
+ALL grades use declared outputs via `mkGradedCall`. The grade determines
+only whether to prepend the heap argument. Outputs are never invented.
 
 Examples:
 - `print(msg: Any) returns ()` → 0 outputs → effectfulCall with [] → body receives no result
@@ -605,11 +655,12 @@ evaluation during term production.
 
 ### Producer Subsumption (see §Subsumption above for the full rule)
 
-The `conv` witness selects the smart constructor:
-- `pureCall` → no binding
-- `errorCall` → `mkErrorCall`
-- `heapCall` → `mkHeapCall`
-- `heapErrorCall` → `mkHeapErrorCall`
+The `conv` witness selects `mkGradedCall` with the appropriate grade:
+- `pureCall` → no binding (value level)
+- `procCall` → `mkGradedCall md callee args declaredOutputs .proc`
+- `errorCall` → `mkGradedCall md callee args declaredOutputs .err`
+- `heapCall` → `mkGradedCall md callee args declaredOutputs .heap`
+- `heapErrorCall` → `mkGradedCall md callee args declaredOutputs .heapErr`
 
 The `c` witness coerces `rv` inside the continuation (after binding).
 
@@ -662,7 +713,7 @@ languages (cf. Hindley-Milner, abstract interpretation).
 discoverGrades(program, Γ) → procGrades:
   1. Initialize: procGrades[f] := ⊥ (pure) for all f
   2. For each proc f with body M:
-       Try checkProducer M returnType g for g ∈ [pure, err, heap, heapErr]
+       Try checkProducer M returnType g for g ∈ [pure, proc, err, heap, heapErr]
        under the current procGrades assumption.
        Set procGrades[f] := smallest g that succeeds.
   3. If any grade changed, go to step 2.
@@ -691,7 +742,7 @@ because `procGrades` is initialized with an assumption (⊥). The typing
 rules read this assumption during the trial. If the assumption was too
 low, the trial fails, the grade is bumped, and the next iteration
 succeeds. Convergence is guaranteed because the grade lattice is finite
-(4 elements) and grades only increase.
+(5 elements) and grades only increase.
 
 **No on-demand discovery during elaboration.** By the time `checkProducer`
 runs to produce FGL terms (Pass 2), ALL grades are already known and
@@ -789,9 +840,9 @@ elaborated output:
    The elaborator treats them as pure functions (they have FuncSigs in the prelude).
 
 3. **Output arity:** A `.call` statement's LHS targets must match the callee's
-   declared output count exactly. `mkProcCall` uses the proc's declared outputs.
-   `mkErrorCall` adds `[result, err]`. `mkHeapCall` adds `[heap, result]`. The
-   elaborator's signature rewriting must match what callers emit.
+   declared output count exactly. `mkGradedCall` uses the proc's declared
+   outputs for ALL grades. The grade only determines whether to prepend heap.
+   The elaborator's signature rewriting must match what callers emit.
 
 4. **`__main__` metadata:** `__main__` MUST have `sourceRangeToMd` metadata so Core
    classifies it as a user proc and generates VCs from its assertions. Without
@@ -855,54 +906,6 @@ because each FGL term carries its own. Coercions inserted by subsumption inherit
 
 ---
 
-## Engineering Principles
-
-| Principle | Eliminates |
-|---|---|
-| Representation invariants | Runtime checks, dead branches |
-| Proof-relevant elimination | Boolean blindness |
-| Catamorphisms | Traversal choices |
-| Correct by construction | Post-hoc rewrites |
-| Separation of concerns | Decisions in wrong place |
-| Monad carries context | Ad-hoc parameter passing |
-| Types flow down | Bottom-up guessing |
-| Illegal states unrepresentable | Undefined name references, invalid calls |
-| No strings | Type-level resolution, not runtime checks |
-
-### Illegal States Unrepresentable
-
-**Resolution → Translation contract:** Translation CANNOT emit a `StaticCall`
-to a name that is not in Γ. This is enforced representationally:
-
-```lean
--- Resolution produces resolved names, not strings
-structure ResolvedCall where
-  sig : FuncSig            -- proof that the callee exists in Γ
-  resolvedArgs : List StmtExprMd  -- args already matched to params
-
--- Translation's StaticCall takes a ResolvedCall, not an Identifier
--- If lookupName returns none → emit Hole (undefined = nondeterministic)
--- There is NO path that produces StaticCall with an unresolved name
-```
-
-This eliminates an entire class of bugs:
-- Undefined function calls (→ Core "not found" errors)
-- Arity mismatches (args checked against sig at construction time)
-- Type-level module resolution failures silently producing garbage names
-
-**No strings for types:** Types flow through the pipeline as `HighType`
-values, never as strings. `extractTypeStr` + `pythonTypeToLaurel` is
-ABOLISHED. Type annotations go directly from Python AST → `HighType`
-via `Resolution.annotationToHighType`. Union types that can't be
-represented → `.TCore "Any"` (handled in Resolution, not Translation).
-
-**No boolean blindness in Resolution:** `NameInfo` is an inductive —
-pattern matching on it gives you the data you need. There is no
-`isResolved : String → Bool` followed by a separate lookup. The lookup
-IS the check. `Option NameInfo` is the only interface.
-
----
-
 ## Translation Desugarings
 
 | Python | Laurel |
@@ -951,10 +954,6 @@ in `preludeSignatures` so the elaborator can check args at correct types:
 
 ## Known Tech Debt
 
-**If/then/else continuation:** RESOLVED. `ifThenElse` has an `after` field.
-Both branches elaborate standalone, rest is elaborated once in `after`.
-No duplication.
-
 **Narrowing as pure function:** `Any_to_bool` etc. are modeled as pure (grade 1).
 In Python, `__bool__` can have side effects. If needed later, narrowing becomes
 grade > 1 and the coercion scheme changes.
@@ -969,13 +968,16 @@ Translation must emit these specific constructors.
 
 ## Current Status (2026-05-08)
 
-**Elaborator deleted. Rewrite in progress.**
+Elaborator rewritten with 5-element grade monoid and `mkGradedCall`.
+Translation rewritten with undefined-name → Hole enforcement.
 
-The previous elaborator was deleted because it had no `proc` grade,
-no calling convention for procedures vs functions, and no handling of
-several Laurel constructs. The architecture doc has been updated with
-all the missing specifications. The next step is to write the new
-elaborator mechanically from this updated architecture.
+7 test differences from old pipeline:
+- 2 Internal errors: Union types (Resolution gap), unresolved methods (boolean blindness in Translation)
+- 4 Inconclusives where old passes: solver/encoding quality gaps
+- 1 Genuine improvement: test_multiple_except
+
+Remaining work: enforce illegal-states-unrepresentable in Resolution/Translation
+(ResolvedCall struct, no strings for types).
 
 ---
 
