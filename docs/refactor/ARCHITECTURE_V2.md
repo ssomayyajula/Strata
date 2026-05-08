@@ -42,7 +42,7 @@ Python AST (user code)
   ↓ [Translation: fold over AST, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
   ↓ [Elaboration: impure CBV → Graded FGCBV, coinductive grade inference]
-e' : GFGL.Program (graded fine-grain Laurel — effects explicit via grades)
+e' : GFGL.Program (Graded Fine-Grain Call-By-Value, after McDermott 2025 — effects explicit via grades)
   ↓ [Projection: forget grading, trivial cata]
 Laurel.Program (ready for Core)
   ↓ [Core translation]

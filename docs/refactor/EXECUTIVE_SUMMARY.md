@@ -231,13 +231,48 @@ The replacement pipeline is governed by a formal specification
 - **Typing rules** for every Laurel construct (bidirectional: synthesize types bottom-up, check top-down)
 - **Engineering invariants** (illegal states unrepresentable, metadata by construction)
 
-The pipeline has three passes:
+### Pipeline
 
 ```
-Python AST + Γ → [Translation] → Laurel (effects implicit)
-Laurel + Γ    → [Elaboration] → GFGL (effects explicit, coercions inserted)
-GFGL          → [Projection]  → Laurel (ready for Core)
+Python AST + library stubs
+  ↓ [Resolution: build Γ — type environment with all signatures]
+Γ : TypeEnv
+  +
+Python AST (user code)
+  ↓ [Translation: fold over AST, type-directed via Γ]
+e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
+  ↓ [Elaboration: graded bidirectional typing, coinductive grade inference]
+e' : GFGL.Program (Graded Fine-Grain Call-By-Value — effects explicit)
+  ↓ [Projection: forget grading, trivial structural map]
+Laurel.Program (ready for Core)
+  ↓ [Core translation (existing, unchanged)]
+Core
 ```
+
+**Resolution** walks the Python AST and library stubs to build a unified type
+environment where every name has a complete signature. After resolution,
+Translation can look up any name and determine its parameter types, return
+type, and defaults without guessing.
+
+**Translation** is a deterministic fold over the Python AST — one case per
+constructor. It desugars Python's surface syntax (classes → New + __init__,
+for loops → havoc + assume, context managers → enter/exit, kwargs → positional
+resolution via Γ) into flat Laurel. It does not insert coercions or determine
+effects. If a name is not in Γ, it emits Hole (nondeterministic havoc) rather
+than a call to an undefined function.
+
+**Elaboration** constructs a Graded Fine-Grain CBV (GFGL) typing derivation
+from the Laurel program. It discovers each procedure's grade via coinductive
+fixpoint iteration over the call graph, then elaborates each body: inserting
+coercions at type boundaries (governed by the subsumption table), threading
+heap state (governed by grades), and binding effectful subexpressions at
+statement level via ANF-lifting (governed by the to-rule). The output term
+IS the typing derivation — if it type-checks, it's semantically correct.
+
+**Projection** is a trivial structural map that forgets the grading, producing
+Laurel that Core's existing translator can consume. The effect information is
+now encoded in procedure signatures and calling conventions rather than in
+the type system.
 
 Translation handles Python's surface syntax. Elaboration handles types and effects.
 They are independent: Translation does not insert coercions, Elaboration does not
