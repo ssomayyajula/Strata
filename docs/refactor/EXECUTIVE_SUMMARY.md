@@ -134,6 +134,39 @@ one typing rule to Elaboration. Both can be verified independently.
 
 ---
 
+## Why Existing Documentation Efforts Are Insufficient
+
+PRs #1136 ("Document the Python front-end") and #1144 ("Document the design of
+Laurel") are open and add valuable narrative documentation. They describe WHAT the
+pipeline does: the stages, data structures, naming conventions, supported constructs,
+and general design rationale.
+
+However, they do not provide the kind of specification that would have prevented
+the problems above. Specifically, they do not specify:
+
+- **When coercions fire.** PR #1136 documents the Any-boxing encoding (constructors
+  like `from_int`, destructors like `Any..as_int!`) but does not specify the rule
+  for when Translation should insert them. A contributor reading the doc still
+  cannot determine whether a given expression needs wrapping without studying the
+  existing code.
+
+- **What constitutes valid intermediate output.** Neither doc specifies structural
+  invariants that each pass's output must satisfy. Without these, pass-ordering
+  bugs (PR #1011) remain possible — a pass can produce "valid Laurel" that the
+  next pass cannot handle.
+
+- **How to arbitrate design disagreements.** PR #954's 100+ comment thread exists
+  because both approaches are consistent with a WHAT-level description. A
+  specification that determines calling conventions from grades would resolve it:
+  the grade lattice computes which approach is correct.
+
+The existing documentation efforts are complementary to this refactor — they
+document the system as it is. The architecture specification documents what the
+system SHOULD be, with enough precision that implementation is mechanical and
+disagreements are resolvable by reference to the spec.
+
+---
+
 ## The New Architecture
 
 The replacement pipeline is governed by a formal specification
