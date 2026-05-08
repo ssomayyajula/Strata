@@ -1,4 +1,4 @@
-# Python → Laurel Translation Architecture (v2)
+# Python → Laurel Translation Architecture
 
 ---
 
@@ -1041,20 +1041,20 @@ Translation must emit these specific constructors.
 
 ## Current Status (2026-05-08)
 
-### Parity with the Old Pipeline
+### Parity with the Current Pipeline
 
-The question is not "how many tests pass" but "are we replicating the old
+The question is not "how many tests pass" but "are we replicating the current
 pipeline's results?" On the 46 CI tests with expected outputs:
 
-- **42/46 tests:** New pipeline replicates the old pipeline's result
+- **42/46 tests:** New pipeline replicates the current pipeline's result
   (same RESULT line — both pass, or both inconclusive)
-- **3/46 tests:** Old pipeline passes, new pipeline is inconclusive
-  (solver can't prove VCs that the old encoding allows — encoding quality
+- **3/46 tests:** Current pipeline passes, new pipeline is inconclusive
+  (solver can't prove VCs that the current encoding allows — encoding quality
   gap in try/except and module-level code, not a correctness issue)
-- **1/46 tests:** New pipeline passes where old was inconclusive
+- **1/46 tests:** New pipeline passes where current was inconclusive
   (test_multiple_except: 8 real VCs proven — genuine improvement)
 
-Zero crashes on any test. The old pipeline is verified intact and serves
+Zero crashes on any test. The current pipeline is verified intact and serves
 as the comparison baseline.
 
 The 3 encoding gaps are in tests with nested try/except (`test_try_except_scoping`)

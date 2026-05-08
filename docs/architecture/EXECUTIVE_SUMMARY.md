@@ -1,4 +1,4 @@
-# Executive Summary: Python→Laurel Pipeline Refactor
+# Executive Summary: Architecture-Driven Python Front-End Development
 
 ## Summary
 
@@ -67,7 +67,7 @@ spec is correct by construction, and code that deviates from it is identifiable
 by inspection rather than by waiting for downstream failures.
 
 The new architecture addresses these by providing a single source of truth
-(`ARCHITECTURE_V2.md`) that determines coercion insertion, effect classification,
+(`ARCHITECTURE.md`) that determines coercion insertion, effect classification,
 and calling conventions. The implementation is a mechanical transcription of this
 specification. When a question arises ("should this be Composite or Any?"), the
 specification answers it — not a reviewer's mental model.
@@ -231,7 +231,7 @@ to the question "what does the Python front-end actually support?" without readi
 approximated (e.g., Hole), and which silently produce incorrect output is implicit
 in the implementation rather than stated anywhere.
 
-The existing documentation efforts and this refactor are complementary. PRs #1136
+The existing documentation efforts and this work are complementary. PRs #1136
 and #1144 document the system as it is — essential for onboarding and debugging.
 The architecture specification documents what the system should become, with enough
 precision that implementation is mechanical and disagreements are resolvable by
@@ -242,7 +242,7 @@ reference to the spec.
 ## The New Architecture
 
 The new pipeline is governed by a formal specification
-(`ARCHITECTURE_V2.md`, 1000+ lines) that defines:
+(`ARCHITECTURE.md`, 1000+ lines) that defines:
 
 - A **subsumption table** specifying all type coercions and when they fire
 - A **grade monoid** `{pure, proc, err, heap, heapErr}` classifying effects
@@ -261,7 +261,7 @@ Python AST (user code)
   ↓ [Translation: fold over AST, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
   ↓ [Elaboration: graded bidirectional typing, coinduction on call graph]
-e' : GFGL.Program (Graded Fine-Grain Call-By-Value — effects explicit)
+e' : GFGL.Program (Graded Fine-Grain Laurel — effects explicit)
   ↓ [Projection: forget grading, trivial structural map]
 Laurel.Program (ready for Core)
   ↓ [Core translation (existing, unchanged)]
@@ -280,7 +280,7 @@ resolution via Γ) into flat Laurel. It does not insert coercions or determine
 effects. If a name is not in Γ, it emits Hole (nondeterministic havoc) rather
 than a call to an undefined function.
 
-**Elaboration** constructs a Graded Fine-Grain CBV (GFGL) typing derivation
+**Elaboration** constructs a GFGL (Graded Fine-Grain Laurel) typing derivation
 from the Laurel program. It discovers each procedure's grade via coinduction
 on the call graph, then elaborates each body: inserting
 coercions at type boundaries (governed by the subsumption table), threading
@@ -301,7 +301,7 @@ handle Python-specific desugaring.
 
 ## Current Status (2026-05-08)
 
-| Metric | Old Pipeline | New Pipeline |
+| Metric | Current Pipeline | New Pipeline |
 |--------|-------------|-------------|
 | CI test crashes | 0 | 0 |
 | Tests passing | 28/54 | 29/54 (+1) |
@@ -319,7 +319,7 @@ of try/except generates more complex VC structure), not soundness issues.
 
 ---
 
-## Traceability: Old Problems → Architecture Sections
+## Traceability: Current Problems → Architecture Sections
 
 Each problem identified above is addressed by a specific section of the
 architecture specification. The table below provides traceability from
