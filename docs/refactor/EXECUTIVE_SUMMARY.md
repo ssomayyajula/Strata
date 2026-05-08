@@ -25,6 +25,28 @@ intermediate output. This leads to:
   is implicit in 2100 lines of code — the new architecture documents this
   explicitly in §Python Construct Coverage)
 
+### Why this matters now: agentic development and review cost
+
+Our development flow is increasingly agentic — code generation is cheap, but
+reviewing the resulting volume of code is expensive. In this context, the absence
+of a written architecture is not merely an inconvenience; it is the primary
+bottleneck. Without a specification to review against, every generated PR requires
+the reviewer to reconstruct the author's intent and verify it against an unwritten
+mental model. This does not scale.
+
+The long tail of stabilization in the old pipeline — where fixing one type coercion
+bug introduces another, which requires a lowering pass fix, which breaks an
+assumption in a third pass — has reduced our confidence in being able to deliver
+front-end improvements in a predictable amount of time. The ping-ponging of bug
+fixes (Issue #882 spawning 4 PRs over months, PR #954 blocked for weeks) is not
+a staffing problem. It is the cost of having no synchronization point between
+contributors' mental models.
+
+The architecture specification serves as that synchronization point. It is the
+single check and balance against runaway bug introduction: code that follows the
+spec is correct by construction, and code that deviates from it is identifiable
+by inspection rather than by waiting for downstream failures.
+
 The new architecture addresses these by providing a single source of truth
 (`ARCHITECTURE_V2.md`) that determines coercion insertion, effect classification,
 and calling conventions. The implementation is a mechanical transcription of this
