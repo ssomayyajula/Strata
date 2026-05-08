@@ -33,11 +33,18 @@ specification answers it — not a reviewer's mental model.
 
 ### 1. Type coercions have no governing rule
 
+Internal errors and tool errors from type mismatches are endemic to the existing
+pipeline. The Composite↔Any coercion problem is not an isolated issue — it is a
+representative example of a broader pattern where the pipeline produces output
+that Core's type checker rejects, because there is no specification governing
+when type coercions should be inserted.
+
 Core's type checker requires explicit coercions between `Composite` and `Any`.
 The current pipeline inserts these ad-hoc in Translation, without a systematic
 rule for when they're needed.
 
-Issue #882 documents 13 failing tests from this. Four PRs have attempted fixes:
+Issue #882 documents 13 failing tests from this class of error alone. Four PRs
+have attempted fixes:
 
 | PR | Approach | Outcome |
 |----|----------|---------|
