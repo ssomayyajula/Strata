@@ -286,7 +286,7 @@ handle Python-specific desugaring.
 |--------|-------------|-------------|
 | CI test crashes | 0 | 0 |
 | Tests passing | 28/54 | 29/54 (+1) |
-| Lowering passes required | 8 | 0 |
+| Lowering passes required | 8 | 1 (Laurel → GFGL) |
 | Written specification | None | 1000+ lines |
 | Coercion rule | Ad-hoc (scattered across Translation) | Subsumption table (one function) |
 | Adding a Python construct | Modify Translation + verify 8 pass interactions | Add Translation case + typing rule |
