@@ -261,7 +261,7 @@ Python AST (user code)
   ↓ [Translation: fold over AST, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
   ↓ [Elaboration: graded bidirectional typing, coinduction on call graph]
-e' : GFGL.Program (Graded Fine-Grain Call-By-Value — effects explicit)
+e' : GFGL.Program (Graded Fine-Grain Laurel — effects explicit)
   ↓ [Projection: forget grading, trivial structural map]
 Laurel.Program (ready for Core)
   ↓ [Core translation (existing, unchanged)]
@@ -280,7 +280,7 @@ resolution via Γ) into flat Laurel. It does not insert coercions or determine
 effects. If a name is not in Γ, it emits Hole (nondeterministic havoc) rather
 than a call to an undefined function.
 
-**Elaboration** constructs a Graded Fine-Grain CBV (GFGL) typing derivation
+**Elaboration** constructs a GFGL (Graded Fine-Grain Laurel) typing derivation
 from the Laurel program. It discovers each procedure's grade via coinduction
 on the call graph, then elaborates each body: inserting
 coercions at type boundaries (governed by the subsumption table), threading
