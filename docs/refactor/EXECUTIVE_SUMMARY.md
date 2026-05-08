@@ -137,11 +137,16 @@ fixpoint) and the calling convention table (written in the spec).
 
 Supporting a new Python construct currently requires modifying Translation,
 verifying that none of the 8 lowering passes interact badly with the new output,
-and testing end-to-end (there is no intermediate correctness check).
+and testing end-to-end (there is no intermediate correctness check). For example,
+adding `match` statement support would require verifying interactions with
+`heapParameterization`, `liftExpressionAssignments`, and `constrainedTypeElim` —
+none of which document their input assumptions.
 
 In the new pipeline, adding a Python construct requires adding one case to
 Translation (emit Laurel nodes) and, if the construct has non-trivial effects,
-one typing rule to Elaboration. Both can be verified independently.
+one typing rule to Elaboration. Both can be verified independently: Translation's
+output must be well-formed Laurel (checkable by inspection), and Elaboration's
+typing rules must be mode-correct (checkable against the bidirectional discipline).
 
 ---
 
@@ -242,7 +247,7 @@ of try/except generates more complex VC structure), not soundness issues.
 | Whole-pipeline blast radius | Every new construct | §Translation (syntax only), §Elaboration (semantics only) |
 | No specification to implement against | PRs #1136/#1144 document WHAT not WHEN/HOW | §Engineering Principles, §Typing Rules, §Assignment Rules |
 | Undocumented Python coverage | Implicit in 2100 lines | §Translation Desugarings, §Python Construct Coverage |
-| function vs procedure confusion | `datetime_now` nested in expressions | §Core Interface Requirements, §proc Grade |
+| Laurel function/procedure distinction not enforced | Runtime procs nested in expressions crash Core | §Core Interface Requirements, §proc Grade |
 
 ---
 
