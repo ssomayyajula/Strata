@@ -1,227 +1,205 @@
-# Executive Summary: Agent-Driven Methodology for the Python→Laurel Refactor
+# Executive Summary: Python→Laurel Pipeline Refactor
 
-## Why We're Doing This
+## The Case for a Rewrite
 
-The existing Python→Laurel translation pipeline (2100 lines) works but is unmaintainable,
-unextensible, and fragile. It was built incrementally without a formal architecture, leading
-to systemic problems that surface in every PR and review cycle.
+The existing Python→Laurel translation pipeline (2100 lines + 8 lowering passes)
+works for the tests it was built against. But it has reached a point where adding
+new features or fixing cross-cutting bugs requires disproportionate effort — not
+because the code is poorly written, but because the architecture makes certain
+classes of problems structurally unsolvable without a rewrite.
 
-### Problems with the Previous Implementation
-
-**1. Correctness not enforced by types — bugs pass compilation and tests.**
-
-In PR #835 ("Laurel: Lift Procedure Calls in Asserts"), an agent-authored commit 
-(`97bce95`) introduced a bug where `getLast` selected the ERROR output channel of a 
-multi-output procedure instead of the primary return value. The generated code used 
-`$c_1` (the error channel) where it should have used `$c_0` (the result). This compiled
-cleanly and passed tests — both variables were valid at that program point with compatible
-Lean types. The bug was caught only by human review of the generated Laurel output.
-
-**Root cause:** The Lean types don't encode "which output variable is semantically correct."
-`lake build` verifies Lean well-typedness, not semantic translation correctness.
-
-**2. Multiple PRs attacking the same problem without a shared discipline.**
-
-The Composite↔Any coercion problem (Issue #882: 13 failing tests) has spawned at least
-4 PRs with incompatible approaches:
-
-| PR | Approach | Status |
-|----|----------|--------|
-| #727 | Emit `Hole` (unconstrained value) — avoids crash, loses precision | Merged |
-| #918 | Rename heap datatypes + coercion pathways | Draft (Git conflicts) |
-| #954 | DynamicComposite wrapping + heap parameterization | Open (134 comments, architectural disagreement) |
-| #1106 | Coerce args to Any at call sites | Open (defeats precondition model) |
-
-PR #954's 134-comment thread reflects a fundamental architectural disagreement: one
-approach extends `FieldSelect` with heap parameterization, the other uses opaque
-`read`/`update` procedures. Neither can yield because there's no written architecture
-to appeal to.
-
-**Root cause:** No formal subtyping/narrowing discipline specifying when Composite↔Any
-coercions fire, at what pipeline stage, and via what mechanism.
-
-**3. Sequential bottleneck from architectural disagreements.**
-
-- PR #753 (pipeline restructuring): 472 comments, 195 commits, ~2 months of iteration
-- PR #475 (CoreSMT pipeline): open since Feb 2026, has Git conflicts
-- PR #954: blocked on unresolved design disagreement for weeks
-
-These aren't slow reviews — they're the absence of a shared architecture causing
-repeated rework. Each iteration discovers a new unstated assumption that conflicts
-with the reviewer's model.
-
-**4. Lowering passes mask translation bugs and create ordering dependencies.**
-
-PR #1011 (bot-authored, still Draft) exposes a pass-ordering bug: `HeapParameterization`
-generates uninitialized local variables inside assertions that `LiftExpressionAssignments`
-then fails to handle. The bug exists because:
-- Translation produces structurally invalid Laurel
-- Heap parameterization transforms it into a DIFFERENT structurally invalid form
-- The expression lifter can't recover
-
-Similarly, PR #727's `Hole` approach explicitly acknowledges masking: "Composite values
-are replaced with Hole (unconstrained Any value) since Composite→Any coercion is not
-yet modeled. This limits bug-finding ability."
-
-**5. Agent contributions require expensive human oversight.**
-
-The `keyboardDrummer-bot` has 55 PRs (12 open, 43 merged). While productive, agent
-contributions consistently require human review to catch semantic correctness issues
-(PR #835 being the clearest example). The cost: every agent PR must be manually
-verified against an architecture that exists only in the reviewer's head.
+This document presents the evidence: specific PRs and issues where the current
+architecture forced weeks of iteration, architectural disagreement, or incomplete
+solutions. It then presents the replacement architecture and its current status.
 
 ---
 
-## The Solution: Agent-Driven Methodology
+## Evidence: Structural Problems in the Current Pipeline
 
-### Architecture as Single Source of Truth
+### Problem 1: Type Coercions Are Unpredictable
 
-A formally-grounded architecture document (`ARCHITECTURE.md`) defines:
-- The exact pipeline: Resolution → Translation → Elaboration → Projection → Core
-- The type-theoretic foundations: FGCBV (Levy 2003), bidirectional typing (Dunfield &
-  Krishnaswami 2021), polarized subtyping (Lakhani & Pfenning 2022), algebraic effects
-  (Bauer 2018)
-- The subtyping/narrowing discipline: when and how coercions are inserted
-- The engineering principles: representation invariants, no boolean blindness, catamorphisms,
-  monad-comonad interaction
+**Issue #882:** 13 failing tests from Composite↔Any type mismatches.
 
-Every implementation decision traces to a specific section of this document. If it
-doesn't, it's wrong.
+**What happened:** Core's type checker rejects programs where `Composite` appears
+where `Any` is expected (or vice versa). The old pipeline inserts coercions
+(`from_Composite`, `Any..as_Composite!`) ad-hoc in Translation. But Translation
+doesn't have a principled rule for WHEN to coerce — it's case-by-case pattern
+matching scattered across 2100 lines.
 
-### Implementation Plan Derived from Architecture
+**The attempted fixes:**
 
-A separate implementation plan (`IMPLEMENTATION_PLAN.md`) maps each architecture section
-to concrete code changes. It tracks:
-- What's done, what's next, what's blocked
-- The exact current state (which tests pass, which fail, why)
-- Tech debt with architecture references
-- Compliance checks (grep commands that detect violations)
+| PR | Approach | Outcome |
+|----|----------|---------|
+| #727 | Emit `Hole` (unconstrained value) — avoids crash, loses precision | Merged, but explicitly acknowledges "limits bug-finding ability" |
+| #918 | Rename heap datatypes + coercion pathways | Draft, Git conflicts, abandoned |
+| #954 | DynamicComposite wrapping + heap parameterization | 134 comments, architectural disagreement, unresolved for weeks |
+| #1106 | Coerce all args to Any at call sites | Open, defeats the precondition model entirely |
 
-### Agent-Driven Development with Formal Discipline
+**Why it's structural:** Each PR proposes a different heuristic because there IS no
+rule. The old pipeline does coercions inside Translation (which doesn't know types)
+instead of in a separate type-directed pass (which does). You cannot fix this by
+adding more cases to Translation — you need a separate elaboration pass that knows
+the type of every subexpression and inserts coercions at type boundaries.
 
-Implementation is driven by AI agents operating under strict constraints:
-
-**Standard Preamble** (`AGENT_PREAMBLE.md`): Every agent reads this before writing code.
-It mandates:
-
-- Mechanical derivation from the spec (not problem-solving)
-- No heuristics, no peephole optimizations, no boolean blindness
-- Types determine the implementation (no choices)
-- Plan before code
-- Stop on gaps (don't invent workarounds)
-
-**Parallel Review Agents**: Every implementation agent gets a parallel review agent that:
-
-- Checks code compliance (grep-based violation detection)
-- Reads the implementation agent's transcript for process compliance
-- Reports violations immediately
-- Recommends KILL if the agent deviates from architecture
-
-**Kill Criteria**: Agents are immediately terminated if they:
-- Add coercions to Translation (elaboration's job)
-- Skip elaboration
-- Add boolean gates (isPreludeFunc, isUserFunc)
-- Type things as `Any` when annotations exist
-- Add peephole optimizations or heuristics
-- Fall back to "what the old pipeline does"
-
-**Iterative Learning**: When an agent is killed, its transcript is read to identify
-what it tried and where it failed. The next agent gets these lessons in its prompt.
-Prevents the same failure from recurring.
-
-### Correctness by Construction via FineGrainLaurel Types
-
-The core technical innovation: FineGrainLaurel's `Value` and `Producer` types (generated
-by DDM from a dialect file) make illegal states UNREPRESENTABLE at the Lean type level:
-
-- You cannot put a Producer in value position (Lean type error)
-- You cannot skip a coercion (the types don't unify without it)
-- You cannot conflate effectful and pure subexpressions (different types)
-
-This means: if the elaboration compiles, it's structurally correct. `lake build` IS
-a meaningful correctness check because the types encode the invariants.
-
-### Differential Testing Infrastructure
-
-A proper testing script (`diff_test.sh`) captures the old pipeline's output as a
-baseline and compares the new pipeline against it:
-- SAME: identical output (no regression)
-- IMPROVED: new pipeline succeeds where old failed
-- REGRESSION: new pipeline fails where old succeeded (blocks)
-
-This provides confidence that we're not introducing regressions — something the
-previous PR-based workflow couldn't guarantee.
-
-### Parallelization Enabled by Shared Architecture
-
-With a written architecture:
-- Multiple agents can work on different passes simultaneously (Resolution, Translation,
-  Elaboration are independent given the interface types)
-- Reviews are mechanical (check against architecture, not personal judgment)
-- Assumptions are explicit and shared (not implicit in one person's head)
-- PRs can be verified independently (each one either follows the architecture or doesn't)
+**What theory says:** Bidirectional typing (Dunfield & Krishnaswami 2021) provides
+a deterministic algorithm: synthesize the expression's type, check it against the
+expected type, insert the coercion witness at the subsumption boundary. One rule,
+one location, zero guessing.
 
 ---
 
-## Results So Far
+### Problem 2: Lowering Passes Create Ordering Dependencies
 
-| Metric | Old Pipeline | New Pipeline (in progress) |
-|--------|-------------|---------------------------|
-| Architecture doc | None | 1284 lines, formally grounded |
-| Separation of concerns | 1 monolithic function | 4 passes with typed interfaces |
-| Type safety | None (same Lean type in/out) | FGL Value/Producer enforce polarity |
-| Coercion correctness | Ad-hoc (from_int sprinkled everywhere) | Bidirectional typing (mechanically determined) |
-| Heap handling | Separate ad-hoc pass | Co-operations in elaboration (Bauer 2018) |
-| Regression detection | Manual review | Automated differential testing |
-| Parallelizability | Blocked by shared mutable state | Independent passes, typed interfaces |
-| Elaboration status | N/A | All test files elaborate successfully (0 failures) |
-| Blocking issue | N/A | Core needs type infrastructure (Composite) — pipeline wiring, not elaboration |
+**PR #1011** (bot-authored, still Draft): `HeapParameterization` generates
+uninitialized local variables inside assertions. `LiftExpressionAssignments`
+can't handle this. The program is structurally invalid after one pass and a
+different kind of structurally invalid after the next.
 
-### Methodology That Works (established 2026-05-06)
+**The 8 lowering passes:**
+1. `heapParameterization` — thread Heap through field-touching procedures
+2. `typeHierarchyTransform` — adjust Composite types
+3. `modifiesClausesTransform` — add modifies annotations
+4. `inferHoleTypes` — fill in types for Hole nodes
+5. `eliminateHoles` — remove Hole nodes
+6. `desugarShortCircuit` — rewrite `&&`/`||`
+7. `liftExpressionAssignments` — ANF-lift calls out of expressions
+8. `constrainedTypeElim` — eliminate constrained types
 
-The methodology that finally produced working elaboration:
+Each pass assumes the output of the previous pass has specific structural
+properties. When one pass produces unexpected output, the next one crashes or
+silently produces wrong results. Debugging requires understanding the interaction
+of ALL 8 passes.
 
-1. **Architecture is god.** ARCHITECTURE.md answers what/why. IMPLEMENTATION_PLAN.md
-   answers how. Every line of code traces to a specific section.
+**Why it's structural:** The passes exist because Translation produces output that
+Core can't directly handle. Each pass fixes one thing Translation didn't do. But
+the fixes interact. You cannot add a 9th pass to fix the interaction of passes 3
+and 7 without potentially breaking the assumption of pass 8.
 
-2. **21-task execution plan** with exact code for each step. No judgment calls.
-   No "figure it out." Each task is a transcription, not a design decision.
-
-3. **Implementation agent + parallel review agent.** Every time. No exceptions.
-   The review agent catches violations the implementation agent introduces.
-
-4. **Agent coordinator catches slacking review agents.** When the review agent says
-   "CONTINUE" but the implementation deviates from the plan, the coordinator overrides
-   and fixes directly (e.g., removing unauthorized Any pass-throughs, removing canUpcast
-   fallbacks in checkProducer, fixing mode-correctness violations in condition handling).
-
-5. **Mode-correctness principle.** No `typesEqual` dispatch in the elaboration walk.
-   All type comparisons flow through `canUpcast`/`canNarrow`. The coercion table
-   decides everything. `typesEqual` is ONLY the reflexivity axiom (A <: A) inside
-   the subsumption function.
-
-6. **Synthesize maximally, coerce at CHECK boundaries.** Constructs whose type is
-   determined by Γ or form synthesize (DRY — coercion logic in one place).
-   Constructs where expected type flows in from context check (args, assign RHS,
-   return, conditions, if-branches).
-
-7. **Architectural discussions drive plan updates.** When mode-correctness questions
-   arise (e.g., "should IfThenElse check or synth?"), the answer is derived from
-   the literature (Dunfield & Krishnaswami, Levy), recorded in the architecture,
-   and the plan is updated before code is changed.
+**What theory says:** Fine-Grain Call-By-Value (Levy 2003) separates values from
+producers in the TERM STRUCTURE. If Translation produces well-typed FGCBV terms,
+no lowering passes are needed — the output is already in a form Core can consume.
+All 8 passes are subsumed by a single elaboration pass that produces correct
+output by construction.
 
 ---
 
-## What's Different This Time
+### Problem 3: Illegal States Are Representable
 
-The previous approach to improving the pipeline was: write code, review code, iterate.
-This failed because:
+**PR #835** ("Laurel: Lift Procedure Calls in Asserts"): An agent-authored commit
+(`97bce95`) used `$c_1` (the error output) where `$c_0` (the result) was needed.
+The code compiled. The tests passed. Both variables were valid at that program point
+with compatible Lean types. The bug was caught only by human review.
 
-- No shared definition of "correct"
-- Reviews were judgment calls, not mechanical checks
-- Contributors could disagree and both be "right" under their own assumptions
+**Why it's structural:** The Lean types of `$c_0` and `$c_1` are both `StmtExprMd`.
+There is no type-level distinction between "the result output" and "the error output."
+Any refactoring that swaps them compiles cleanly. This is not a testing gap — it's
+a representation gap. The types don't encode the invariant.
 
-The new approach is: define correctness formally (architecture), derive implementation
-mechanically (plan), verify compliance automatically (review agents), test differentially
-(baseline comparison). The human's job is architectural decisions. The machine's job is
-correct transcription.
+**What theory says:** HOAS (Higher-Order Abstract Syntax) smart constructors bind
+output variables via closures. The continuation receives `rv` (the result) as a
+function parameter — `$c_1` (the error output) literally doesn't exist in scope.
+You cannot reference the wrong variable because the wrong variable isn't a term
+you can construct.
+
+---
+
+### Problem 4: Architectural Disagreement Blocks Progress
+
+**PR #753** (pipeline restructuring): 472 comments, 195 commits, ~2 months.
+
+**PR #954**: Blocked for weeks on whether field access should use heap
+parameterization or opaque read/update procedures. Both approaches are defensible.
+Neither can yield because there's no written architecture to appeal to.
+
+**Why it's structural:** When the architecture exists only in reviewers' heads,
+every PR is a negotiation between implicit mental models. The reviewer says "this
+should be a Composite" and the author says "I think it should stay as Any." Neither
+is wrong — they're operating under different unstated assumptions about when
+coercions should fire.
+
+**What theory says:** A written formal specification (graded FGCBV with bidirectional
+typing) provides a single source of truth. "Should this be Composite or Any?" is
+answered by: "What does `synthValue` produce? What does the context expect? The
+subsumption table determines the coercion." No negotiation. No judgment calls.
+
+---
+
+### Problem 5: Every Python Construct Requires Whole-Pipeline Reasoning
+
+Adding support for a new Python construct (e.g., `match` statements, walrus
+operator, decorated functions) currently requires:
+1. Adding Translation cases
+2. Checking if any of the 8 lowering passes interact badly
+3. Verifying Core handles the new output
+4. Testing end-to-end (no intermediate checks possible)
+
+The blast radius of any change is the entire pipeline. There's no way to verify
+that Translation's output is correct in isolation — you can only test it after
+all passes have run and Core has type-checked it.
+
+**In the new pipeline:** Adding a Python construct means:
+1. Add one case to Translation (emit Laurel)
+2. Add one typing rule to Elaboration (if the construct has non-trivial effects)
+3. Both are independently checkable: Translation's output must be well-formed
+   Laurel, Elaboration's typing rules must be mode-correct
+
+---
+
+## The Replacement: Theory-Grounded Elaboration
+
+### Architecture
+
+A 1000+ line formal specification (`ARCHITECTURE_V2.md`) grounding every decision:
+
+| What | How | Theory |
+|------|-----|--------|
+| When coercions fire | Subsumption at check boundaries | Bidirectional typing |
+| Which effects a call has | Coinductive fixpoint over call graph | Graded monoid |
+| How heap is threaded | Grade determines calling convention | State-passing translation |
+| What's a value vs producer | FGCBV term structure | Levy's CBPV |
+| What's representable | Metadata by construction, HOAS bindings | Correct by construction |
+
+### Pipeline
+
+```
+Python AST → [Resolution] → Γ
+Python AST + Γ → [Translation] → Laurel (effects implicit)
+Laurel + Γ → [Elaboration] → GFGL (effects explicit, coercions inserted)
+GFGL → [Projection] → Laurel (ready for Core)
+```
+
+Three passes. No lowering. Translation handles syntax. Elaboration handles
+semantics. They don't know about each other's jobs.
+
+### Current Status (2026-05-08)
+
+- **Zero crashes** on all 46 CI tests (old pipeline also zero crashes)
+- **29/54 tests pass** (old: 28/54) — +1 genuine improvement
+- **4 encoding gaps** where old pipeline proves VCs the new one can't yet
+  (solver quality, not soundness)
+- **Old pipeline untouched** — both coexist, old serves as baseline
+- **~2500 lines new code** (Resolution + Translation + Elaboration)
+
+### Engineering Principles Enforced
+
+| Principle | How |
+|-----------|-----|
+| Illegal states unrepresentable | Unresolved names → Hole (can't emit undefined StaticCall) |
+| No boolean blindness | Pattern match on NameInfo, not `isResolved : Bool` |
+| No strings for types | `annotationToHighType` from AST directly, Union → Any in Resolution |
+| Metadata by construction | Every FGL term carries `md` from source (can't lose source locations) |
+| Grade determines calling convention | `mkGradedCall` uses declared outputs (can't get arity wrong) |
+
+---
+
+## The Ask
+
+Replace the old `PythonToLaurel.lean` + 8 lowering passes with the new
+Resolution → Translation → Elaboration pipeline. The old pipeline continues
+to exist as a parallel path (`pyAnalyzeLaurel`) until the new pipeline
+(`pyAnalyzeV2`) achieves full feature parity on the 52 Kiro benchmarks.
+
+The investment is already made (architecture + implementation exist). The
+remaining work is encoding quality improvements to close the 4 solver gaps
+and extending Translation to handle the full Python construct set needed by
+the benchmarks.
