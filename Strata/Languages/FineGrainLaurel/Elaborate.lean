@@ -588,13 +588,14 @@ partial def elabAssign (md : Md) (target value : StmtExprMd) (rest : List StmtEx
         let freshH ← freshVar "heap"
         modify fun s => { s with heapVar := some freshH }
         extendEnv freshH .THeap do
+          let coercedObj := applySubsume obj (.TCore "Composite") (eraseType targetTy)
           if needsDecl then
             let name := match target.val with | .Identifier id => id.text | _ => "_x"
             let cont ← extendEnv name (.UserDefined (Identifier.mk classId.text none)) (elabRest rest grade)
-            pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.varDecl md name (.TCore "Composite") (some obj) cont))
+            pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.varDecl md name (eraseType targetTy) (some coercedObj) cont))
           else do
             let after ← elabRest rest grade
-            pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.assign md tv obj after))
+            pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.assign md tv coercedObj after))
       | none => failure
     | .StaticCall callee args =>
       let sig ← lookupFuncSig callee.text
@@ -649,6 +650,13 @@ partial def elabAssign (md : Md) (target value : StmtExprMd) (rest : List StmtEx
         let fv := FGLValue.fieldAccess md ov field.text
         let after ← elabRest rest grade
         pure (.assign md tv fv after)
+    | .Block stmts _ =>
+      let assignLast : StmtExprMd := match stmts.reverse with
+        | last :: initRev =>
+          let init := initRev.reverse
+          ⟨.Block (init ++ [⟨.Assign [target] last, md⟩]) none, value.md⟩
+        | [] => ⟨.Block [] none, value.md⟩
+      checkProducer assignLast rest grade
     | _ =>
       let cv ← checkValue value targetTy
       if needsDecl then
