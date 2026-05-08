@@ -191,23 +191,41 @@ proc signatures get Composite where they should get Any, causing spurious coerci
 ### The Grade Monoid (Residuated Partially-Ordered)
 
 ```
-(E, ≤, 1, ·, \) where E = {1, err, heap, heap·err}
+(E, ≤, 1, ·, \) where E = {1, proc, err, heap, heapErr}
 
 Order:
-  1 ≤ err ≤ heap·err
-  1 ≤ heap ≤ heap·err
+  1 ≤ proc ≤ err ≤ heapErr
+  1 ≤ proc ≤ heap ≤ heapErr
 
 Multiplication:
   1 · e = e · 1 = e
-  err · heap = heap · err = heap·err
+  proc · proc = proc
+  proc · err = err     err · proc = err
+  proc · heap = heap   heap · proc = heap
+  err · heap = heapErr   heap · err = heapErr
   e · e = e
 
 Left residual (d \ e):
   1 \ e = e
-  err \ err = 1        err \ heap·err = heap
-  heap \ heap = 1      heap \ heap·err = err
-  heap·err \ heap·err = 1
+  proc \ proc = 1     proc \ err = err     proc \ heap = heap   proc \ heapErr = heapErr
+  err \ err = 1        err \ heapErr = heap
+  heap \ heap = 1      heap \ heapErr = err
+  heapErr \ heapErr = 1
 ```
+
+**The `proc` grade:** Represents a computation that MUST be sequenced at
+statement level but carries no specific effect (no error output, no heap
+threading). Runtime procedures declared with `procedure` (not `function`)
+that have no Error/Heap in their signature get grade `proc`. The calling
+convention for `proc`: bind via `effectfulCall` with outputs matching
+the procedure's declared outputs (typically `[result]`). No extra outputs
+added.
+
+`proc` exists because Laurel distinguishes `function` (can appear in
+expressions, Core emits as `.op`) from `procedure` (must be at statement
+level, Core emits as `.call`). A runtime procedure like `datetime_now()`
+has no error or heap effects but CANNOT appear inside an expression —
+it must be bound first.
 
 ### Judgments
 
@@ -260,14 +278,80 @@ f : (A₁,...,Aₙ) → B    grade(f) = d (from procGrades)    d > 1    vᵢ ⇐
 Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇒ TVoid & e
 ─────────────────────────────────────────
 Γ ⊢_p (while V do M) ⇒ TVoid & e
+
+Γ ⊢_v V ⇐ bool
+───────────────────────────
+Γ ⊢_p (assume V) ⇒ TVoid & 1
+
+───────────────────────────
+Γ ⊢_p (exit label) ⇒ TVoid & 1
+
+Γ ⊢_p M ⇐ A & e
+───────────────────────────────────────────
+Γ ⊢_p (labeledBlock label M after) ⇐ A & e
+  where after is elaborated ONCE as continuation after the block
+
+Γ ⊢_p M ⇒ B & d    Γ ⊢_p (x := M) ⇐ A & e
+  -- Assignment with effectful RHS: desugar via to-rule
+  -- x := f(args) where grade(f) > 1 →
+  --   f(args) to tmp. x := tmp; rest
+```
+
+### Assignment Rules (Derived from the To-Rule)
+
+Assignments are NOT a separate judgment — they are producers handled
+by `checkProducer`. The RHS determines the structure:
+
+```
+-- Pure RHS: value assignment
+Γ ⊢_v V ⇐ Γ(x)
+───────────────────────────
+Γ ⊢_p (x := V; rest) ⇐ A & e    ~~>  assign x V (elabRest rest)
+
+-- Effectful RHS: to-rule (ANF-lift)
+grade(f) = d > 1    vᵢ ⇐ Aᵢ
+────────────────────────────────────────────────────────────
+Γ ⊢_p (x := f(args); rest) ⇐ A & e
+  ~~>  mkSmartConstructor f args retTy d (fun rv => assign x (coerce rv) (elabRest rest))
+
+-- IfThenElse RHS (ternary): desugar to statement-level if
+Γ ⊢_p (x := if c then a else b; rest) ⇐ A & e
+  ~~>  checkProducer (if c then x:=a else x:=b) rest grade
+
+-- Block RHS (class instantiation): desugar
+Γ ⊢_p (x := Block[stmts; last]; rest) ⇐ A & e
+  ~~>  checkProducer (Block[stmts; x:=last]) rest grade
+
+-- New RHS: heap effect + coercion to target type
+Γ ⊢_p (x := new C; rest) ⇐ A & e    where grade(heap) ≤ e
+  ~~>  varDecl heap (increment $heap)
+       assign x (coerce (MkComposite ...) targetTy)
+       elabRest rest
+
+-- FieldSelect RHS (heap read): Box protocol
+Γ ⊢_p (x := obj.field; rest) ⇐ A & e    where grade(heap) ≤ e
+  ~~>  assign x (Box..tVal!(readField($heap, obj, ClassName.fieldName)))
+       elabRest rest
+
+-- Field write target:
+Γ ⊢_p (obj.field := v; rest) ⇐ A & e    where grade(heap) ≤ e
+  ~~>  varDecl heap (updateField($heap, obj, fieldName, BoxT(v)))
+       elabRest rest
+
+-- Subscript assignment target:
+Γ ⊢_p (root[i₁][i₂]... := v; rest) ⇐ A & e
+  ~~>  assign root (Any_sets(ListAny[i₁,i₂,...], root, v))
+       elabRest rest
 ```
 
 ### Producer Checking
 
 ```
-Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇐ A & e    Γ ⊢_p N ⇐ A & e
-──────────────────────────────────────────────────────────
-Γ ⊢_p (if V then M else N) ⇐ A & e
+-- If/then/else: branches elaborate standalone, rest goes in `after`
+Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇐ A & e    Γ ⊢_p N ⇐ A & e    Γ ⊢_p K ⇐ A & e
+──────────────────────────────────────────────────────────────────────────────
+Γ ⊢_p (ifThenElse V M N K) ⇐ A & e
+  where K = elabRest(rest) elaborated ONCE (not duplicated into branches)
 
 Γ ⊢_v V ⇐ T    Γ, x:T ⊢_p body ⇐ A & e
 ──────────────────────────────────────────
@@ -410,12 +494,17 @@ proof-relevant: it determines the FGL term produced at the call site.
 ```lean
 inductive ConventionWitness where
   | pureCall                -- grade 1: value-level, no binding
+  | procCall                -- grade proc: bind [result] (statement-level, no extra outputs)
   | errorCall               -- grade err: bind [result, error]
   | heapCall                -- grade heap: pass heap, bind [heap', result]
   | heapErrorCall           -- grade heap·err: pass heap, bind [heap', result, error]
 
 def subgrade : Grade → Grade → Option ConventionWitness
   | .pure,    _        => some .pureCall
+  | .proc,    .proc    => some .procCall
+  | .proc,    .err     => some .procCall
+  | .proc,    .heap    => some .procCall
+  | .proc,    .heapErr => some .procCall
   | .err,     .err     => some .errorCall
   | .err,     .heapErr => some .errorCall
   | .heap,    .heap    => some .heapCall
@@ -423,6 +512,11 @@ def subgrade : Grade → Grade → Option ConventionWitness
   | .heapErr, .heapErr => some .heapErrorCall
   | _,        _        => none
 ```
+
+**`procCall` convention:** `mkProcCall md callee args resultTy body` —
+binds the procedure's declared outputs (no extra error/heap added).
+The outputs match the proc's signature exactly. Used when a `proc`-grade
+callee appears in any ambient grade ≥ proc.
 
 Application via smart constructors (read heapVar from state internally):
 
@@ -432,6 +526,7 @@ Application via smart constructors (read heapVar from state internally):
 -- prepend heap if needed, generate fresh output names (HOAS), extend Γ,
 -- call body closure.
 
+def mkProcCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 def mkErrorCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 def mkHeapCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 def mkHeapErrorCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
@@ -623,9 +718,16 @@ def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
   let hasError := proc.outputs.any fun o => eraseType o.type.val == .TCore "Error"
   let hasHeap := proc.inputs.any fun i => eraseType i.type.val == .TCore "Heap"
   match hasHeap, hasError with
-  | true, true => .heapErr | true, false => .heap
-  | false, true => .err    | false, false => .pure
+  | true, true => .heapErr
+  | true, false => .heap
+  | false, true => .err
+  | false, false => if proc.isFunctional then .pure else .proc
 ```
+
+`isFunctional` distinguishes Laurel `function` (pure, can appear in
+expressions) from `procedure` (must be at statement level). A runtime
+procedure with no Error/Heap gets grade `proc` — ensuring it's ANF-lifted
+to statement level rather than nested in expressions.
 
 They enter `procGrades` as initial values before fixpoint iteration begins.
 Uses `eraseType` (not string matching on type names) so it handles both
@@ -641,6 +743,55 @@ runtime call boundary (the sig is in `typeEnv`).
 - Deterministic (`.Hole true`): `varDecl x T (some (staticCall "$hole_N" [])) body`
 
 After elaboration, no Hole nodes remain.
+
+### Core Interface Requirements
+
+The Laurel→Core translator (`translateMinimal`) imposes constraints on the
+elaborated output:
+
+1. **`function` vs `procedure`:** Core distinguishes them. `function` declarations
+   can appear in expressions (`.op`). `procedure` declarations MUST be at statement
+   level (`.call`). The elaborator must NOT nest procedure calls inside expressions.
+   This is enforced by the grade system: `synthValue` only accepts grade `pure`
+   callees (functions). Grade > pure forces the call through the producer path
+   which emits it at statement level.
+
+2. **Datatype constructors** (from_int, ListAny_cons, etc.) are expressions — they're
+   resolved by Core from the datatype definition. They do NOT need procedure entries.
+   The elaborator treats them as pure functions (they have FuncSigs in the prelude).
+
+3. **Output arity:** A `.call` statement's LHS targets must match the callee's
+   declared output count exactly. `mkProcCall` uses the proc's declared outputs.
+   `mkErrorCall` adds `[result, err]`. `mkHeapCall` adds `[heap, result]`. The
+   elaborator's signature rewriting must match what callers emit.
+
+4. **`__main__` metadata:** `__main__` MUST have `sourceRangeToMd` metadata so Core
+   classifies it as a user proc and generates VCs from its assertions. Without
+   metadata, Core skips it → vacuous passes (unsound).
+
+5. **Elaboration failure:** If elaboration fails on a proc body (returns `none`),
+   the proc passes through unelaborated. If it has metadata, Core strict-checks it
+   and may crash. Therefore: elaboration MUST NOT fail on any proc. If a construct
+   is unhandled, emit a havoc (nondeterministic hole) rather than failing.
+
+### FGL Term Structure
+
+```lean
+inductive FGLProducer where
+  | ifThenElse (md) (cond) (thn) (els) (after : FGLProducer)
+  | labeledBlock (md) (label) (body) (after : FGLProducer)
+  ...
+```
+
+Both `ifThenElse` and `labeledBlock` have an `after` field. This is the
+continuation elaborated ONCE — preventing exponential duplication.
+
+For `ifThenElse`: both branches elaborate standalone (rest = []).
+`after` = elabRest(rest). Projection: `[if cond then {thn} else {els}] ++ after`.
+
+For `labeledBlock`: the block body may contain `exit label` which jumps
+to end of block. `after` continues after the block ends. Projection:
+`[{label: body}] ++ after`.
 
 ---
 
@@ -697,8 +848,12 @@ because each FGL term carries its own. Coercions inserted by subsumption inherit
 | `x = expr` | `Assign [x] expr` |
 | `a, b = rhs` | `tmp := rhs; a := Get(tmp,0); b := Get(tmp,1)` |
 | `x += v` | `Assign [x] (PAdd x v)` |
+| `x[i] = v` | `Assign [x] (Any_sets(ListAny_cons(i, ListAny_nil()), x, v))` |
+| `x[i][j] = v` | `Assign [x] (Any_sets(ListAny_cons(i, ListAny_cons(j, ListAny_nil())), x, v))` |
+| `x[start:stop]` | `Any_get(x, from_Slice(Any..as_int!(start), OptSome(Any..as_int!(stop))))` |
+| `x[start:]` | `Any_get(x, from_Slice(Any..as_int!(start), OptNone()))` |
 | `return e` | `LaurelResult := e; exit $body` |
-| `Foo(args)` (class) | `tmp := New Foo; Foo@__init__(tmp, args); tmp` |
+| `Foo(args)` (class) | `Assign [tmp] (New Foo); Foo@__init__(tmp, args)` |
 | `with mgr as v: body` | `v := Type@__enter__(mgr); body; Type@__exit__(mgr)` |
 | `for x in iter: body` | `x := Hole; Assume(PIn(x, iter)); body` (labeled blocks for break/continue) |
 | `[a, b, c]` | `from_ListAny(ListAny_cons(a, ListAny_cons(b, ListAny_cons(c, ListAny_nil()))))` |
@@ -706,15 +861,37 @@ because each FGL term carries its own. Coercions inserted by subsumption inherit
 | `f"{expr}"` | `to_string_any(expr)` |
 | `str(x)` | `to_string_any(x)` (via builtinMap) |
 
+### Method FuncSigs
+
+Method FuncSigs include `self` with type `UserDefined className`:
+```
+MyClass@__init__ : (self: MyClass, param1: T1, ...) → Any
+```
+Translation strips self from the FuncSig params when building the proc's
+input list (to avoid duplicate self with the explicit selfParam it adds).
+
+### __main__ Metadata
+
+`__main__` MUST have `sourceRangeToMd filePath default` metadata so Core
+classifies it as a user proc and generates VCs. Without it: vacuous passes.
+
+### Constructor FuncSigs in Prelude
+
+Datatype constructors used by Translation/Elaboration must have FuncSigs
+in `preludeSignatures` so the elaborator can check args at correct types:
+- `from_Slice : (int, OptionInt) → Any`
+- `OptSome : (int) → OptionInt`
+- `OptNone : () → OptionInt`
+- `Any_sets : (ListAny, Any, Any) → Any`
+- `BoxAny : (Any) → Box` (for Any-typed fields)
+
 ---
 
 ## Known Tech Debt
 
-**If/then/else continuation duplication:** `checkProducer` for `IfThenElse`
-threads `rest` into both branches. This is semantically correct (both branches
-must continue with the rest of the block) but causes exponential VC blowup on
-nested if/else chains. Fix: introduce a join point (labeled block) so `rest`
-is elaborated once and both branches exit to it.
+**If/then/else continuation:** RESOLVED. `ifThenElse` has an `after` field.
+Both branches elaborate standalone, rest is elaborated once in `after`.
+No duplication.
 
 **Narrowing as pure function:** `Any_to_bool` etc. are modeled as pure (grade 1).
 In Python, `__bool__` can have side effects. If needed later, narrowing becomes
@@ -730,54 +907,13 @@ Translation must emit these specific constructors.
 
 ## Current Status (2026-05-08)
 
-### Comparison with Old Pipeline (`pyAnalyzeLaurel`)
+**Elaborator deleted. Rewrite in progress.**
 
-The old pipeline (Translation-only, no elaboration) handles effects and
-coercions inside Translation itself — boolean flags, ad-hoc passes, and
-interleaved concerns. The new pipeline (`pyAnalyzeV2`) separates these
-cleanly: Translation emits structure, Elaboration handles semantics.
-
-**Test outcomes (54 in-tree tests):**
-
-| | Old pipeline | New pipeline | Delta |
-|---|---|---|---|
-| Analysis success | 28 | 32 | +4 |
-| Inconclusive | 24 | 20 | −4 |
-| Internal error | 1 | 1 | same (test_unsupported_config, no CI expected) |
-
-Every test the old pipeline passes, the new pipeline passes too (zero
-regressions on RESULT line). Four tests report "Analysis success" where
-the old pipeline reports "Inconclusive" — however these are **vacuous
-passes** (0 VCs generated). The elaborator produces empty bodies for
-these procs, so Core trivially accepts them. These are NOT genuine
-improvements — they indicate elaboration is silently discarding proc
-bodies that it fails to elaborate.
-
-**VC generation differences:**
-
-The new pipeline produces fewer VCs per test in most cases. This is
-expected: the elaborator inserts coercions only where type boundaries
-require them (bidirectional, demand-driven), while the old pipeline
-inserted them more conservatively. Fewer VCs means faster solver time
-with no loss of coverage.
-
-Exception: nested if/else chains produce *more* VCs due to the
-continuation duplication bug (see Known Tech Debt). This is the main
-remaining issue for exact output match.
-
-**Source location fidelity:**
-
-Output source locations (file, line, column) match the original Python
-source exactly. Each FGL term carries metadata from the source statement
-that produced it (correct by construction — see §Projection).
-
-**CI compatibility:**
-
-The new pipeline is not yet wired into CI (`run_py_analyze.sh` runs
-`pyAnalyzeLaurel`). The 46 CI expected files test exact output match
-against the old pipeline. Once the if/else duplication bug is fixed and
-remaining inconclusives are resolved, the expected files will be
-regenerated for the new pipeline.
+The previous elaborator was deleted because it had no `proc` grade,
+no calling convention for procedures vs functions, and no handling of
+several Laurel constructs. The architecture doc has been updated with
+all the missing specifications. The next step is to write the new
+elaborator mechanically from this updated architecture.
 
 ---
 
