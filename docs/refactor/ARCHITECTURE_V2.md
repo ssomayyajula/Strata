@@ -101,6 +101,16 @@ inductive NameInfo where
 
 Resolution does NOT determine effects. Effects are inferred by elaboration.
 
+**Contract with Translation:** Every name Translation wants to call MUST be
+in `TypeEnv.names`. Translation looks up names via `Option NameInfo`. If the
+lookup returns `none`, Translation emits `Hole` (nondeterministic havoc).
+There is no code path that produces `StaticCall` for an unresolved name.
+
+**No strings for types:** `annotationToHighType` goes directly from Python
+annotation AST → `HighType`. Union types (`int | bool`, `Optional[X]`,
+`List[X]`) that can't be precisely represented → `.TCore "Any"`. This
+decision is made in Resolution, not in Translation.
+
 ---
 
 ## Translation
@@ -856,6 +866,40 @@ because each FGL term carries its own. Coercions inserted by subsumption inherit
 | Separation of concerns | Decisions in wrong place |
 | Monad carries context | Ad-hoc parameter passing |
 | Types flow down | Bottom-up guessing |
+| Illegal states unrepresentable | Undefined name references, invalid calls |
+| No strings | Type-level resolution, not runtime checks |
+
+### Illegal States Unrepresentable
+
+**Resolution → Translation contract:** Translation CANNOT emit a `StaticCall`
+to a name that is not in Γ. This is enforced representationally:
+
+```lean
+-- Resolution produces resolved names, not strings
+structure ResolvedCall where
+  sig : FuncSig            -- proof that the callee exists in Γ
+  resolvedArgs : List StmtExprMd  -- args already matched to params
+
+-- Translation's StaticCall takes a ResolvedCall, not an Identifier
+-- If lookupName returns none → emit Hole (undefined = nondeterministic)
+-- There is NO path that produces StaticCall with an unresolved name
+```
+
+This eliminates an entire class of bugs:
+- Undefined function calls (→ Core "not found" errors)
+- Arity mismatches (args checked against sig at construction time)
+- Type-level module resolution failures silently producing garbage names
+
+**No strings for types:** Types flow through the pipeline as `HighType`
+values, never as strings. `extractTypeStr` + `pythonTypeToLaurel` is
+ABOLISHED. Type annotations go directly from Python AST → `HighType`
+via `Resolution.annotationToHighType`. Union types that can't be
+represented → `.TCore "Any"` (handled in Resolution, not Translation).
+
+**No boolean blindness in Resolution:** `NameInfo` is an inductive —
+pattern matching on it gives you the data you need. There is no
+`isResolved : String → Bool` followed by a separate lookup. The lookup
+IS the check. `Option NameInfo` is the only interface.
 
 ---
 

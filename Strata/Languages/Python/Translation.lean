@@ -17,7 +17,9 @@ open Strata.Python.Resolution
 
 public section
 
+-- ═══════════════════════════════════════════════════════════════════════════════
 -- Error
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 inductive TransError where
   | unsupportedConstruct (msg : String)
@@ -31,21 +33,25 @@ instance : ToString TransError where
     | .internalError msg => s!"Translation: internal error: {msg}"
     | .userError _range msg => s!"User code error: {msg}"
 
+-- ═══════════════════════════════════════════════════════════════════════════════
 -- State + Monad
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 structure TransState where
   freshCounter : Nat := 0
-  filePath : String := ""
-  loopLabels : List (String × String) := []
+  filePath : System.FilePath := ""
+  loopLabels : List (Identifier × Identifier) := []
   variableTypes : Std.HashMap String String := {}
   deriving Inhabited
 
 abbrev TransM := ReaderT Resolution.TypeEnv (StateT TransState (Except TransError))
 
--- Smart Constructors
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Smart Constructors — no strings for metadata
+-- ═══════════════════════════════════════════════════════════════════════════════
 
-private def sourceRangeToMd (filePath : String) (sr : SourceRange) : Imperative.MetaData Core.Expression :=
-  let uri : Uri := .file filePath
+private def sourceRangeToMd (filePath : System.FilePath) (sr : SourceRange) : Imperative.MetaData Core.Expression :=
+  let uri : Uri := .file filePath.toString
   #[⟨ Imperative.MetaData.fileRange, .fileRange ⟨ uri, sr ⟩ ⟩]
 
 def mkExpr (sr : SourceRange) (expr : StmtExpr) : TransM StmtExprMd := do
@@ -55,38 +61,26 @@ private def defaultMd : Imperative.MetaData Core.Expression := #[]
 def mkExprDefault (expr : StmtExpr) : StmtExprMd := { val := expr, md := defaultMd }
 def mkTypeDefault (ty : HighType) : HighTypeMd := { val := ty, md := defaultMd }
 
--- Type Annotations
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Monad Helpers — names are Identifiers, not strings
+-- ═══════════════════════════════════════════════════════════════════════════════
 
-def pythonTypeToLaurel (typeStr : String) : HighType :=
-  match typeStr with
-  | "int" => .TInt | "bool" => .TBool | "str" => .TString
-  | "float" => .TFloat64 | "None" => .TVoid | "Any" => .TCore "Any"
-  | other => .UserDefined (Identifier.mk other none)
+def freshId (pfx : String) : TransM Identifier := do
+  let s ← get; set { s with freshCounter := s.freshCounter + 1 }
+  pure (Identifier.mk s!"{pfx}_{s.freshCounter}" none)
 
-partial def extractTypeStr (e : Python.expr SourceRange) : String :=
-  match e with
-  | .Name _ n _ => n.val
-  | .Constant _ (.ConString _ s) _ => s.val
-  | .Subscript _ val slice _ => s!"{extractTypeStr val}[{extractTypeStr slice}]"
-  | .Attribute _ val attr _ => s!"{extractTypeStr val}.{attr.val}"
-  | .Tuple _ elts _ => String.intercalate ", " (elts.val.toList.map extractTypeStr)
-  | .BinOp _ left _ right => s!"{extractTypeStr left} | {extractTypeStr right}"
-  | _ => "Any"
-
--- Monad Helpers
-
-def freshVar (pfx : String := "tmp") : TransM String := do
-  let s ← get; set { s with freshCounter := s.freshCounter + 1 }; return s!"{pfx}_{s.freshCounter}"
-
-def pushLoopLabel (pfx : String) : TransM (String × String) := do
+def pushLoopLabel (pfx : String) : TransM (Identifier × Identifier) := do
   let s ← get
-  let bk := s!"{pfx}_break_{s.freshCounter}"; let ct := s!"{pfx}_continue_{s.freshCounter}"
+  let bk := Identifier.mk s!"{pfx}_break_{s.freshCounter}" none
+  let ct := Identifier.mk s!"{pfx}_continue_{s.freshCounter}" none
   set { s with freshCounter := s.freshCounter + 1, loopLabels := (bk, ct) :: s.loopLabels }
   return (bk, ct)
 
 def popLoopLabel : TransM Unit := modify fun s => { s with loopLabels := s.loopLabels.tail! }
-def currentBreakLabel : TransM (Option String) := do return (← get).loopLabels.head?.map (·.1)
-def currentContinueLabel : TransM (Option String) := do return (← get).loopLabels.head?.map (·.2)
+def currentBreakLabel : TransM (Option Identifier) := do return (← get).loopLabels.head?.map (·.1)
+def currentContinueLabel : TransM (Option Identifier) := do return (← get).loopLabels.head?.map (·.2)
+
+-- Lookup through Γ — the ONLY way to resolve names
 def lookupName (name : String) : TransM (Option NameInfo) := do return (← read).names[name]?
 def lookupBuiltin (name : String) : TransM (Option String) := do return (← read).builtinMap[name]?
 def lookupClassFields (className : String) : TransM (List (String × HighType)) := do
@@ -96,7 +90,12 @@ def recordVariableType (varName className : String) : TransM Unit :=
 def lookupVariableType (varName : String) : TransM (Option String) := do
   return (← get).variableTypes[varName]?
 
--- Kwargs + Defaults
+-- Name is resolved iff it's in Γ
+def isResolved (name : String) : TransM Bool := do return (← read).names.contains name
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Kwargs + Defaults — resolved through Γ
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 def translateKwargs (kwargs : Array (Python.keyword SourceRange))
     (translateE : Python.expr SourceRange → TransM StmtExprMd) : TransM (List (String × StmtExprMd)) :=
@@ -123,19 +122,22 @@ def resolveKwargs (funcName : String) (posArgs : List StmtExprMd)
             let hasDefault := match remainingDefaults[idx]? with
               | some (some _) => true | _ => false
             if hasDefault then
-              ordered := ordered ++ [mkExprDefault (.StaticCall "from_None" [])]
+              ordered := ordered ++ [mkExprDefault (.StaticCall (Identifier.mk "from_None" none) [])]
         idx := idx + 1
       return ordered
   | _ =>
       if kwargs.isEmpty then return posArgs
       return posArgs ++ kwargs.map (·.2)
 
+-- ═══════════════════════════════════════════════════════════════════════════════
 -- The Fold
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 mutual
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Expression Translation
+-- Every name resolved through Γ. Types from Resolution. Undefined → Hole.
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 partial def translateExpr (e : Python.expr SourceRange) : TransM StmtExprMd := do
@@ -145,72 +147,73 @@ partial def translateExpr (e : Python.expr SourceRange) : TransM StmtExprMd := d
   | .Constant sr (.ConString _ s) _ => mkExpr sr (.LiteralString s.val)
   | .Constant sr (.ConTrue _) _ => mkExpr sr (.LiteralBool true)
   | .Constant sr (.ConFalse _) _ => mkExpr sr (.LiteralBool false)
-  | .Constant sr (.ConNone _) _ => mkExpr sr (.StaticCall "from_None" [])
+  | .Constant sr (.ConNone _) _ => mkExpr sr (.StaticCall (Identifier.mk "from_None" none) [])
   | .Constant sr (.ConFloat _ f) _ => mkExpr sr (.LiteralString f.val)
   | .Constant sr _ _ => mkExpr sr .Hole
   | .Name sr name _ => mkExpr sr (.Identifier name.val)
   | .BinOp sr left op right => do
       let l ← translateExpr left; let r ← translateExpr right
-      let opName := match op with
+      let opId := Identifier.mk (match op with
         | .Add _ => "PAdd" | .Sub _ => "PSub" | .Mult _ => "PMul" | .Div _ => "PDiv"
         | .FloorDiv _ => "PFloorDiv" | .Mod _ => "PMod" | .Pow _ => "PPow"
         | .BitAnd _ => "PBitAnd" | .BitOr _ => "PBitOr" | .BitXor _ => "PBitXor"
-        | .LShift _ => "PLShift" | .RShift _ => "PRShift" | .MatMult _ => "PMatMul"
-      mkExpr sr (.StaticCall opName [l, r])
+        | .LShift _ => "PLShift" | .RShift _ => "PRShift" | .MatMult _ => "PMatMul") none
+      mkExpr sr (.StaticCall opId [l, r])
   | .Compare sr left ops comparators => do
       if ops.val.size != 1 || comparators.val.size != 1 then
         throw (.unsupportedConstruct "Chained comparisons")
       let l ← translateExpr left; let r ← translateExpr comparators.val[0]!
-      let opName := match ops.val[0]! with
+      let opId := Identifier.mk (match ops.val[0]! with
         | .Eq _ => "PEq" | .NotEq _ => "PNEq" | .Lt _ => "PLt" | .LtE _ => "PLe"
         | .Gt _ => "PGt" | .GtE _ => "PGe" | .In _ => "PIn" | .NotIn _ => "PNotIn"
-        | .Is _ => "PIs" | .IsNot _ => "PIsNot"
-      mkExpr sr (.StaticCall opName [l, r])
+        | .Is _ => "PIs" | .IsNot _ => "PIsNot") none
+      mkExpr sr (.StaticCall opId [l, r])
   | .BoolOp sr op values => do
       if values.val.size < 2 then throw (.internalError "BoolOp requires at least 2 operands")
-      let opName := match op with | .And _ => "PAnd" | .Or _ => "POr"
+      let opId := Identifier.mk (match op with | .And _ => "PAnd" | .Or _ => "POr") none
       let exprs ← values.val.toList.mapM translateExpr
       let mut result := exprs[0]!
-      for i in [1:exprs.length] do result ← mkExpr sr (.StaticCall opName [result, exprs[i]!])
+      for i in [1:exprs.length] do result ← mkExpr sr (.StaticCall opId [result, exprs[i]!])
       pure result
   | .UnaryOp sr op operand => do
       let e ← translateExpr operand
-      let opName := match op with | .Not _ => "PNot" | .USub _ => "PNeg" | .UAdd _ => "PPos" | .Invert _ => "PInvert"
-      mkExpr sr (.StaticCall opName [e])
+      let opId := Identifier.mk (match op with
+        | .Not _ => "PNot" | .USub _ => "PNeg" | .UAdd _ => "PPos" | .Invert _ => "PInvert") none
+      mkExpr sr (.StaticCall opId [e])
   | .Call sr func args kwargs => translateCall sr func args kwargs
   | .Attribute sr obj attr _ => do
-      mkExpr sr (.FieldSelect (← translateExpr obj) attr.val)
+      mkExpr sr (.FieldSelect (← translateExpr obj) (Identifier.mk attr.val none))
   | .Subscript sr container slice _ => do
       let c ← translateExpr container
       let idx ← match slice with
         | .Slice sr' start stop _ => do
           let s ← match start.val with
-            | some e => mkExpr sr' (.StaticCall "Any..as_int!" [← translateExpr e])
+            | some e => mkExpr sr' (.StaticCall (Identifier.mk "Any..as_int!" none) [← translateExpr e])
             | none => mkExpr sr' (.LiteralInt 0)
           let e ← match stop.val with
-            | some e => mkExpr sr' (.StaticCall "OptSome" [← mkExpr sr' (.StaticCall "Any..as_int!" [← translateExpr e])])
-            | none => mkExpr sr' (.StaticCall "OptNone" [])
-          mkExpr sr' (.StaticCall "from_Slice" [s, e])
+            | some e => mkExpr sr' (.StaticCall (Identifier.mk "OptSome" none) [← mkExpr sr' (.StaticCall (Identifier.mk "Any..as_int!" none) [← translateExpr e])])
+            | none => mkExpr sr' (.StaticCall (Identifier.mk "OptNone" none) [])
+          mkExpr sr' (.StaticCall (Identifier.mk "from_Slice" none) [s, e])
         | _ => translateExpr slice
-      mkExpr sr (.StaticCall "Any_get" [c, idx])
+      mkExpr sr (.StaticCall (Identifier.mk "Any_get" none) [c, idx])
   | .List sr elts _ => do
       let es ← elts.val.toList.mapM translateExpr
-      let nil ← mkExpr sr (.StaticCall "ListAny_nil" [])
-      let cons ← es.foldrM (fun e acc => mkExpr sr (.StaticCall "ListAny_cons" [e, acc])) nil
-      mkExpr sr (.StaticCall "from_ListAny" [cons])
+      let nil ← mkExpr sr (.StaticCall (Identifier.mk "ListAny_nil" none) [])
+      let cons ← es.foldrM (fun e acc => mkExpr sr (.StaticCall (Identifier.mk "ListAny_cons" none) [e, acc])) nil
+      mkExpr sr (.StaticCall (Identifier.mk "from_ListAny" none) [cons])
   | .Tuple sr elts _ => do
       let es ← elts.val.toList.mapM translateExpr
-      let nil ← mkExpr sr (.StaticCall "ListAny_nil" [])
-      let cons ← es.foldrM (fun e acc => mkExpr sr (.StaticCall "ListAny_cons" [e, acc])) nil
-      mkExpr sr (.StaticCall "from_ListAny" [cons])
+      let nil ← mkExpr sr (.StaticCall (Identifier.mk "ListAny_nil" none) [])
+      let cons ← es.foldrM (fun e acc => mkExpr sr (.StaticCall (Identifier.mk "ListAny_cons" none) [e, acc])) nil
+      mkExpr sr (.StaticCall (Identifier.mk "from_ListAny" none) [cons])
   | .Dict sr keys vals => do
       let ks ← keys.val.toList.mapM (fun k => match k with
         | .some_expr _ e => translateExpr e | .missing_expr sr' => mkExpr sr' .Hole)
       let vs ← vals.val.toList.mapM translateExpr
-      let empty ← mkExpr sr (.StaticCall "DictStrAny_empty" [])
+      let empty ← mkExpr sr (.StaticCall (Identifier.mk "DictStrAny_empty" none) [])
       let cons ← (List.zip ks vs).foldrM (fun (k, v) acc =>
-        mkExpr sr (.StaticCall "DictStrAny_cons" [k, v, acc])) empty
-      mkExpr sr (.StaticCall "from_DictStrAny" [cons])
+        mkExpr sr (.StaticCall (Identifier.mk "DictStrAny_cons" none) [k, v, acc])) empty
+      mkExpr sr (.StaticCall (Identifier.mk "from_DictStrAny" none) [cons])
   | .IfExp sr test body orelse => do
       mkExpr sr (.IfThenElse (← translateExpr test) (← translateExpr body) (some (← translateExpr orelse)))
   | .JoinedStr sr values => do
@@ -218,9 +221,10 @@ partial def translateExpr (e : Python.expr SourceRange) : TransM StmtExprMd := d
       else do
         let parts ← values.val.toList.mapM translateExpr
         let mut result ← mkExpr sr (.LiteralString "")
-        for p in parts do result ← mkExpr sr (.StaticCall "PAdd" [result, p])
+        for p in parts do result ← mkExpr sr (.StaticCall (Identifier.mk "PAdd" none) [result, p])
         pure result
-  | .FormattedValue sr value _ _ => do mkExpr sr (.StaticCall "to_string_any" [← translateExpr value])
+  | .FormattedValue sr value _ _ => do
+      mkExpr sr (.StaticCall (Identifier.mk "to_string_any" none) [← translateExpr value])
   | .Lambda sr .. => mkExpr sr .Hole
   | .Set sr .. => mkExpr sr .Hole
   | .ListComp sr .. => mkExpr sr .Hole
@@ -237,7 +241,7 @@ partial def translateExpr (e : Python.expr SourceRange) : TransM StmtExprMd := d
   | .Interpolation sr .. => mkExpr sr .Hole
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Call Resolution (single entry point)
+-- Call Resolution — resolved through Γ. Undefined → Hole.
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 partial def translateCall (sr : SourceRange) (func : Python.expr SourceRange)
@@ -253,32 +257,40 @@ partial def translateCall (sr : SourceRange) (func : Python.expr SourceRange)
     if isModule then
       let moduleName := match receiver with | .Name _ rName _ => rName.val | _ => "unknown"
       let funcName := s!"{moduleName}_{methodName.val}"
-      let allArgs ← resolveKwargs funcName posArgs kwargPairs
-      mkExpr sr (.StaticCall funcName allArgs)
+      if (← isResolved funcName) then
+        let allArgs ← resolveKwargs funcName posArgs kwargPairs
+        mkExpr sr (.StaticCall (Identifier.mk funcName none) allArgs)
+      else mkExpr sr (.Hole (deterministic := false))
     else
       let objExpr ← translateExpr receiver
       let qualifiedName ← resolveMethodName receiver methodName.val sr
-      let resolvedArgs ← resolveKwargs qualifiedName posArgs kwargPairs
-      mkExpr sr (.StaticCall qualifiedName (objExpr :: resolvedArgs))
+      if (← isResolved qualifiedName) then
+        let resolvedArgs ← resolveKwargs qualifiedName posArgs kwargPairs
+        mkExpr sr (.StaticCall (Identifier.mk qualifiedName none) (objExpr :: resolvedArgs))
+      else
+        mkExpr sr (.Hole (deterministic := false))
   | .Name _ calleeName _ =>
     match (← lookupBuiltin calleeName.val) with
     | some laurelName =>
-      mkExpr sr (.StaticCall laurelName (← resolveKwargs laurelName posArgs kwargPairs))
+      mkExpr sr (.StaticCall (Identifier.mk laurelName none) (← resolveKwargs laurelName posArgs kwargPairs))
     | none => match (← lookupName calleeName.val) with
       | some (.class_ className _) =>
-        let tmpName ← freshVar "new"
         let classId := Identifier.mk className none
         let newExpr ← mkExpr sr (.New classId)
-        let tmpDecl ← mkExpr sr (.LocalVariable tmpName (mkTypeDefault (.UserDefined classId)) (some newExpr))
-        let tmpRef ← mkExpr sr (.Identifier tmpName)
+        let tmpId ← freshId "new"
+        let tmpDecl ← mkExpr sr (.LocalVariable tmpId.text (mkTypeDefault (.UserDefined classId)) (some newExpr))
+        let tmpRef ← mkExpr sr (.Identifier tmpId.text)
         let initName := s!"{className}@__init__"
-        let initCall ← mkExpr sr (.StaticCall initName (tmpRef :: (← resolveKwargs initName posArgs kwargPairs)))
+        let initCall ← mkExpr sr (.StaticCall (Identifier.mk initName none) (tmpRef :: (← resolveKwargs initName posArgs kwargPairs)))
         mkExpr sr (.Block [tmpDecl, initCall, tmpRef] none)
       | some (.function sig) =>
-        mkExpr sr (.StaticCall sig.name (← resolveKwargs sig.name posArgs kwargPairs))
-      | _ =>
-        mkExpr sr (.StaticCall calleeName.val (← resolveKwargs calleeName.val posArgs kwargPairs))
-  | _ => mkExpr sr (.StaticCall "call" posArgs)
+        mkExpr sr (.StaticCall (Identifier.mk sig.name none) (← resolveKwargs sig.name posArgs kwargPairs))
+      | some _ =>
+        mkExpr sr (.StaticCall (Identifier.mk calleeName.val none) (← resolveKwargs calleeName.val posArgs kwargPairs))
+      | none =>
+        -- NOT in Γ → Hole (undefined name, architecture requirement)
+        mkExpr sr (.Hole (deterministic := false))
+  | _ => mkExpr sr (.Hole (deterministic := false))
 
 partial def resolveMethodName (receiver : Python.expr SourceRange) (methodName : String) (sr : SourceRange) : TransM String := do
   match receiver with
@@ -299,20 +311,69 @@ partial def resolveMethodName (receiver : Python.expr SourceRange) (methodName :
   | _ => pure methodName
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Unpack: recursive tuple destructuring (arbitrary depth)
+-- Statement Translation
 -- ═══════════════════════════════════════════════════════════════════════════════
+
+partial def collectSubscriptChain (expr : Python.expr SourceRange) : TransM (Python.expr SourceRange × List (Python.expr SourceRange)) := do
+  match expr with
+  | .Subscript _ container slice _ =>
+    let (root, innerIndices) ← collectSubscriptChain container
+    pure (root, innerIndices ++ [slice])
+  | other => pure (other, [])
+
+partial def translateAssignSingle (sr : SourceRange) (target value : Python.expr SourceRange) : TransM (List StmtExprMd) := do
+  match target with
+  | .Subscript .. => do
+    let (root, indices) ← collectSubscriptChain target
+    let rootExpr ← translateExpr root
+    let mut idxList ← mkExpr sr (.StaticCall (Identifier.mk "ListAny_nil" none) [])
+    for idx in indices.reverse do
+      let idxExpr ← match idx with
+        | .Slice sr' start stop _ => do
+          let s ← match start.val with
+            | some e => mkExpr sr' (.StaticCall (Identifier.mk "Any..as_int!" none) [← translateExpr e])
+            | none => mkExpr sr' (.LiteralInt 0)
+          let e ← match stop.val with
+            | some e => mkExpr sr' (.StaticCall (Identifier.mk "OptSome" none) [← mkExpr sr' (.StaticCall (Identifier.mk "Any..as_int!" none) [← translateExpr e])])
+            | none => mkExpr sr' (.StaticCall (Identifier.mk "OptNone" none) [])
+          mkExpr sr' (.StaticCall (Identifier.mk "from_Slice" none) [s, e])
+        | _ => translateExpr idx
+      idxList ← mkExpr sr (.StaticCall (Identifier.mk "ListAny_cons" none) [idxExpr, idxList])
+    let rhs ← translateExpr value
+    let setsCall ← mkExpr sr (.StaticCall (Identifier.mk "Any_sets" none) [idxList, rootExpr, rhs])
+    pure [← mkExpr sr (.Assign [rootExpr] setsCall)]
+  | _ =>
+  match value with
+  | .Call _ (.Name _ calleeName _) callArgs callKwargs => do
+    match (← lookupName calleeName.val) with
+    | some (.class_ className _) => do
+      match target with
+      | .Name _ varName _ => recordVariableType varName.val className
+      | _ => pure ()
+      let targetExpr ← translateExpr target
+      let classId := Identifier.mk className none
+      let assignNew ← mkExpr sr (.Assign [targetExpr] (← mkExpr sr (.New classId)))
+      let posArgs ← callArgs.val.toList.mapM translateExpr
+      let kwargPairs ← translateKwargs callKwargs.val translateExpr
+      let initName := s!"{className}@__init__"
+      let initCall ← mkExpr sr (.StaticCall (Identifier.mk initName none) (targetExpr :: (← resolveKwargs initName posArgs kwargPairs)))
+      pure [assignNew, initCall]
+    | _ => do
+      pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
+  | _ => do
+    pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
 
 partial def unpackTargets (sr : SourceRange) (elts : List (Python.expr SourceRange))
     (sourceRef : StmtExprMd) : TransM (List StmtExprMd) := do
   let mut stmts : List StmtExprMd := []
   let mut idx : Int := 0
   for elt in elts do
-    let getExpr ← mkExpr sr (.StaticCall "Any_get" [sourceRef, ← mkExpr sr (.LiteralInt idx)])
+    let getExpr ← mkExpr sr (.StaticCall (Identifier.mk "Any_get" none) [sourceRef, ← mkExpr sr (.LiteralInt idx)])
     match elt with
     | .Tuple _ innerElts _ => do
-      let innerTmp ← freshVar "unpack"
-      let innerRef ← mkExpr sr (.Identifier innerTmp)
-      let innerDecl ← mkExpr sr (.LocalVariable innerTmp (mkTypeDefault (.TCore "Any")) (some getExpr))
+      let innerTmp ← freshId "unpack"
+      let innerRef ← mkExpr sr (.Identifier innerTmp.text)
+      let innerDecl ← mkExpr sr (.LocalVariable innerTmp.text (mkTypeDefault (.TCore "Any")) (some getExpr))
       stmts := stmts ++ [innerDecl]
       stmts := stmts ++ (← unpackTargets sr innerElts.val.toList innerRef)
     | _ => do
@@ -320,10 +381,6 @@ partial def unpackTargets (sr : SourceRange) (elts : List (Python.expr SourceRan
       stmts := stmts ++ [← mkExpr sr (.Assign [tgt] getExpr)]
     idx := idx + 1
   pure stmts
-
--- ═══════════════════════════════════════════════════════════════════════════════
--- Statement Translation
--- ═══════════════════════════════════════════════════════════════════════════════
 
 partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprMd) := do
   let sr := s.ann
@@ -334,16 +391,16 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
     match target with
     | .Tuple _ elts _ => do
       let rhsExpr ← translateExpr value
-      let tmp ← freshVar "unpack"
-      let tmpDecl ← mkExpr sr (.LocalVariable tmp (mkTypeDefault (.TCore "Any")) (some rhsExpr))
-      let tmpRef ← mkExpr sr (.Identifier tmp)
+      let tmp ← freshId "unpack"
+      let tmpDecl ← mkExpr sr (.LocalVariable tmp.text (mkTypeDefault (.TCore "Any")) (some rhsExpr))
+      let tmpRef ← mkExpr sr (.Identifier tmp.text)
       pure ([tmpDecl] ++ (← unpackTargets sr elts.val.toList tmpRef))
     | _ => translateAssignSingle sr target value
 
   | .AnnAssign _ target annotation value _ => do
     match target with
     | .Name _ varName _ =>
-      match (← lookupName (extractTypeStr annotation)) with
+      match (← lookupName (Resolution.extractTypeStr annotation)) with
       | some (.class_ className _) => recordVariableType varName.val className
       | _ => pure ()
     | _ => pure ()
@@ -353,12 +410,12 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
 
   | .AugAssign _ target op value => do
     let t ← translateExpr target; let v ← translateExpr value
-    let opName := match op with
+    let opId := Identifier.mk (match op with
       | .Add _ => "PAdd" | .Sub _ => "PSub" | .Mult _ => "PMul" | .Div _ => "PDiv"
       | .FloorDiv _ => "PFloorDiv" | .Mod _ => "PMod" | .Pow _ => "PPow"
       | .BitAnd _ => "PBitAnd" | .BitOr _ => "PBitOr" | .BitXor _ => "PBitXor"
-      | .LShift _ => "PLShift" | .RShift _ => "PRShift" | .MatMult _ => "PMatMul"
-    pure [← mkExpr sr (.Assign [t] (← mkExpr sr (.StaticCall opName [t, v])))]
+      | .LShift _ => "PLShift" | .RShift _ => "PRShift" | .MatMult _ => "PMatMul") none
+    pure [← mkExpr sr (.Assign [t] (← mkExpr sr (.StaticCall opId [t, v])))]
 
   | .If _ test body orelse => do
     let cond ← translateExpr test
@@ -370,8 +427,8 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
   | .While _ test body _ => do
     let (bk, ct) ← pushLoopLabel "loop"
     let cond ← translateExpr test
-    let inner ← mkExpr sr (.Block (← translateStmtList body.val.toList) (some ct))
-    let outer ← mkExpr sr (.Block [← mkExpr sr (.While cond [] none inner)] (some bk))
+    let inner ← mkExpr sr (.Block (← translateStmtList body.val.toList) (some ct.text))
+    let outer ← mkExpr sr (.Block [← mkExpr sr (.While cond [] none inner)] (some bk.text))
     popLoopLabel; pure [outer]
 
   | .For _ target iter body _ _ => do
@@ -380,8 +437,8 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
     let bodyStmts ← translateStmtList body.val.toList
     let (havocStmts, assumeTarget) ← match target with
       | .Tuple _ elts _ => do
-        let tmp ← freshVar "for_iter"
-        let tmpRef ← mkExpr sr (.Identifier tmp)
+        let tmp ← freshId "for_iter"
+        let tmpRef ← mkExpr sr (.Identifier tmp.text)
         let havoc ← mkExpr sr (.Assign [tmpRef] (← mkExpr sr (.Hole (deterministic := false))))
         let unpacks ← unpackTargets sr elts.val.toList tmpRef
         pure ([havoc] ++ unpacks, tmpRef)
@@ -389,9 +446,9 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
         let tgt ← translateExpr target
         let havoc ← mkExpr sr (.Assign [tgt] (← mkExpr sr (.Hole (deterministic := false))))
         pure ([havoc], tgt)
-    let assume ← mkExpr sr (.Assume (← mkExpr sr (.StaticCall "PIn" [assumeTarget, iterExpr])))
-    let inner ← mkExpr sr (.Block (havocStmts ++ [assume] ++ bodyStmts) (some ct))
-    let outer ← mkExpr sr (.Block [inner] (some bk))
+    let assume ← mkExpr sr (.Assume (← mkExpr sr (.StaticCall (Identifier.mk "PIn" none) [assumeTarget, iterExpr])))
+    let inner ← mkExpr sr (.Block (havocStmts ++ [assume] ++ bodyStmts) (some ct.text))
+    let outer ← mkExpr sr (.Block [inner] (some bk.text))
     popLoopLabel; pure [outer]
 
   | .Return _ value => do
@@ -404,8 +461,8 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
   | .Assert _ test _ => pure [← mkExpr sr (.Assert (← translateExpr test))]
   | .Expr _ value => pure [← translateExpr value]
   | .Pass _ => pure []
-  | .Break _ => do pure [← mkExpr sr (.Exit ((← currentBreakLabel).getD "break"))]
-  | .Continue _ => do pure [← mkExpr sr (.Exit ((← currentContinueLabel).getD "continue"))]
+  | .Break _ => do pure [← mkExpr sr (.Exit ((← currentBreakLabel).map (·.text) |>.getD "break"))]
+  | .Continue _ => do pure [← mkExpr sr (.Exit ((← currentContinueLabel).map (·.text) |>.getD "continue"))]
 
   | .Try _ body handlers _ _ => translateTryExcept sr body handlers
   | .TryStar _ body handlers _ _ => translateTryExcept sr body handlers
@@ -425,9 +482,9 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
               | some (.variable (.UserDefined id)) => pure id.text | _ => pure "Any"
           | _ => pure "Any"
         let enter ← if mgrType == "Any" then mkExpr sr .Hole
-          else mkExpr sr (.StaticCall s!"{mgrType}@__enter__" [ctxVal])
+          else mkExpr sr (.StaticCall (Identifier.mk s!"{mgrType}@__enter__" none) [ctxVal])
         let exit ← if mgrType == "Any" then mkExpr sr .Hole
-          else mkExpr sr (.StaticCall s!"{mgrType}@__exit__" [ctxVal])
+          else mkExpr sr (.StaticCall (Identifier.mk s!"{mgrType}@__exit__" none) [ctxVal])
         match optVars.val with
         | some varExpr => pre := pre ++ [← mkExpr sr (.Assign [← translateExpr varExpr] enter)]
         | none => pre := pre ++ [enter]
@@ -445,12 +502,12 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
             | _ => "UnimplementedError"
           let msg ← if excArgs.val.size > 0 then translateExpr excArgs.val[0]!
             else mkExpr sr (.LiteralString "")
-          mkExpr sr (.StaticCall ctor [msg])
-        | _ => mkExpr sr (.StaticCall "UnimplementedError" [← translateExpr excExpr])
+          mkExpr sr (.StaticCall (Identifier.mk ctor none) [msg])
+        | _ => mkExpr sr (.StaticCall (Identifier.mk "UnimplementedError" none) [← translateExpr excExpr])
       pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier "maybe_except")] errorExpr)]
     | none =>
       pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier "maybe_except")]
-        (← mkExpr sr (.StaticCall "UnimplementedError" [mkExprDefault (.LiteralString "re-raise")])))]
+        (← mkExpr sr (.StaticCall (Identifier.mk "UnimplementedError" none) [mkExprDefault (.LiteralString "re-raise")])))]
 
   | .Import _ _ => pure []
   | .ImportFrom _ _ _ _ => pure []
@@ -465,59 +522,6 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
   | .AsyncFunctionDef _ .. => pure [← mkExpr sr .Hole]
   | .TypeAlias _ .. => pure [← mkExpr sr .Hole]
 
--- ═══════════════════════════════════════════════════════════════════════════════
--- Helpers
--- ═══════════════════════════════════════════════════════════════════════════════
-
-private partial def collectSubscriptChain (expr : Python.expr SourceRange) : TransM (Python.expr SourceRange × List (Python.expr SourceRange)) := do
-  match expr with
-  | .Subscript _ container slice _ =>
-    let (root, innerIndices) ← collectSubscriptChain container
-    pure (root, innerIndices ++ [slice])
-  | other => pure (other, [])
-
-partial def translateAssignSingle (sr : SourceRange) (target value : Python.expr SourceRange) : TransM (List StmtExprMd) := do
-  match target with
-  | .Subscript .. => do
-    let (root, indices) ← collectSubscriptChain target
-    let rootExpr ← translateExpr root
-    let mut idxList ← mkExpr sr (.StaticCall "ListAny_nil" [])
-    for idx in indices.reverse do
-      let idxExpr ← match idx with
-        | .Slice sr' start stop _ => do
-          let s ← match start.val with
-            | some e => mkExpr sr' (.StaticCall "Any..as_int!" [← translateExpr e])
-            | none => mkExpr sr' (.LiteralInt 0)
-          let e ← match stop.val with
-            | some e => mkExpr sr' (.StaticCall "OptSome" [← mkExpr sr' (.StaticCall "Any..as_int!" [← translateExpr e])])
-            | none => mkExpr sr' (.StaticCall "OptNone" [])
-          mkExpr sr' (.StaticCall "from_Slice" [s, e])
-        | _ => translateExpr idx
-      idxList ← mkExpr sr (.StaticCall "ListAny_cons" [idxExpr, idxList])
-    let rhs ← translateExpr value
-    let setsCall ← mkExpr sr (.StaticCall "Any_sets" [idxList, rootExpr, rhs])
-    pure [← mkExpr sr (.Assign [rootExpr] setsCall)]
-  | _ =>
-  match value with
-  | .Call _ (.Name _ calleeName _) callArgs callKwargs => do
-    match (← lookupName calleeName.val) with
-    | some (.class_ className _) => do
-      match target with
-      | .Name _ varName _ => recordVariableType varName.val className
-      | _ => pure ()
-      let targetExpr ← translateExpr target
-      let classId := Identifier.mk className none
-      let assignNew ← mkExpr sr (.Assign [targetExpr] (← mkExpr sr (.New classId)))
-      let posArgs ← callArgs.val.toList.mapM translateExpr
-      let kwargPairs ← translateKwargs callKwargs.val translateExpr
-      let initName := s!"{className}@__init__"
-      let initCall ← mkExpr sr (.StaticCall initName (targetExpr :: (← resolveKwargs initName posArgs kwargPairs)))
-      pure [assignNew, initCall]
-    | _ => do
-      pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
-  | _ => do
-    pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
-
 partial def translateTryExcept (sr : SourceRange)
     (body : Ann (Array (Python.stmt SourceRange)) SourceRange)
     (handlers : Ann (Array (Python.excepthandler SourceRange)) SourceRange) : TransM (List StmtExprMd) := do
@@ -528,7 +532,7 @@ partial def translateTryExcept (sr : SourceRange)
   for stmt in bodyStmts do
     withChecks := withChecks ++ [stmt]
     let ref ← mkExpr sr (.Identifier "maybe_except")
-    let check ← mkExpr sr (.StaticCall "isError" [ref])
+    let check ← mkExpr sr (.StaticCall (Identifier.mk "isError" none) [ref])
     withChecks := withChecks ++ [← mkExpr sr (.IfThenElse check (← mkExpr sr (.Exit catchersLabel)) none)]
   let exitTry ← mkExpr sr (.Exit tryLabel)
   let catchers ← mkExpr sr (.Block (withChecks ++ [exitTry]) (some catchersLabel))
@@ -559,14 +563,14 @@ partial def emitScopeDeclarations (sr : SourceRange)
         let annType := body.toList.findSome? fun stmt => match stmt with
           | .AnnAssign _ (.Name _ n _) ann _ _ =>
             if n.val == varName then
-              match env.names[extractTypeStr ann]? with
+              match env.names[Resolution.extractTypeStr ann]? with
               | some (.class_ className _) => some (HighType.UserDefined (Identifier.mk className none))
               | _ => none
             else none
           | _ => none
         annType.getD varType
       | _ => varType
-    decls := decls ++ [← mkExpr sr (.LocalVariable (Identifier.mk varName none) (mkTypeDefault actualType) none)]
+    decls := decls ++ [← mkExpr sr (.LocalVariable varName (mkTypeDefault actualType) none)]
   pure decls
 
 partial def emitMutableParamCopies (sr : SourceRange)
@@ -587,7 +591,7 @@ partial def translateFunction (s : Python.stmt SourceRange)
         | .mk_arguments _ _ argList _ _ _ _ _ => do
           let ps ← argList.val.toList.mapM fun arg => match arg with
             | .mk_arg _ argName annotation _ =>
-              let ty := match annotation.val with | some e => pythonTypeToLaurel (extractTypeStr e) | none => .TCore "Any"
+              let ty := Resolution.optAnnotationToHighType annotation.val
               pure ({ name := Identifier.mk argName.val none, type := mkTypeDefault ty } : Parameter)
           pure (ps, false)
     let (inputs, paramCopies) ← if isMethod then do
@@ -666,17 +670,14 @@ partial def translateModule (stmts : Array (Python.stmt SourceRange)) : TransM L
 
 end -- mutual
 
+-- ═══════════════════════════════════════════════════════════════════════════════
 -- Runner
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 def runTranslation (stmts : Array (Python.stmt SourceRange))
     (env : Resolution.TypeEnv := {}) (filePath : String := "")
     : Except TransError (Laurel.Program × TransState) :=
-  (translateModule stmts).run env |>.run { filePath }
-
-def runTranslationWithBase (stmts : Array (Python.stmt SourceRange))
-    (baseEnv : Strata.Python.Resolution.TypeEnv := {}) (filePath : String := "")
-    : Except TransError (Laurel.Program × TransState) :=
-  runTranslation stmts baseEnv filePath
+  (translateModule stmts).run env |>.run { filePath := filePath }
 
 end
 end Strata.Python.Translation
