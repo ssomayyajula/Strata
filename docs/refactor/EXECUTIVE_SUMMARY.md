@@ -1,206 +1,179 @@
 # Executive Summary: Python→Laurel Pipeline Refactor
 
-## The Case for a Rewrite
+## Summary
 
-The existing Python→Laurel translation pipeline (2100 lines + 8 lowering passes)
-works for the tests it was built against. But it has reached a point where adding
-new features or fixing cross-cutting bugs requires disproportionate effort — not
-because the code is poorly written, but because the architecture makes certain
-classes of problems structurally unsolvable without a rewrite.
+The Python→Laurel translation pipeline is being replaced with a new architecture
+that introduces a single, written specification governing how type coercions are
+inserted, how effects are tracked, and what intermediate representations are valid.
 
-This document presents the evidence: specific PRs and issues where the current
-architecture forced weeks of iteration, architectural disagreement, or incomplete
-solutions. It then presents the replacement architecture and its current status.
+The existing pipeline (2100 lines of translation + 8 lowering passes) has no such
+specification. As a result, contributors operate under different mental models of
+when coercions should fire, how effects compose, and what constitutes valid
+intermediate output. This leads to:
+
+- **Multiple competing PRs for the same bug** (4 open/merged PRs for Issue #882,
+  each with a different coercion heuristic, none grounded in a shared rule)
+- **Illegal states that compile and pass tests** (PR #835: wrong output variable
+  selected, caught only by human review because the Lean types don't distinguish
+  result from error outputs)
+- **Pass-ordering bugs from implicit structural assumptions** (PR #1011: one
+  lowering pass produces output another pass can't handle)
+- **Blocked PRs from architectural disagreement** (PR #954: 100+ comments, still
+  open, because there's no written rule to appeal to)
+
+The new architecture addresses these by providing a single source of truth
+(`ARCHITECTURE_V2.md`) that determines coercion insertion, effect classification,
+and calling conventions. The implementation is a mechanical transcription of this
+specification. When a question arises ("should this be Composite or Any?"), the
+specification answers it — not a reviewer's mental model.
 
 ---
 
-## Evidence: Structural Problems in the Current Pipeline
+## Problems with the Current Pipeline
 
-### Problem 1: Type Coercions Are Unpredictable
+### 1. Type coercions have no governing rule
 
-**Issue #882:** 13 failing tests from Composite↔Any type mismatches.
+Core's type checker requires explicit coercions between `Composite` and `Any`.
+The current pipeline inserts these ad-hoc in Translation, without a systematic
+rule for when they're needed.
 
-**What happened:** Core's type checker rejects programs where `Composite` appears
-where `Any` is expected (or vice versa). The old pipeline inserts coercions
-(`from_Composite`, `Any..as_Composite!`) ad-hoc in Translation. But Translation
-doesn't have a principled rule for WHEN to coerce — it's case-by-case pattern
-matching scattered across 2100 lines.
-
-**The attempted fixes:**
+Issue #882 documents 13 failing tests from this. Four PRs have attempted fixes:
 
 | PR | Approach | Outcome |
 |----|----------|---------|
-| #727 | Emit `Hole` (unconstrained value) — avoids crash, loses precision | Merged, but explicitly acknowledges "limits bug-finding ability" |
-| #918 | Rename heap datatypes + coercion pathways | Draft, Git conflicts, abandoned |
-| #954 | DynamicComposite wrapping + heap parameterization | 100+ comments, architectural disagreement, still open |
-| #1106 | Coerce all args to Any at call sites | Open, defeats the precondition model entirely |
+| #727 | Replace Composite values with Hole (unconstrained) | Merged; explicitly "limits bug-finding ability" |
+| #918 | Rename heap datatypes + coercion pathways | Draft, abandoned (Git conflicts) |
+| #954 | DynamicComposite + heap parameterization extension | 100+ comments, architectural disagreement, still open |
+| #1106 | Coerce all args to Any at call sites | Open; reviewer notes it "defeats the type-wrapping discipline" |
 
-**Why it's structural:** Each PR proposes a different heuristic because there IS no
-rule. The old pipeline does coercions inside Translation (which doesn't know types)
-instead of in a separate type-directed pass (which does). You cannot fix this by
-adding more cases to Translation — you need a separate elaboration pass that knows
-the type of every subexpression and inserts coercions at type boundaries.
+Each PR proposes a different heuristic because there is no shared rule. The
+current Translation doesn't have access to the type of each subexpression at
+the point where it would need to insert a coercion — it handles syntax, not types.
 
-**What theory says:** Bidirectional typing (Dunfield & Krishnaswami 2021) provides
-a deterministic algorithm: synthesize the expression's type, check it against the
-expected type, insert the coercion witness at the subsumption boundary. One rule,
-one location, zero guessing.
+The new pipeline separates these concerns: Translation handles syntax (producing
+precisely-typed Laurel), and a separate Elaboration pass handles type-directed
+coercion insertion. The Elaboration pass has a complete subsumption table that
+determines exactly when `int → Any` (via `from_int`) or `Any → Composite` (via
+`Any..as_Composite!`) is needed. This table is written in the specification and
+implemented as a single function.
 
----
+### 2. Lowering passes have implicit ordering dependencies
 
-### Problem 2: Lowering Passes Create Ordering Dependencies
+The current pipeline applies 8 Laurel→Laurel transformations between Translation
+and Core:
 
-**PR #1011** (bot-authored, still Draft): `HeapParameterization` generates
-uninitialized local variables inside assertions. `LiftExpressionAssignments`
-can't handle this. The program is structurally invalid after one pass and a
-different kind of structurally invalid after the next.
+1. `heapParameterization` 2. `typeHierarchyTransform` 3. `modifiesClausesTransform`
+4. `inferHoleTypes` 5. `eliminateHoles` 6. `desugarShortCircuit`
+7. `liftExpressionAssignments` 8. `constrainedTypeElim`
 
-**The 8 lowering passes:**
-1. `heapParameterization` — thread Heap through field-touching procedures
-2. `typeHierarchyTransform` — adjust Composite types
-3. `modifiesClausesTransform` — add modifies annotations
-4. `inferHoleTypes` — fill in types for Hole nodes
-5. `eliminateHoles` — remove Hole nodes
-6. `desugarShortCircuit` — rewrite `&&`/`||`
-7. `liftExpressionAssignments` — ANF-lift calls out of expressions
-8. `constrainedTypeElim` — eliminate constrained types
+Each pass assumes specific structural properties of its input. When one pass
+produces unexpected output, subsequent passes may crash or silently produce
+incorrect results.
 
-Each pass assumes the output of the previous pass has specific structural
-properties. When one pass produces unexpected output, the next one crashes or
-silently produces wrong results. Debugging requires understanding the interaction
-of ALL 8 passes.
+PR #1011 (Draft) documents a concrete instance: `heapParameterization` generates
+uninitialized `LocalVariable` nodes inside assertion conditions, which
+`liftExpressionAssignments` cannot handle. The fix requires understanding how
+both passes interact — a property not documented anywhere.
 
-**Why it's structural:** The passes exist because Translation produces output that
-Core can't directly handle. Each pass fixes one thing Translation didn't do. But
-the fixes interact. You cannot add a 9th pass to fix the interaction of passes 3
-and 7 without potentially breaking the assumption of pass 8.
+The new pipeline eliminates all 8 passes. The Elaboration pass produces output
+that Core can consume directly, because it makes effects explicit in the term
+structure (values vs. producers, graded calling conventions). There is no
+intermediate representation that requires further transformation.
 
-**What theory says:** Fine-Grain Call-By-Value (Levy 2003) separates values from
-producers in the TERM STRUCTURE. If Translation produces well-typed FGCBV terms,
-no lowering passes are needed — the output is already in a form Core can consume.
-All 8 passes are subsumed by a single elaboration pass that produces correct
-output by construction.
+### 3. The intermediate representation allows illegal states
 
----
+PR #835 ("Lift Procedure Calls in Asserts") introduced a bug where `getLast`
+selected a procedure's error output instead of its result (fixed in `001e735`).
+The code compiled and tests passed because both output variables have the same
+Lean type (`StmtExprMd`). The bug was caught only by manual review of generated
+Laurel output.
 
-### Problem 3: Illegal States Are Representable
+This is a representation problem: the Lean types don't encode which output
+variable is the result and which is the error channel. Any transformation that
+reorders or selects outputs must be manually verified.
 
-**PR #835** ("Laurel: Lift Procedure Calls in Asserts"): An agent-authored commit
-(fixed in `001e735`) used `getLast` which selected the error output of a
-multi-output procedure instead of the primary result.
-The code compiled. The tests passed. Both variables were valid at that program point
-with compatible Lean types. The bug was caught only by human review.
+The new pipeline uses HOAS (Higher-Order Abstract Syntax) smart constructors that
+bind output variables via closures. The continuation function receives only the
+result variable as a parameter — the error output is not in scope and cannot be
+referenced accidentally. This makes the bug class from PR #835 unrepresentable.
 
-**Why it's structural:** The Lean types of `$c_0` and `$c_1` are both `StmtExprMd`.
-There is no type-level distinction between "the result output" and "the error output."
-Any refactoring that swaps them compiles cleanly. This is not a testing gap — it's
-a representation gap. The types don't encode the invariant.
+### 4. No shared specification means PRs become negotiations
 
-**What theory says:** HOAS (Higher-Order Abstract Syntax) smart constructors bind
-output variables via closures. The continuation receives `rv` (the result) as a
-function parameter — `$c_1` (the error output) literally doesn't exist in scope.
-You cannot reference the wrong variable because the wrong variable isn't a term
-you can construct.
+PR #753 (pipeline restructuring) required 195 commits over ~1 month before merge.
+PR #954 has been open for weeks with 100+ comments and unresolved disagreement
+about whether field access should use heap parameterization or opaque read/update
+procedures.
 
----
+These are not slow reviews — they are the cost of having no written specification
+to arbitrate. When the correct behavior is defined only in reviewers' heads,
+every PR is a negotiation between implicit mental models.
 
-### Problem 4: Architectural Disagreement Blocks Progress
+The new architecture provides a 1000+ line specification that answers these
+questions deterministically. "Should this field access use heap parameterization?"
+is answered by the grade of the enclosing procedure (determined by coinductive
+fixpoint) and the calling convention table (written in the spec).
 
-**PR #753** (pipeline restructuring): 195 commits, ~1 month (Apr 3 → May 1, 2026).
+### 5. Adding new Python constructs requires whole-pipeline reasoning
 
-**PR #954**: Blocked for weeks on whether field access should use heap
-parameterization or opaque read/update procedures. Both approaches are defensible.
-Neither can yield because there's no written architecture to appeal to.
+Supporting a new Python construct currently requires modifying Translation,
+verifying that none of the 8 lowering passes interact badly with the new output,
+and testing end-to-end (there is no intermediate correctness check).
 
-**Why it's structural:** When the architecture exists only in reviewers' heads,
-every PR is a negotiation between implicit mental models. The reviewer says "this
-should be a Composite" and the author says "I think it should stay as Any." Neither
-is wrong — they're operating under different unstated assumptions about when
-coercions should fire.
-
-**What theory says:** A written formal specification (graded FGCBV with bidirectional
-typing) provides a single source of truth. "Should this be Composite or Any?" is
-answered by: "What does `synthValue` produce? What does the context expect? The
-subsumption table determines the coercion." No negotiation. No judgment calls.
+In the new pipeline, adding a Python construct requires adding one case to
+Translation (emit Laurel nodes) and, if the construct has non-trivial effects,
+one typing rule to Elaboration. Both can be verified independently.
 
 ---
 
-### Problem 5: Every Python Construct Requires Whole-Pipeline Reasoning
+## The New Architecture
 
-Adding support for a new Python construct (e.g., `match` statements, walrus
-operator, decorated functions) currently requires:
-1. Adding Translation cases
-2. Checking if any of the 8 lowering passes interact badly
-3. Verifying Core handles the new output
-4. Testing end-to-end (no intermediate checks possible)
+The replacement pipeline is governed by a formal specification
+(`ARCHITECTURE_V2.md`, 1000+ lines) that defines:
 
-The blast radius of any change is the entire pipeline. There's no way to verify
-that Translation's output is correct in isolation — you can only test it after
-all passes have run and Core has type-checked it.
+- A **subsumption table** specifying all type coercions and when they fire
+- A **grade monoid** `{pure, proc, err, heap, heapErr}` classifying effects
+- **Calling conventions** derived from grades (which outputs to bind, whether to pass heap)
+- **Typing rules** for every Laurel construct (bidirectional: synthesize types bottom-up, check top-down)
+- **Engineering invariants** (illegal states unrepresentable, metadata by construction)
 
-**In the new pipeline:** Adding a Python construct means:
-1. Add one case to Translation (emit Laurel)
-2. Add one typing rule to Elaboration (if the construct has non-trivial effects)
-3. Both are independently checkable: Translation's output must be well-formed
-   Laurel, Elaboration's typing rules must be mode-correct
-
----
-
-## The Replacement: Theory-Grounded Elaboration
-
-### Architecture
-
-A 1000+ line formal specification (`ARCHITECTURE_V2.md`) grounding every decision:
-
-| What | How | Theory |
-|------|-----|--------|
-| When coercions fire | Subsumption at check boundaries | Bidirectional typing |
-| Which effects a call has | Coinductive fixpoint over call graph | Graded monoid |
-| How heap is threaded | Grade determines calling convention | State-passing translation |
-| What's a value vs producer | FGCBV term structure | Levy's CBPV |
-| What's representable | Metadata by construction, HOAS bindings | Correct by construction |
-
-### Pipeline
+The pipeline has three passes:
 
 ```
-Python AST → [Resolution] → Γ
 Python AST + Γ → [Translation] → Laurel (effects implicit)
-Laurel + Γ → [Elaboration] → GFGL (effects explicit, coercions inserted)
-GFGL → [Projection] → Laurel (ready for Core)
+Laurel + Γ    → [Elaboration] → GFGL (effects explicit, coercions inserted)
+GFGL          → [Projection]  → Laurel (ready for Core)
 ```
 
-Three passes. No lowering. Translation handles syntax. Elaboration handles
-semantics. They don't know about each other's jobs.
+Translation handles Python's surface syntax. Elaboration handles types and effects.
+They are independent: Translation does not insert coercions, Elaboration does not
+handle Python-specific desugaring.
 
-### Current Status (2026-05-08)
+---
 
-- **Zero crashes** on all 46 CI tests (old pipeline also zero crashes)
-- **29/54 tests pass** (old: 28/54) — +1 genuine improvement
-- **4 encoding gaps** where old pipeline proves VCs the new one can't yet
-  (solver quality, not soundness)
-- **Old pipeline untouched** — both coexist, old serves as baseline
-- **~2500 lines new code** (Resolution + Translation + Elaboration)
+## Current Status (2026-05-08)
 
-### Engineering Principles Enforced
+| Metric | Old Pipeline | New Pipeline |
+|--------|-------------|-------------|
+| CI test crashes | 0 | 0 |
+| Tests passing | 28/54 | 29/54 (+1) |
+| Lowering passes required | 8 | 0 |
+| Written specification | None | 1000+ lines |
+| Coercion rule | Ad-hoc (scattered across Translation) | Subsumption table (one function) |
+| Adding a Python construct | Modify Translation + verify 8 pass interactions | Add Translation case + typing rule |
 
-| Principle | How |
-|-----------|-----|
-| Illegal states unrepresentable | Unresolved names → Hole (can't emit undefined StaticCall) |
-| No boolean blindness | Pattern match on NameInfo, not `isResolved : Bool` |
-| No strings for types | `annotationToHighType` from AST directly, Union → Any in Resolution |
-| Metadata by construction | Every FGL term carries `md` from source (can't lose source locations) |
-| Grade determines calling convention | `mkGradedCall` uses declared outputs (can't get arity wrong) |
+The old pipeline remains operational as a parallel path (`pyAnalyzeLaurel`) and
+serves as the correctness baseline for differential testing.
+
+Four tests remain where the old pipeline proves VCs that the new pipeline cannot
+yet. These are solver-level encoding quality gaps (the new pipeline's encoding
+of try/except generates more complex VC structure), not soundness issues.
 
 ---
 
 ## The Ask
 
-Replace the old `PythonToLaurel.lean` + 8 lowering passes with the new
-Resolution → Translation → Elaboration pipeline. The old pipeline continues
-to exist as a parallel path (`pyAnalyzeLaurel`) until the new pipeline
-(`pyAnalyzeV2`) achieves full feature parity on the 52 Kiro benchmarks.
-
-The investment is already made (architecture + implementation exist). The
-remaining work is encoding quality improvements to close the 4 solver gaps
-and extending Translation to handle the full Python construct set needed by
-the benchmarks.
+Adopt the new pipeline (`pyAnalyzeV2`) as the path forward for the Python frontend.
+The old pipeline continues to operate in parallel until the new pipeline achieves
+feature parity on the Kiro benchmarks (52 annotated tests). The architecture
+specification becomes the single source of truth for coercion, effect, and calling
+convention questions — replacing ad-hoc judgment in PR reviews.
