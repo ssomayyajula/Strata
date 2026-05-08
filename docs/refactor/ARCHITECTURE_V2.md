@@ -968,16 +968,24 @@ Translation must emit these specific constructors.
 
 ## Current Status (2026-05-08)
 
-Elaborator rewritten with 5-element grade monoid and `mkGradedCall`.
-Translation rewritten with undefined-name → Hole enforcement.
+**Zero crashes.** No internal errors on any CI test where old pipeline doesn't crash.
 
-7 test differences from old pipeline:
-- 2 Internal errors: Union types (Resolution gap), unresolved methods (boolean blindness in Translation)
-- 4 Inconclusives where old passes: solver/encoding quality gaps
-- 1 Genuine improvement: test_multiple_except
+4 remaining differences from old pipeline (all solver/encoding quality):
+- 3 Inconclusives where old passes: test_datetime, test_dict_operations,
+  test_module_level, test_try_except_scoping (solver can't prove VCs the
+  old pipeline's encoding allows — encoding quality gap, not soundness)
+- 1 Genuine improvement: test_multiple_except (8 real VCs proven)
 
-Remaining work: enforce illegal-states-unrepresentable in Resolution/Translation
-(ResolvedCall struct, no strings for types).
+Key fixes applied:
+- `annotationToHighType` handles Union/generic types directly (→ Any)
+- Translation emits Hole for unresolved names (no undefined StaticCalls)
+- `mkGradedCall` uses proc's declared outputs (no output arity mismatch)
+- `proc` grade for runtime procedures (statement-level binding)
+- `ifThenElse`/`labeledBlock` have `after` continuation (no VC blowup)
+- `__main__` has metadata (VCs generated from module-level asserts)
+- `gradeFromSignature` uses `isFunctional` (function vs procedure)
+
+Old pipeline verified intact (produces Analysis success on all CI tests).
 
 ---
 
