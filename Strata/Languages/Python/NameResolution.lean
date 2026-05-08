@@ -131,9 +131,16 @@ def pythonTypeToHighType : String → HighType
   | name => .UserDefined { text := name, uniqueId := none }
 
 /-- Extract a HighType from a Python annotation expression.
-    Composes extractTypeStr with pythonTypeToHighType. -/
-def annotationToHighType (annotation : Python.expr SourceRange) : HighType :=
-  pythonTypeToHighType (extractTypeStr annotation)
+    Handles Union/generic types directly (→ Any). Falls back to extractTypeStr
+    for simple names and attributes. -/
+def annotationToHighType : Python.expr SourceRange → HighType
+  | .Name _ n _ => pythonTypeToHighType n.val
+  | .Constant _ (.ConNone _) _ => .TVoid
+  | .BinOp _ _ (.BitOr _) _ => .TCore "Any"
+  | .Subscript _ (.Name _ n _) _ _ => match n.val with
+    | "Optional" | "Union" | "List" | "Dict" | "Tuple" | "Set" | "Type" => .TCore "Any"
+    | other => pythonTypeToHighType other
+  | other => pythonTypeToHighType (extractTypeStr other)
 
 /-- Extract a HighType from an optional Python annotation expression.
     If no annotation is present, defaults to `Any`. -/
