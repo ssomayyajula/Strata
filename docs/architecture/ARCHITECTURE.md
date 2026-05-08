@@ -1,4 +1,4 @@
-# Python → Laurel Translation Architecture (v2)
+# Python → Laurel Translation Architecture
 
 ---
 
