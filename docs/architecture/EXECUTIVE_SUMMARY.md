@@ -301,7 +301,7 @@ handle Python-specific desugaring.
 
 ## Current Status (2026-05-08)
 
-| Metric | Old Pipeline | New Pipeline |
+| Metric | Current Pipeline | New Pipeline |
 |--------|-------------|-------------|
 | CI test crashes | 0 | 0 |
 | Tests passing | 28/54 | 29/54 (+1) |
@@ -319,7 +319,7 @@ of try/except generates more complex VC structure), not soundness issues.
 
 ---
 
-## Traceability: Old Problems → Architecture Sections
+## Traceability: Current Problems → Architecture Sections
 
 Each problem identified above is addressed by a specific section of the
 architecture specification. The table below provides traceability from
