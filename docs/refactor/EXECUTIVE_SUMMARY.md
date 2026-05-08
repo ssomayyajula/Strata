@@ -20,6 +20,10 @@ intermediate output. This leads to:
   lowering pass produces output another pass can't handle)
 - **Blocked PRs from architectural disagreement** (PR #954: 100+ comments, still
   open, because there's no written rule to appeal to)
+- **No explicit accounting of Python coverage** (which constructs are fully
+  handled, which are approximated, and which silently produce incorrect output
+  is implicit in 2100 lines of code — the new architecture documents this
+  explicitly in §Python Construct Coverage)
 
 The new architecture addresses these by providing a single source of truth
 (`ARCHITECTURE_V2.md`) that determines coercion insertion, effect classification,
