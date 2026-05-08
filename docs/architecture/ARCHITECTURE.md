@@ -1019,9 +1019,9 @@ Translation must emit these specific constructors.
 The question is not "how many tests pass" but "are we replicating the current
 pipeline's results?" On the 46 CI tests with expected outputs:
 
-- **42/46 tests:** New pipeline replicates the current pipeline's result
+- **41/46 tests:** New pipeline replicates the current pipeline's result
   (same RESULT line — both pass, or both inconclusive)
-- **3/46 tests:** Current pipeline passes, new pipeline is inconclusive
+- **4/46 tests:** Current pipeline passes, new pipeline is inconclusive
   (solver can't prove VCs that the current encoding allows — encoding quality
   gap in try/except and module-level code, not a correctness issue)
 - **1/46 tests:** New pipeline passes where current was inconclusive
