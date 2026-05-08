@@ -184,8 +184,12 @@ partial def translateExpr (e : Python.expr SourceRange) : TransM StmtExprMd := d
       let c ← translateExpr container
       let idx ← match slice with
         | .Slice sr' start stop _ => do
-          let s ← match start.val with | some e => translateExpr e | none => mkExpr sr' (.LiteralInt 0)
-          let e ← match stop.val with | some e => translateExpr e | none => mkExpr sr' (.LiteralInt (-1))
+          let s ← match start.val with
+            | some e => mkExpr sr' (.StaticCall "Any..as_int!" [← translateExpr e])
+            | none => mkExpr sr' (.LiteralInt 0)
+          let e ← match stop.val with
+            | some e => mkExpr sr' (.StaticCall "OptSome" [← mkExpr sr' (.StaticCall "Any..as_int!" [← translateExpr e])])
+            | none => mkExpr sr' (.StaticCall "OptNone" [])
           mkExpr sr' (.StaticCall "from_Slice" [s, e])
         | _ => translateExpr slice
       mkExpr sr (.StaticCall "Any_get" [c, idx])
@@ -465,19 +469,34 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
 -- Helpers
 -- ═══════════════════════════════════════════════════════════════════════════════
 
+private partial def collectSubscriptChain (expr : Python.expr SourceRange) : TransM (Python.expr SourceRange × List (Python.expr SourceRange)) := do
+  match expr with
+  | .Subscript _ container slice _ =>
+    let (root, innerIndices) ← collectSubscriptChain container
+    pure (root, innerIndices ++ [slice])
+  | other => pure (other, [])
+
 partial def translateAssignSingle (sr : SourceRange) (target value : Python.expr SourceRange) : TransM (List StmtExprMd) := do
   match target with
-  | .Subscript _ container slice _ => do
-    let containerExpr ← translateExpr container
-    let idx ← match slice with
-      | .Slice sr' start stop _ => do
-        let s ← match start.val with | some e => translateExpr e | none => mkExpr sr' (.LiteralInt 0)
-        let e ← match stop.val with | some e => translateExpr e | none => mkExpr sr' (.LiteralInt (-1))
-        mkExpr sr' (.StaticCall "from_Slice" [s, e])
-      | _ => translateExpr slice
+  | .Subscript .. => do
+    let (root, indices) ← collectSubscriptChain target
+    let rootExpr ← translateExpr root
+    let mut idxList ← mkExpr sr (.StaticCall "ListAny_nil" [])
+    for idx in indices.reverse do
+      let idxExpr ← match idx with
+        | .Slice sr' start stop _ => do
+          let s ← match start.val with
+            | some e => mkExpr sr' (.StaticCall "Any..as_int!" [← translateExpr e])
+            | none => mkExpr sr' (.LiteralInt 0)
+          let e ← match stop.val with
+            | some e => mkExpr sr' (.StaticCall "OptSome" [← mkExpr sr' (.StaticCall "Any..as_int!" [← translateExpr e])])
+            | none => mkExpr sr' (.StaticCall "OptNone" [])
+          mkExpr sr' (.StaticCall "from_Slice" [s, e])
+        | _ => translateExpr idx
+      idxList ← mkExpr sr (.StaticCall "ListAny_cons" [idxExpr, idxList])
     let rhs ← translateExpr value
-    let setsCall ← mkExpr sr (.StaticCall "Any_sets" [idx, containerExpr, rhs])
-    pure [← mkExpr sr (.Assign [containerExpr] setsCall)]
+    let setsCall ← mkExpr sr (.StaticCall "Any_sets" [idxList, rootExpr, rhs])
+    pure [← mkExpr sr (.Assign [rootExpr] setsCall)]
   | _ =>
   match value with
   | .Call _ (.Name _ calleeName _) callArgs callKwargs => do
@@ -639,7 +658,8 @@ partial def translateModule (stmts : Array (Python.stmt SourceRange)) : TransM L
     let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ scopeDecls ++ bodyStmts) none)
     let mainOutputs := [({ name := Identifier.mk "LaurelResult" none, type := mkTypeDefault (.TCore "Any") } : Parameter),
                          ({ name := Identifier.mk "maybe_except" none, type := mkTypeDefault (.TCore "Error") } : Parameter)]
-    let mainProc : Procedure := { name := Identifier.mk "__main__" none, inputs := [], outputs := mainOutputs, preconditions := [], determinism := .deterministic none, decreases := none, isFunctional := false, body := .Transparent bodyBlock, md := #[] }
+    let mainMd := sourceRangeToMd (← get).filePath sr
+    let mainProc : Procedure := { name := Identifier.mk "__main__" none, inputs := [], outputs := mainOutputs, preconditions := [], determinism := .deterministic none, decreases := none, isFunctional := false, body := .Transparent bodyBlock, md := mainMd }
     procedures := procedures ++ [mainProc]
   return { staticProcedures := procedures, staticFields := [], types, constants := [] }
 

@@ -617,7 +617,14 @@ def preludeSignatures : List (String × FuncSig) := [
   ("__exit__", { name := "__exit__", params := [("ctx", .TCore "Any")], defaults := [none], returnType := .TCore "Any", hasKwargs := false }),
   ("call", { name := "call", params := [], defaults := [], returnType := .TCore "Any", hasKwargs := false }),
   -- timedelta: both params are optional (default None per prelude requires)
-  ("timedelta_func", { name := "timedelta_func", params := [("days", .TCore "Any"), ("hours", .TCore "Any")], defaults := [some ⟨.Hole, #[]⟩, some ⟨.Hole, #[]⟩], returnType := .TCore "Any", hasKwargs := false })
+  ("timedelta_func", { name := "timedelta_func", params := [("days", .TCore "Any"), ("hours", .TCore "Any")], defaults := [some ⟨.Hole, #[]⟩, some ⟨.Hole, #[]⟩], returnType := .TCore "Any", hasKwargs := false }),
+  -- Datatype constructors (needed by elaboration to check args at correct types)
+  ("from_Slice", { name := "from_Slice", params := [("start", .TInt), ("stop", .TCore "OptionInt")], defaults := [none, none], returnType := .TCore "Any", hasKwargs := false }),
+  ("OptSome", { name := "OptSome", params := [("value", .TInt)], defaults := [none], returnType := .TCore "OptionInt", hasKwargs := false }),
+  ("OptNone", { name := "OptNone", params := [], defaults := [], returnType := .TCore "OptionInt", hasKwargs := false }),
+  ("Any..as_float!", { name := "Any..as_float!", params := [("value", .TCore "Any")], defaults := [none], returnType := .TFloat64, hasKwargs := false }),
+  ("Any..as_Composite!", { name := "Any..as_Composite!", params := [("value", .TCore "Any")], defaults := [none], returnType := .TCore "Composite", hasKwargs := false }),
+  ("Any_sets", { name := "Any_sets", params := [("indices", .TCore "ListAny"), ("collection", .TCore "Any"), ("val", .TCore "Any")], defaults := [none, none, none], returnType := .TCore "Any", hasKwargs := false })
 ]
 
 /-- Build the prelude TypeEnv containing all builtin operation signatures. -/
