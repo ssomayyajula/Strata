@@ -182,8 +182,8 @@ convention so the variable is in scope for try/except assignment).
 Elaboration is the heart of the pipeline. It is NOT a term-to-term
 transformation — it is the construction of a *GFGL typing derivation*
 from a *Laurel typing derivation*. The input is a well-typed Laurel term
-(implicitly effectful CBV); the output is a well-typed GGFGL term (effects
-explicit via grades in the term structure). The GGFGL term is the proof
+(implicitly effectful CBV); the output is a well-typed GFGL term (effects
+explicit via grades in the term structure). The GFGL term is the proof
 term of the typing derivation — it IS the derivation, not something
 derived from it.
 
