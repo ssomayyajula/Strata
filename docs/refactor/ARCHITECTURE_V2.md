@@ -12,7 +12,7 @@ Python AST + library stubs
 Python AST (user code)
   ↓ [Translation: fold over AST, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
-  ↓ [Elaboration: impure CBV → Graded FGCBV, on-demand grade discovery]
+  ↓ [Elaboration: impure CBV → Graded FGCBV, coinductive grade inference]
 e' : GFGL.Program (graded fine-grain Laurel — effects explicit via grades)
   ↓ [Projection: forget grading, trivial cata]
 Laurel.Program (ready for Core)
@@ -132,7 +132,7 @@ f : (A₁,...,Aₙ) → B    grade(f) = 1    vᵢ ⇐ Aᵢ
 ### Producer Synthesis
 
 ```
-f : (A₁,...,Aₙ) → B    grade(f) = d (on-demand discovery)    d > 1    vᵢ ⇐ Aᵢ
+f : (A₁,...,Aₙ) → B    grade(f) = d (from procGrades)    d > 1    vᵢ ⇐ Aᵢ
 ────────────────────────────────────────────────────────────────────────────────
 Γ ⊢_p f(v₁,...,vₙ) ⇒ B & d
 
@@ -322,32 +322,45 @@ def mkHeapErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProduce
 
 ### Elaboration Structure
 
+**Textbook typing rules** (pure, no state mutation, no flags):
+
 ```lean
-synthProducer (expr) : ElabM (FGLProducer → FGLProducer, LowType, Grade)
-checkProducer (expr) (expected : LowType) (grade : Grade) : ElabM FGLProducer
-elaborateBlock (stmts) (expected : LowType) (grade : Grade) : ElabM FGLProducer
+-- Value judgment: no grades
+synthValue (expr) : ElabM (FGLValue × LowType)
+checkValue (expr) (expected : HighType) : ElabM FGLValue
+
+-- Producer synthesis: defunctionalized result (grade + enough to build FGL)
+inductive SynthResult where
+  | value (val : FGLValue) (ty : LowType)         -- grade 1 (pure call or literal)
+  | call (callee args retTy grade)                 -- grade > 1 (effectful call)
+
+synthExpr (expr) : ElabM SynthResult
+
+-- Producer checking: inputs grade, produces FGL
+checkProducer (stmt) (rest : List Stmt) (grade : Grade) : ElabM FGLProducer
 ```
 
-**synthProducer** returns `(FGLProducer → FGLProducer, LowType, Grade)`:
-- The function takes a continuation (the rest of the block) and plugs it into
-  the `body` field of the produced FGLProducer node. E.g., `fun rest => .assert cond rest`.
-- For effectful calls, the smart constructor (HOAS) generates the effectfulCall
-  node and the function plugs `rest` into the body after the bindings.
+**Block elaboration** (to-rule applied to statements and nested expressions):
 
-**elaborateBlock** sequences statements by nesting:
+For each statement in a block, `checkProducer` threads the rest as the
+continuation. For nested expressions within a statement (e.g., effectful
+call as argument to a pure call), `synthExpr` determines if the expression
+is a value or producer. Producers are bound via the to-rule:
+
 ```
-elaborateBlock [s₁, s₂, s₃] expected grade:
-  let (plug₁, _, d₁) := synthProducer s₁
-  let restGrade := d₁ \ grade   -- residual (may fail → grade too low)
-  let rest := elaborateBlock [s₂, s₃] expected restGrade
-  plug₁ rest                     -- nest rest inside s₁'s body
+checkArgsK [arg₁, arg₂, ...] params grade cont:
+  synthExpr arg₁ →
+  | .value v ty   → cont (coerce v :: acc)
+  | .call f a t d → mkSmartConstructor f a t d (fun rv → cont (coerce rv :: acc))
 ```
 
-**checkProducer** handles check-mode rules (if, var-bind, return) and falls
-back to synth + subsumption.
+This is the to-rule applied at expression level: effectful subexpressions
+are sequenced into let-bindings (ANF). The defunctionalized `SynthResult`
+avoids closures — the grade is data, not a flag.
 
-No continuation parameter on synthProducer. No CPS. The `FGLProducer → FGLProducer`
-return IS the nesting combinator — it plugs the rest in.
+**Grade lookup during elaboration** is a pure HashMap read from the
+environment (all grades pre-computed by fixpoint iteration). No body
+evaluation during term production.
 
 ### Producer Subsumption (see §Subsumption above for the full rule)
 
@@ -385,35 +398,64 @@ on the body. The smallest grade at which `checkProducer` succeeds IS the grade.
 |---|---|
 | `Γ ⊢_v V ⇒ A` | `synthValue expr : ElabM (FGLValue × LowType)` |
 | `Γ ⊢_v V ⇐ A` | `checkValue expr expected : ElabM FGLValue` |
-| `Γ ⊢_p M ⇒ A & d` | `synthProducer expr cont : ElabM FGLProducer` (CPS — cont is rest of block) |
-| `Γ ⊢_p M ⇐ A & e` | `checkProducer expr expected : ElabM FGLProducer` |
-| `M to x. N ⇐ A & e` | `elaborateBlock [M, ...rest] cont` (M synth'd, rest is continuation) |
+| `Γ ⊢_p M ⇒ A & d` | `synthExpr expr : ElabM SynthResult` (defunctionalized) |
+| `Γ ⊢_p M ⇐ A & e` | `checkProducer stmt rest grade : ElabM FGLProducer` |
+| `M to x. N ⇐ A & e` | `checkProducer` threads rest; `checkArgsK` lifts effectful args |
 | `subsume(A, B)` | `subsume actual expected : CoercionResult` |
 | `subgrade(d, e)` | `subgrade d e : Option ConventionWitness` → dispatches smart constructor |
 | `d \ e` | `Grade.residual d e : Option Grade` |
+| grade(f) | `procGrades[f]` (HashMap lookup from reader — pre-computed) |
 
-The state-passing implementation: formal rules show `M to x. N` as a single
-check rule. Implementation realizes this as `synthProducer M (elaborateBlock rest)`
-— the rest of the block IS the continuation of the sequencing rule.
+**fullElaborate** structure:
+1. `discoverGrades` — fixpoint iteration (calls typing rules, updates grades)
+2. `checkProducer` on each body — term production (reads final grades, never mutates)
 
-### On-Demand Callee Grade Discovery
+### Grade Inference: Coinductive Fixpoint over the Call Graph
 
-When elaboration encounters `StaticCall f args`:
-1. Look up f's grade in `procGrades` (stateful part of Γ)
-2. If not yet known: find f's body in the program (reader part of environment),
-   call `checkProducer body returnType g` for g ∈ [pure, err, heap, heapErr].
-   The smallest grade at which checking SUCCEEDS is f's grade. Store it.
-3. Dispatch smart constructor based on discovered grade.
+Procedure grades are inferred by coinductive fixpoint iteration — the
+standard technique for typing mutually recursive definitions in functional
+languages (cf. Hindley-Milner, abstract interpretation).
 
-**Grade discovery IS type-checking.** The typing rules themselves determine
-the grade. If `checkProducer` succeeds at grade `g`, then `g` is sufficient.
-No manual AST scanning. No heuristics. The bidirectional algorithm is the
-oracle — checking fails (Option returns none) when the grade is too low
-(residual `d \ e = none`), succeeds when it's sufficient.
+**Algorithm:**
+```
+discoverGrades(program, Γ) → procGrades:
+  1. Initialize: procGrades[f] := ⊥ (pure) for all f
+  2. For each proc f with body M:
+       Try checkProducer M returnType g for g ∈ [pure, err, heap, heapErr]
+       under the current procGrades assumption.
+       Set procGrades[f] := smallest g that succeeds.
+  3. If any grade changed, go to step 2.
+  4. Fixpoint reached. Return procGrades.
+```
 
-The grade is part of the procedure's TYPE — stored in `procGrades` (the
-stateful part of Γ that grows as callees are discovered on-demand). The
-program (procedure bodies) is in the reader (immutable environment).
+The typing rules are the ORACLE: `checkProducer M retTy g` succeeds at
+grade `g` iff the body's operations are all at grade ≤ g. The residual
+`d \ e` fails (Option returns none) when a statement's grade `d` exceeds
+the ambient grade `e`, causing the trial to fail.
+
+**Separation of concerns:**
+- The TYPING RULES (`synthValue`, `checkValue`, `checkProducer`) are
+  textbook — pure transcriptions of the formal rules above. They read
+  `procGrades` from the environment. They NEVER mutate grades. No boolean
+  flags, no mode switching.
+- The FIXPOINT ITERATION (`discoverGrades`) is the only code that
+  computes and updates grades. It calls the typing rules repeatedly
+  with different grade assumptions until convergence.
+- `fullElaborate` calls `discoverGrades` FIRST (all grades determined),
+  then calls `checkProducer` on each body with the FINAL grades to
+  produce FGL terms.
+
+**Coinduction:** Self-recursive and mutually recursive procedures work
+because `procGrades` is initialized with an assumption (⊥). The typing
+rules read this assumption during the trial. If the assumption was too
+low, the trial fails, the grade is bumped, and the next iteration
+succeeds. Convergence is guaranteed because the grade lattice is finite
+(4 elements) and grades only increase.
+
+**No on-demand discovery during elaboration.** By the time `checkProducer`
+runs to produce FGL terms (Pass 2), ALL grades are already known and
+stable in the reader. `discoverGrade` is a simple HashMap lookup. No
+body evaluation. No cascading. No boolean flags.
 
 ### Procedure Signature Rewriting
 
@@ -425,9 +467,10 @@ After a proc's grade is discovered:
 ### Resolution Does NOT Determine Effects
 
 Resolution provides parameter types, return types, defaults, kwargs.
-The elaborator discovers grades on-demand by elaborating callee bodies.
-There is no `EffectType` annotation from Resolution. The grade IS the
-type — discovered by the same mechanism that checks everything else.
+The elaborator discovers grades by coinductive fixpoint iteration over
+the call graph. There is no `EffectType` annotation from Resolution.
+The grade IS the type — discovered by the same typing rules that check
+everything else.
 
 ### Holes
 
