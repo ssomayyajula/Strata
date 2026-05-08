@@ -32,7 +32,7 @@ matching scattered across 2100 lines.
 |----|----------|---------|
 | #727 | Emit `Hole` (unconstrained value) — avoids crash, loses precision | Merged, but explicitly acknowledges "limits bug-finding ability" |
 | #918 | Rename heap datatypes + coercion pathways | Draft, Git conflicts, abandoned |
-| #954 | DynamicComposite wrapping + heap parameterization | 134 comments, architectural disagreement, unresolved for weeks |
+| #954 | DynamicComposite wrapping + heap parameterization | 100+ comments, architectural disagreement, still open |
 | #1106 | Coerce all args to Any at call sites | Open, defeats the precondition model entirely |
 
 **Why it's structural:** Each PR proposes a different heuristic because there IS no
@@ -86,7 +86,8 @@ output by construction.
 ### Problem 3: Illegal States Are Representable
 
 **PR #835** ("Laurel: Lift Procedure Calls in Asserts"): An agent-authored commit
-(`97bce95`) used `$c_1` (the error output) where `$c_0` (the result) was needed.
+(fixed in `001e735`) used `getLast` which selected the error output of a
+multi-output procedure instead of the primary result.
 The code compiled. The tests passed. Both variables were valid at that program point
 with compatible Lean types. The bug was caught only by human review.
 
@@ -105,7 +106,7 @@ you can construct.
 
 ### Problem 4: Architectural Disagreement Blocks Progress
 
-**PR #753** (pipeline restructuring): 472 comments, 195 commits, ~2 months.
+**PR #753** (pipeline restructuring): 195 commits, ~1 month (Apr 3 → May 1, 2026).
 
 **PR #954**: Blocked for weeks on whether field access should use heap
 parameterization or opaque read/update procedures. Both approaches are defensible.
