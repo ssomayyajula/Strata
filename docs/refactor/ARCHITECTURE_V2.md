@@ -182,8 +182,8 @@ convention so the variable is in scope for try/except assignment).
 Elaboration is the heart of the pipeline. It is NOT a term-to-term
 transformation — it is the construction of a *GFGL typing derivation*
 from a *Laurel typing derivation*. The input is a well-typed Laurel term
-(implicitly effectful CBV); the output is a well-typed GGFGL term (effects
-explicit via grades in the term structure). The GGFGL term is the proof
+(implicitly effectful CBV); the output is a well-typed GFGL term (effects
+explicit via grades in the term structure). The GFGL term is the proof
 term of the typing derivation — it IS the derivation, not something
 derived from it.
 
@@ -234,15 +234,24 @@ not just boolean "yes/no."
 
 ```lean
 def eraseType : HighType → LowType
+transparently 
   | .TInt => .TInt | .TBool => .TBool | .TString => .TString
   | .TFloat64 => .TFloat64 | .TVoid => .TVoid | .TCore n => .TCore n
+  -- transparently pass base types to GFGL
+
+  -- idem translating to named constructs for lack of better
   | .UserDefined id => match id.text with
     | "Any" => .TCore "Any" | "Error" => .TCore "Error"
     | "ListAny" => .TCore "ListAny" | "DictStrAny" => .TCore "DictStrAny"
     | "Box" => .TCore "Box" | "Field" => .TCore "Field" | "TypeTag" => .TCore "TypeTag"
     | _ => .TCore "Composite"
+
+
+  -- small translation layer
   | .THeap => .TCore "Heap"
   | .TReal => .TCore "real" | .TTypedField _ => .TCore "Field"
+
+  -- type erasure
   | .TSet _ | .TMap _ _ | .Applied _ _ | .Intersection _ | .Unknown => .TCore "Any"
   | .Pure _ => .TCore "Composite"
 ```
@@ -260,6 +269,21 @@ Order:
   1 ≤ proc ≤ err ≤ heapErr
   1 ≤ proc ≤ heap ≤ heapErr
 
+```
+
+The effects computations can have are described by the following lattice :
+```
+     heapErr
+     /    \
+   heap   err
+     \    /
+      proc
+       |
+       1
+```
+The least upper bound `⋅` is commutative as shown :
+
+```
 Multiplication:
   1 · e = e · 1 = e
   proc · proc = proc
@@ -267,7 +291,10 @@ Multiplication:
   proc · heap = heap   heap · proc = heap
   err · heap = heapErr   heap · err = heapErr
   e · e = e
+```
 
+Symmetrically, we define the greatest lower bound on this lattice as the minimal effect required, by the join operator `⋅`, to produce the combined effect :
+```
 Left residual (d \ e):
   1 \ e = e
   proc \ proc = 1     proc \ err = err     proc \ heap = heap   proc \ heapErr = heapErr
@@ -276,7 +303,7 @@ Left residual (d \ e):
   heapErr \ heapErr = 1
 ```
 
-**The `proc` grade:** Represents a computation that MUST be sequenced at
+> **The `proc` grade:** Represents a computation that MUST be sequenced at
 statement level but carries no specific effect (no error output, no heap
 threading). Runtime procedures declared with `procedure` (not `function`)
 that have no Error/Heap in their signature get grade `proc`. The calling
