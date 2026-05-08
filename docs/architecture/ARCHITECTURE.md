@@ -303,6 +303,7 @@ Left residual (d \ e):
   heapErr \ heapErr = 1
 ```
 
+Unclear if this description conveys the fact that `proc` represents a function that has a mutable local scope :
 > **The `proc` grade:** Represents a computation that MUST be sequenced at
 statement level but carries no specific effect (no error output, no heap
 threading). Runtime procedures declared with `procedure` (not `function`)
@@ -316,6 +317,8 @@ expressions, Core emits as `.op`) from `procedure` (must be at statement
 level, Core emits as `.call`). A runtime procedure like `datetime_now()`
 has no error or heap effects but CANNOT appear inside an expression —
 it must be bound first.
+
+Does this actually mean that `proc` are actually reading the heap (meaning the global context) ? This is to be contrasted with `heap` which updates the heap.
 
 ### Judgments
 
