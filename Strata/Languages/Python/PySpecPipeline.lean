@@ -481,17 +481,18 @@ public def pyAnalyzeLaurelV2
       | _ => throw (.internal s!"V2 Translation failed: {e}")
     | .ok (program, _state) => pure program
 
-  -- Step 4: Run Elaboration with base Γ (no runtime sigs — avoids spurious coercions
-  -- on prelude calls that Core handles without coercion)
+  -- Step 4: Elaboration needs ALL sigs (user + runtime) to insert coercions at call
+  -- boundaries, but only user bodies are elaborated (runtime is trusted).
   let elaboratedProgram ← profileStep profile "Elaborate (full: coercions + type infrastructure)" do
-    -- Pre-compute grades for runtime procs with error output (result + Error pattern)
     let runtimeGrades := Python.pythonRuntimeLaurelPart.staticProcedures.foldl (fun acc proc =>
-      let hasErrorOutput := proc.outputs.any fun o => match o.type.val with | .TCore "Error" => true | _ => false
-      if hasErrorOutput then acc.insert proc.name.text .err else acc)
+      acc.insert proc.name.text (FineGrainLaurel.gradeFromSignature proc))
       ({} : Std.HashMap String FineGrainLaurel.Grade)
-    match FineGrainLaurel.fullElaborate baseEnv laurelProgram Python.pythonRuntimeLaurelPart runtimeGrades with
+    match FineGrainLaurel.fullElaborate translationEnv laurelProgram Python.pythonRuntimeLaurelPart runtimeGrades with
     | .error e => throw (.internal s!"Elaboration failed: {e}")
-    | .ok prog => pure prog
+    | .ok (prog, failures) =>
+      unless failures.isEmpty do
+        (IO.eprintln s!"[elab] failed to elaborate: {failures}" : IO Unit).toEIO (fun _ => .internal "")
+      pure prog
 
   -- Step 6: Filter prelude (remove unused procedures that would cause type errors in Core)
   let filteredPrelude ← profileStep profile "Filter prelude" do

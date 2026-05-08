@@ -45,7 +45,16 @@ inductive LowType where | TInt | TBool | TString | TFloat64 | TVoid | TCore (nam
 def eraseType : HighType → LowType
   | .TInt => .TInt | .TBool => .TBool | .TString => .TString
   | .TFloat64 => .TFloat64 | .TVoid => .TVoid | .TCore n => .TCore n
-  | .UserDefined _ => .TCore "Composite" | .THeap => .TCore "Heap"
+  | .UserDefined id => match id.text with
+    | "Any" => .TCore "Any"
+    | "Error" => .TCore "Error"
+    | "ListAny" => .TCore "ListAny"
+    | "DictStrAny" => .TCore "DictStrAny"
+    | "Box" => .TCore "Box"
+    | "Field" => .TCore "Field"
+    | "TypeTag" => .TCore "TypeTag"
+    | _ => .TCore "Composite"
+  | .THeap => .TCore "Heap"
   | .TReal => .TCore "real" | .TTypedField _ => .TCore "Field"
   | .TSet _ | .TMap _ _ | .Applied _ _ | .Intersection _ | .Unknown => .TCore "Any"
   | .Pure _ => .TCore "Composite"
@@ -135,6 +144,16 @@ def recordBoxUse (ty : HighType) : ElabM Unit := do
   let existing := (← get).usedBoxConstructors
   unless existing.any (fun (c, _, _) => c == ctor) do
     modify fun s => { s with usedBoxConstructors := s.usedBoxConstructors ++ [(ctor, boxDestructorName ty, ty)] }
+
+-- Grade from procedure signature (structural: Error output → err, Heap param → heap)
+def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
+  let hasError := proc.outputs.any fun o => eraseType o.type.val == .TCore "Error"
+  let hasHeap := proc.inputs.any fun i => eraseType i.type.val == .TCore "Heap"
+  match hasHeap, hasError with
+  | true, true => .heapErr
+  | true, false => .heap
+  | false, true => .err
+  | false, false => .pure
 
 -- Env helpers
 
@@ -467,24 +486,19 @@ partial def elabRest (stmts : List StmtExprMd) (grade : Grade) : ElabM FGLProduc
   | [] => pure .unit
   | stmt :: rest => checkProducer stmt rest grade
 
--- elabCall: StaticCall with grade lookup + smart constructor dispatch
+-- elabCall: StaticCall with grade lookup + checkArgsK (ANF-lifts effectful args)
 partial def elabCall (callee : Identifier) (args : List StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
   let sig ← lookupFuncSig callee.text
-  let (checkedArgs, retTy) ← match sig with
-    | some s => do let ca ← checkArgs args s.params; pure (ca, s.returnType)
-    | none => do let ca ← args.mapM fun a => checkValue a (.TCore "Any"); pure (ca, .TCore "Any")
+  let params := match sig with | some s => s.params | none => []
+  let retTy := match sig with | some s => s.returnType | none => .TCore "Any"
   let callGrade := (← read).procGrades[callee.text]?.getD .pure
   guard (Grade.leq callGrade grade)
-  match callGrade with
-  | .pure =>
-    -- Pure call is a value — just continue
-    elabRest rest grade
-  | .err =>
-    mkErrorCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
-  | .heap =>
-    mkHeapCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
-  | .heapErr =>
-    mkHeapErrorCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
+  checkArgsK args params grade fun checkedArgs => do
+    match callGrade with
+    | .pure => elabRest rest grade
+    | .err => mkErrorCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
+    | .heap => mkHeapCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
+    | .heapErr => mkHeapErrorCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
 
 -- elabAssign: assignment with multiple sub-cases
 partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
@@ -582,11 +596,7 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
           mkHeapErrorCall callee.text checkedArgs retHty fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
-      match sig with
-      | some _ => checkArgsK args params grade doWithArgs
-      | none => do
-        let checkedArgs ← args.mapM fun a => checkValue a (.TCore "Any")
-        doWithArgs checkedArgs
+      checkArgsK args params grade doWithArgs
     | .FieldSelect obj field =>
       guard (Grade.leq .heap grade)
       let (ov, objTy) ← synthValue obj
@@ -679,7 +689,7 @@ def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) 
 
 -- fullElaborate: entry point
 
-def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laurel.Program := default) (initialGrades : Std.HashMap String Grade := {}) : Except String Laurel.Program := do
+def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laurel.Program := default) (initialGrades : Std.HashMap String Grade := {}) : Except String (Laurel.Program × List String) := do
   let baseEnv : ElabEnv := { typeEnv := typeEnv, program := program, runtime := runtime }
 
   -- PASS 1: SYNTH — coinductive fixpoint iteration over call graph
@@ -710,6 +720,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
   -- PASS 2: CHECK — elaborate each proc with all grades known
   let mut procs : List Laurel.Procedure := []
   let mut allBoxConstructors : List (String × String × HighType) := []
+  let mut elabFailures : List String := []
   for proc in program.staticProcedures do
     match proc.body with
     | .Transparent bodyExpr =>
@@ -725,18 +736,35 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
         allBoxConstructors := allBoxConstructors ++ st'.usedBoxConstructors.filter
           (fun (c, _, _) => !allBoxConstructors.any (fun (c2, _, _) => c == c2))
         let projected := projectBody bodyExpr.md fgl
-        if g == .heap || g == .heapErr then
-          let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd bodyExpr.md .THeap }
-          let heapOutParam : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := mkHighTypeMd bodyExpr.md .THeap }
-          let heapInit := mkLaurel bodyExpr.md (.Assign [mkLaurel bodyExpr.md (.Identifier (Identifier.mk "$heap" none))] (mkLaurel bodyExpr.md (.Identifier (Identifier.mk "$heap_in" none))))
-          let newBody := mkLaurel bodyExpr.md (.Block ([heapInit] ++ (projectProducer bodyExpr.md fgl)) none)
+        let md := bodyExpr.md
+        let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd md .THeap }
+        let heapOutParam : Laurel.Parameter := { name := Identifier.mk "$heap" none, type := mkHighTypeMd md .THeap }
+        let errOutParam : Laurel.Parameter := { name := Identifier.mk "maybe_except" none, type := mkHighTypeMd md (.TCore "Error") }
+        let resultOutputs := proc.outputs.filter fun o => eraseType o.type.val != .TCore "Error"
+        match g with
+        | .heap =>
+          let heapInit := mkLaurel md (.Assign [mkLaurel md (.Identifier (Identifier.mk "$heap" none))] (mkLaurel md (.Identifier (Identifier.mk "$heap_in" none))))
+          let newBody := mkLaurel md (.Block ([heapInit] ++ (projectProducer md fgl)) none)
           procs := procs ++ [{ proc with
             inputs := [heapInParam] ++ proc.inputs
-            outputs := [heapOutParam] ++ proc.outputs
+            outputs := [heapOutParam] ++ resultOutputs
             body := .Transparent newBody }]
-        else
+        | .heapErr =>
+          let heapInit := mkLaurel md (.Assign [mkLaurel md (.Identifier (Identifier.mk "$heap" none))] (mkLaurel md (.Identifier (Identifier.mk "$heap_in" none))))
+          let newBody := mkLaurel md (.Block ([heapInit] ++ (projectProducer md fgl)) none)
+          procs := procs ++ [{ proc with
+            inputs := [heapInParam] ++ proc.inputs
+            outputs := [heapOutParam] ++ resultOutputs ++ [errOutParam]
+            body := .Transparent newBody }]
+        | .err =>
+          procs := procs ++ [{ proc with
+            outputs := resultOutputs ++ [errOutParam]
+            body := .Transparent projected }]
+        | .pure =>
           procs := procs ++ [{ proc with body := .Transparent projected }]
-      | none => procs := procs ++ [proc]
+      | none =>
+        elabFailures := elabFailures ++ [proc.name.text]
+        procs := procs ++ [proc]
     | _ => procs := procs ++ [proc]
   let hasHeap := knownGrades.toList.any fun (_, g) => g == .heap || g == .heapErr
   let compositeNames := typeEnv.classFields.toList.map (·.1)
@@ -758,17 +786,18 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       { name := Identifier.mk (boxFieldName ty) none, type := ⟨boxFieldType ty, #[]⟩ }] : DatatypeConstructor }
   let boxDatatype : TypeDefinition := .Datatype {
     name := "Box", typeArgs := [], constructors := boxConstructors }
-  if hasHeap then
+  let result := if hasHeap then
     let heapTypesFiltered := heapConstants.types.filter fun td => match td with
       | .Datatype dt => dt.name.text != "Composite" && dt.name.text != "NotSupportedYet"
       | _ => true
-    pure { program with
+    { program with
       staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ heapConstants.staticProcedures ++ procs
       types := [fieldDatatype, boxDatatype, typeTagDatatype, compositeType] ++ heapTypesFiltered ++ coreDefinitionsForLaurel.types ++ program.types }
   else
-    pure { program with
+    { program with
       staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ procs
       types := [typeTagDatatype, compositeType] ++ coreDefinitionsForLaurel.types ++ program.types }
+  pure (result, elabFailures)
 
 end
 end Strata.FineGrainLaurel

@@ -570,14 +570,13 @@ partial def translateFunction (s : Python.stmt SourceRange)
     else pure (allParams, [])
     let returnType ← match (← lookupName procName) with
       | some (.function sig) => pure sig.returnType | _ => pure (.TCore "Any")
-    let outputs := [({ name := Identifier.mk "LaurelResult" none, type := mkTypeDefault returnType } : Parameter)]
+    let outputs := [({ name := Identifier.mk "LaurelResult" none, type := mkTypeDefault returnType } : Parameter),
+                     ({ name := Identifier.mk "maybe_except" none, type := mkTypeDefault (.TCore "Error") } : Parameter)]
     let inputNames := inputs.map (·.name.text)
     let originalParamNames := allParams.map (·.name.text)
     let scopeDecls ← emitScopeDeclarations sr body.val (inputNames ++ originalParamNames)
-    let noErrorInit ← mkExpr sr (.StaticCall "NoError" [])
-    let maybeExcept ← mkExpr sr (.LocalVariable "maybe_except" (mkTypeDefault (.TCore "Error")) (some noErrorInit))
     let bodyStmts ← translateStmtList body.val.toList
-    let bodyBlock ← mkExpr sr (.Block (paramCopies ++ scopeDecls ++ [maybeExcept] ++ bodyStmts) none)
+    let bodyBlock ← mkExpr sr (.Block (paramCopies ++ scopeDecls ++ bodyStmts) none)
     let md := sourceRangeToMd (← get).filePath sr
     pure (some { name := Identifier.mk procName none, inputs := inputs, outputs := outputs, preconditions := [], determinism := .deterministic none, decreases := none, isFunctional := false, body := .Transparent bodyBlock, md := md })
   | _ => pure none
@@ -623,11 +622,11 @@ partial def translateModule (stmts : Array (Python.stmt SourceRange)) : TransM L
     let sr : SourceRange := default
     let nameDecl ← mkExpr sr (.LocalVariable "__name__" (mkTypeDefault .TString) (some (mkExprDefault (.LiteralString "__main__"))))
     let scopeDecls ← emitScopeDeclarations sr otherStmts.toArray []
-    let noErrorInit ← mkExpr sr (.StaticCall "NoError" [])
-    let maybeExcept ← mkExpr sr (.LocalVariable "maybe_except" (mkTypeDefault (.TCore "Error")) (some noErrorInit))
     let bodyStmts ← translateStmtList otherStmts
-    let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ scopeDecls ++ [maybeExcept] ++ bodyStmts) none)
-    let mainProc : Procedure := { name := Identifier.mk "__main__" none, inputs := [], outputs := [], preconditions := [], determinism := .deterministic none, decreases := none, isFunctional := false, body := .Transparent bodyBlock, md := #[] }
+    let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ scopeDecls ++ bodyStmts) none)
+    let mainOutputs := [({ name := Identifier.mk "LaurelResult" none, type := mkTypeDefault (.TCore "Any") } : Parameter),
+                         ({ name := Identifier.mk "maybe_except" none, type := mkTypeDefault (.TCore "Error") } : Parameter)]
+    let mainProc : Procedure := { name := Identifier.mk "__main__" none, inputs := [], outputs := mainOutputs, preconditions := [], determinism := .deterministic none, decreases := none, isFunctional := false, body := .Transparent bodyBlock, md := #[] }
     procedures := procedures ++ [mainProc]
   return { staticProcedures := procedures, staticFields := [], types, constants := [] }
 

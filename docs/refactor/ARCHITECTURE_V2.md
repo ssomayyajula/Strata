@@ -472,6 +472,38 @@ the call graph. There is no `EffectType` annotation from Resolution.
 The grade IS the type — discovered by the same typing rules that check
 everything else.
 
+### User/Runtime Separation
+
+**Principle:** The elaborator must know the types of ALL callees (to
+insert coercions at call boundaries), but must only elaborate USER
+procedure bodies (runtime is trusted).
+
+This is representational, not boolean:
+
+```
+ElabEnv:
+  typeEnv : TypeEnv           -- ALL signatures (user + runtime + prelude)
+  program : Laurel.Program    -- ONLY user procedures (bodies elaborated)
+  runtime : Laurel.Program    -- ONLY runtime procedures (never elaborated)
+  procGrades : HashMap        -- grades for ALL callees
+```
+
+**TypeEnv** contains signatures for user-defined functions, prelude
+primitives (PAdd, PGt, ...), AND runtime library procedures. Elaboration
+uses these to type-check arguments at call boundaries. Without runtime
+sigs, `checkArgsK` cannot insert coercions (e.g., int→Any for PAdd).
+
+**Program** contains only user-defined procedure bodies. The fixpoint
+iteration and Pass 2 elaboration iterate ONLY over `program.staticProcedures`.
+Runtime procedure bodies are never inspected.
+
+**Runtime grades** are pre-computed from output signatures (Error output → err).
+They enter `procGrades` as initial values before fixpoint iteration begins.
+
+This makes confusion impossible: you cannot accidentally elaborate a runtime
+body (it's in `runtime`, not `program`). You cannot miss a coercion at a
+runtime call boundary (the sig is in `typeEnv`).
+
 ### Holes
 
 - Nondeterministic (`.Hole false`): `varDecl x T none body`
