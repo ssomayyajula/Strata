@@ -2,9 +2,9 @@
 
 ## Summary
 
-The Python→Laurel translation pipeline is being replaced with a new architecture
-that introduces a single, written specification governing how type coercions are
-inserted, how effects are tracked, and what intermediate representations are valid.
+A new Python→Laurel translation architecture has been developed that introduces
+a single, written specification governing how type coercions are inserted, how
+effects are tracked, and what intermediate representations are valid.
 
 The existing pipeline (2100 lines of translation + 8 lowering passes) has no such
 specification. As a result, contributors operate under different mental models of
@@ -53,7 +53,7 @@ bottleneck. Without a specification to review against, every generated PR requir
 the reviewer to reconstruct the author's intent and verify it against an unwritten
 mental model. This does not scale.
 
-The long tail of stabilization in the old pipeline — where fixing one type coercion
+The long tail of stabilization in the current pipeline — where fixing one type coercion
 bug introduces another, which requires a lowering pass fix, which breaks an
 assumption in a third pass — has reduced our confidence in being able to deliver
 front-end improvements in a predictable amount of time. The ping-ponging of bug
@@ -224,7 +224,7 @@ described here. They do not aim to specify:
   specification that determines calling conventions from grades would resolve it:
   the grade lattice computes which approach is correct.
 
-A related issue: the old pipeline's tech debt and Python construct coverage gaps
+A related issue: the current pipeline's tech debt and Python construct coverage gaps
 are not explicitly documented. It is currently difficult to give a straight answer
 to the question "what does the Python front-end actually support?" without reading
 2100 lines of translation code. Which constructs are fully handled, which are
@@ -241,7 +241,7 @@ reference to the spec.
 
 ## The New Architecture
 
-The replacement pipeline is governed by a formal specification
+The new pipeline is governed by a formal specification
 (`ARCHITECTURE_V2.md`, 1000+ lines) that defines:
 
 - A **subsumption table** specifying all type coercions and when they fire
@@ -310,10 +310,10 @@ handle Python-specific desugaring.
 | Coercion rule | Ad-hoc (scattered across Translation) | Subsumption table (one function) |
 | Adding a Python construct | Modify Translation + verify 8 pass interactions | Add Translation case + typing rule |
 
-The old pipeline remains operational as a parallel path (`pyAnalyzeLaurel`) and
+The current pipeline remains operational as a parallel path (`pyAnalyzeLaurel`) and
 serves as the correctness baseline for differential testing.
 
-Four tests remain where the old pipeline proves VCs that the new pipeline cannot
+Four tests remain where the current pipeline proves VCs that the new pipeline cannot
 yet. These are solver-level encoding quality gaps (the new pipeline's encoding
 of try/except generates more complex VC structure), not soundness issues.
 
@@ -378,8 +378,9 @@ fixes — rather than iterating through heuristics in PR review.
 
 ## The Ask
 
-Adopt the new pipeline (`pyAnalyzeV2`) as the path forward for the Python frontend.
-The old pipeline continues to operate in parallel until the new pipeline achieves
-feature parity on the Kiro benchmarks (52 annotated tests). The architecture
-specification becomes the single source of truth for coercion, effect, and calling
-convention questions — replacing ad-hoc judgment in PR reviews.
+Should we continue development of the new pipeline (`pyAnalyzeV2`) as the path
+forward for addressing the endemic tool errors in the Python front-end? The
+current pipeline continues to operate as the production path and correctness
+baseline. The architecture specification would serve as the shared reference
+for coercion, effect, and calling convention questions — providing traceability
+for changes and a basis for PR reviews beyond implicit mental models.
