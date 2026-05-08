@@ -25,6 +25,25 @@ intermediate output. This leads to:
   is implicit in 2100 lines of code — the new architecture documents this
   explicitly in §Python Construct Coverage)
 
+### Benchmark results fluctuate without traceable cause
+
+Between May 4 and May 8, the benchmark suite (398→414 tests) showed:
+- Correct results dropped from 181 → 169
+- Regressions increased from 8 → 33
+- Tool errors increased from 161 → 166
+
+Multiple PRs landed in this window addressing various front-end issues. The
+difficulty is not that things got worse — it's that we cannot explain WHY.
+There is no specification to trace a regression back to a violated invariant.
+When a "Resolution failed: 'name' is not defined" regression appears on 25
+benchmarks after a field-access fix, the question "which assumption did we
+break?" has no written answer to point to.
+
+With a specification, every regression is traceable: either the implementation
+deviated from the spec (implementation bug, fixable by re-reading the spec) or
+the spec itself has a gap (architecture bug, fixable by extending the spec).
+Without one, regressions require whole-pipeline debugging to attribute.
+
 ### Why this matters now: agentic development and review cost
 
 Our development flow is increasingly agentic — code generation is cheap, but
