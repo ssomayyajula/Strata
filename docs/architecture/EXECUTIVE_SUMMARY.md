@@ -27,17 +27,39 @@ intermediate output. This leads to:
 
 ### Benchmark results fluctuate without traceable cause
 
-Between May 4 and May 8, the benchmark suite (398→414 tests) showed:
-- Correct results dropped from 181 → 169
-- Regressions increased from 8 → 33
-- Tool errors increased from 161 → 166
+The internal benchmark suite runs nightly on mainline. Between May 4 and May 8,
+nine runs produced the following time series:
 
-Multiple PRs landed in this window addressing various front-end issues. The
-difficulty is not that things got worse — it's that we cannot explain WHY.
-There is no specification to trace a regression back to a violated invariant.
-When a "Resolution failed: 'name' is not defined" regression appears on 25
-benchmarks after a field-access fix, the question "which assumption did we
-break?" has no written answer to point to.
+| Date | Commit | Benchmarks | Correct | Regressions | Tool Errors |
+|------|--------|-----------|---------|-------------|-------------|
+| May 4 | b7d8600a | 398 | 181 | 9 | 161 |
+| May 5 (a) | b30607ea | 398 | 162 | 28 | 166 |
+| May 5 (b) | 5dccfcca | 398 | 163 | 27 | 166 |
+| May 6 (a) | 055beafc | 398 | 163 | 27 | 166 |
+| May 6 (b) | 5ea97fb6 | 414 | 169 | 33 | 166 |
+| May 7 | 3c74daea | 414 | 169 | 33 | 166 |
+| May 8 (a) | 76bca524 | 414 | 168 | 34 | 166 |
+| May 8 (b) | 920195e5 | 414 | 169 | 33 | 166 |
+| May 8 (c) | 5f5a7013 | 414 | 168 | 34 | 166 |
+
+Two patterns are visible:
+
+1. **Cliff between May 4 and May 5:** Correct dropped from 181 → 162 (−19),
+   regressions jumped from 9 → 28 (+19), tool errors increased from 161 → 166
+   (+5). Multiple PRs landed in this window. The regressions are almost entirely
+   "Resolution failed: 'name' is not defined" — a name-resolution invariant was
+   violated, but there is no written rule that would identify which PR broke it.
+
+2. **Noise after May 6:** Correct oscillates between 168 and 169; regressions
+   between 33 and 34. The ±1 is a single benchmark (`demo_glue_service` or
+   `setup_cloudformation_delegated_admin`) non-deterministically timing out at
+   the 40s budget. This is not a code change — it's solver variance.
+
+The difficulty is not that things got worse — it's that we cannot explain WHY
+the May 4→5 cliff happened. There is no specification to trace a regression
+back to a violated invariant. When "Resolution failed: 'name' is not defined"
+appears on 19 benchmarks after a field-access fix, the question "which
+assumption did we break?" has no written answer to point to.
 
 With a specification, every regression is traceable: either the implementation
 deviated from the spec (implementation bug, fixable by re-reading the spec) or
@@ -303,8 +325,9 @@ handle Python-specific desugaring.
 
 | Metric | Current Pipeline | New Pipeline |
 |--------|-------------|-------------|
-| CI test crashes | 0 | 0 |
-| Tests passing | 28/54 | 29/54 (+1) |
+| CI test agreement | — | 42/46 same result |
+| Regressions (pass → inconclusive) | — | 3 |
+| Improvements (inconclusive → pass) | — | 1 |
 | Lowering passes required | 8 | 1 (Laurel → GFGL) |
 | Written specification | None | 1000+ lines |
 | Coercion rule | Ad-hoc (scattered across Translation) | Subsumption table (one function) |
@@ -313,9 +336,11 @@ handle Python-specific desugaring.
 The current pipeline remains operational as a parallel path (`pyAnalyzeLaurel`) and
 serves as the correctness baseline for differential testing.
 
-Four tests remain where the current pipeline proves VCs that the new pipeline cannot
-yet. These are solver-level encoding quality gaps (the new pipeline's encoding
-of try/except generates more complex VC structure), not soundness issues.
+Three tests remain where the current pipeline proves VCs that the new pipeline
+cannot yet (`test_try_except_scoping`, `test_datetime`, `test_dict_operations`).
+These are encoding quality gaps — the new pipeline's try/except and module-level
+encoding generates more complex VC structure that the solver needs more time to
+handle — not soundness issues.
 
 ---
 

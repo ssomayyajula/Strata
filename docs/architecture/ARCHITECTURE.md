@@ -1027,13 +1027,15 @@ pipeline's results?" On the 46 CI tests with expected outputs:
 - **1/46 tests:** New pipeline passes where current was inconclusive
   (test_multiple_except: 8 real VCs proven — genuine improvement)
 
-Zero crashes on any test. The current pipeline is verified intact and serves
-as the comparison baseline.
+Zero crashes on the 46 CI tests. Two non-CI tests (`test_foo_client_folder`,
+`test_invalid_client_type`) crash due to a missing runtime function
+(`Any_type_to_Any` — the Python `type()` builtin is not yet in the prelude).
+The current pipeline is verified intact and serves as the comparison baseline.
 
 The 3 encoding gaps are in tests with nested try/except (`test_try_except_scoping`)
 and module-level code that calls runtime procedures (`test_datetime`,
-`test_dict_operations`, `test_module_level`). These produce correct but
-more complex VC structure that the solver needs more time to handle.
+`test_dict_operations`). These produce correct but more complex VC structure
+that the solver needs more time to handle.
 
 ### Key Implementation Decisions
 
