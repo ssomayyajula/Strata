@@ -1019,15 +1019,15 @@ Translation must emit these specific constructors.
 The question is not "how many tests pass" but "are we replicating the old
 pipeline's results?" On the 46 CI tests with expected outputs:
 
-- **42/46 tests:** New pipeline replicates the old pipeline's result
+- **42/46 tests:** New pipeline replicates the current pipeline's result
   (same RESULT line — both pass, or both inconclusive)
-- **3/46 tests:** Old pipeline passes, new pipeline is inconclusive
+- **3/46 tests:** Current pipeline passes, new pipeline is inconclusive
   (solver can't prove VCs that the old encoding allows — encoding quality
   gap in try/except and module-level code, not a correctness issue)
 - **1/46 tests:** New pipeline passes where old was inconclusive
   (test_multiple_except: 8 real VCs proven — genuine improvement)
 
-Zero crashes on any test. The old pipeline is verified intact and serves
+Zero crashes on any test. The current pipeline is verified intact and serves
 as the comparison baseline.
 
 The 3 encoding gaps are in tests with nested try/except (`test_try_except_scoping`)
