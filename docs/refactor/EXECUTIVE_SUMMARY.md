@@ -245,6 +245,13 @@ of try/except generates more complex VC structure), not soundness issues.
 
 ## Traceability: Old Problems → Architecture Sections
 
+Each problem identified above is addressed by a specific section of the
+architecture specification. The table below provides traceability from
+the evidence of the problem to the part of the spec that prevents it
+from recurring. This is the key property of a prescriptive architecture:
+every known failure mode maps to a rule that makes it unrepresentable or
+mechanically detectable.
+
 | Problem | Evidence | Architecture Section |
 |---------|----------|---------------------|
 | No rule for when coercions fire | Issue #882, PRs #727/#918/#954/#1106 | §Subsumption Table, §Coercion Table |
