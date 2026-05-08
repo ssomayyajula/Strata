@@ -152,8 +152,8 @@ every PR is a negotiation between implicit mental models.
 
 The new architecture provides a 1000+ line specification that answers these
 questions deterministically. "Should this field access use heap parameterization?"
-is answered by the grade of the enclosing procedure (determined by coinductive
-fixpoint) and the calling convention table (written in the spec).
+is answered by the grade of the enclosing procedure (determined by coinduction
+on the call graph) and the calling convention table (written in the spec).
 
 ### 5. Adding new Python constructs requires whole-pipeline reasoning
 
@@ -241,7 +241,7 @@ Python AST + library stubs
 Python AST (user code)
   ↓ [Translation: fold over AST, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
-  ↓ [Elaboration: graded bidirectional typing, coinductive grade inference]
+  ↓ [Elaboration: graded bidirectional typing, coinduction on call graph]
 e' : GFGL.Program (Graded Fine-Grain Call-By-Value — effects explicit)
   ↓ [Projection: forget grading, trivial structural map]
 Laurel.Program (ready for Core)
@@ -262,8 +262,8 @@ effects. If a name is not in Γ, it emits Hole (nondeterministic havoc) rather
 than a call to an undefined function.
 
 **Elaboration** constructs a Graded Fine-Grain CBV (GFGL) typing derivation
-from the Laurel program. It discovers each procedure's grade via coinductive
-fixpoint iteration over the call graph, then elaborates each body: inserting
+from the Laurel program. It discovers each procedure's grade via coinduction
+on the call graph, then elaborates each body: inserting
 coercions at type boundaries (governed by the subsumption table), threading
 heap state (governed by grades), and binding effectful subexpressions at
 statement level via ANF-lifting (governed by the to-rule). The output term

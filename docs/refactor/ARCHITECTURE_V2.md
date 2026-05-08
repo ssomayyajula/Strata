@@ -60,7 +60,7 @@ Laurel program. The output is precisely typed but effects are still
 implicit — an effectful call looks the same as a pure one.
 
 **Elaboration** takes this implicitly-effectful program and makes effects
-explicit. It discovers each procedure's grade via coinductive fixpoint
+explicit. It discovers each procedure's grade via coinduction on the call graph
 iteration, then elaborates each body: inserting coercions at type
 boundaries, threading heap state, binding effectful subexpressions via
 ANF-lifting, and rewriting procedure signatures to match the graded
@@ -707,7 +707,7 @@ on the body. The smallest grade at which `checkProducer` succeeds IS the grade.
 
 ### Grade Inference: Coinductive Fixpoint over the Call Graph
 
-Procedure grades are inferred by coinductive fixpoint iteration — the
+Procedure grades are inferred by coinduction on the call graph — the
 standard technique for typing mutually recursive definitions in functional
 languages (cf. Hindley-Milner, abstract interpretation).
 
@@ -762,7 +762,7 @@ After a proc's grade is discovered:
 ### Resolution Does NOT Determine Effects
 
 Resolution provides parameter types, return types, defaults, kwargs.
-The elaborator discovers grades by coinductive fixpoint iteration over
+The elaborator discovers grades by coinduction on the call graph over
 the call graph. There is no `EffectType` annotation from Resolution.
 The grade IS the type — discovered by the same typing rules that check
 everything else.
