@@ -2,6 +2,35 @@
 
 ---
 
+## Overview
+
+This pipeline translates Python source code into Laurel (our verification IL)
+via a series of compositional passes. The key insight is **separation of
+concerns**: Translation handles Python's surface syntax (scope, classes,
+control flow) while Elaboration handles the semantic heavy lifting (effects,
+coercions, heap threading). Neither pass knows about the other's job.
+
+The elaboration pass is based on **Fine-Grain Call-By-Value** (FGCBV), a
+type theory that separates *values* (pure, duplicable) from *producers*
+(effectful, sequenced). In FGCBV, effects are made explicit through a
+sequencing construct `M to x. N` ("run M, bind its result to x, continue
+with N") rather than being implicit in evaluation order as in plain CBV.
+This separation means the elaborator can reason precisely about which
+subexpressions have effects and insert the correct calling conventions.
+
+**Graded effects** refine this further: instead of a binary pure/effectful
+distinction, each producer carries a *grade* from a monoid `{1, err, heap,
+heap·err}` that classifies exactly which effects it performs. The grade
+determines the calling convention (extra heap parameters, error outputs)
+and the grade monoid's algebraic structure ensures compositionality —
+sequencing two producers joins their grades.
+
+**Bidirectional typing** makes the elaborator syntax-directed (no
+backtracking, no unification). Values *synthesize* their types (bottom-up);
+producers are *checked* against an ambient grade (top-down). The mode
+discipline guarantees that at every point in the algorithm, enough
+information is available to make a deterministic choice.
+
 ## The Pipeline
 
 ```
@@ -19,6 +48,28 @@ Laurel.Program (ready for Core)
   ↓ [Core translation]
 Core
 ```
+
+**Resolution** builds the typing environment Γ from Python source and
+library stubs. It records function signatures, class fields, module
+structure, and type annotations. It does NOT determine effects.
+
+**Translation** is a deterministic fold over the Python AST. It desugars
+Python's surface syntax (classes → constructors + init calls, for loops →
+havoc + assume, context managers → enter/exit calls, etc.) into a flat
+Laurel program. The output is precisely typed but effects are still
+implicit — an effectful call looks the same as a pure one.
+
+**Elaboration** takes this implicitly-effectful program and makes effects
+explicit. It discovers each procedure's grade via coinductive fixpoint
+iteration, then elaborates each body: inserting coercions at type
+boundaries, threading heap state, binding effectful subexpressions via
+ANF-lifting, and rewriting procedure signatures to match the graded
+calling convention. The output is a Graded Fine-Grain Laurel (GFGL)
+program.
+
+**Projection** forgets the grading — a trivial structural map from GFGL
+back to Laurel syntax. The effect information is now encoded in the
+procedure signatures and calling conventions, not in the type system.
 
 ---
 
@@ -67,6 +118,51 @@ convention so the variable is in scope for try/except assignment).
 ---
 
 ## Elaboration
+
+Elaboration is the heart of the pipeline. It is NOT a term-to-term
+transformation — it is the construction of a *Fine-Grain Laurel typing
+derivation* from a *Laurel typing derivation*. The input is a well-typed
+Laurel term (implicitly effectful CBV); the output is a well-typed GFGL
+term (explicitly graded FGCBV). The FGL term is the proof term of the
+typing derivation — it IS the derivation, not something derived from it.
+
+Concretely: the elaborator takes a Laurel program where effects are
+implicit (an effectful call `f(x)` is syntactically identical to a pure
+call `g(x)`) and constructs the GFGL derivation where effects are explicit
+(effectful calls are sequenced via `effectfulCall` nodes that bind their
+outputs, with grades witnessing the effect composition).
+
+The theory behind this is **Fine-Grain Call-By-Value** (Levy 2003, Egger
+et al. 2014). In FGCBV, the term language has two syntactic categories:
+
+- **Values** (V): pure, duplicable, no effects. Literals, variables,
+  pure function applications, coercions.
+- **Producers** (M): effectful, sequenced. Statements, effectful calls,
+  control flow.
+
+The key construct is `M to x. N` — "evaluate producer M, bind its result
+to x, then evaluate producer N." This is the fine-grain sequencing that
+replaces implicit left-to-right evaluation. Our `effectfulCall` node is
+exactly this construct specialized to procedure calls.
+
+**Graded effects** (Gaboardi et al. 2016, Orchard et al. 2019) annotate
+each producer with a grade from an effect monoid. Our monoid has four
+elements: `pure` (no effects), `err` (may raise exceptions), `heap`
+(reads/writes heap), and `heapErr` (both). The grade tells us the calling
+convention: a `heap`-graded call must receive the current heap and return
+a new one; an `err`-graded call returns an extra error output.
+
+**Bidirectional typing** (Pierce & Turner 2000) makes the algorithm
+syntax-directed. There are two modes:
+
+- **Synthesis (⇒):** given a term, compute its type and grade.
+- **Checking (⇐):** given a term and an expected type/grade, verify it fits.
+
+The mode switch happens at subsumption: when we synthesize a type A but
+need type B, we insert a coercion witness. When we synthesize grade d but
+the ambient grade is e, we insert the appropriate calling convention.
+Both witnesses are *proof-relevant* — they produce FGL term structure,
+not just boolean "yes/no."
 
 ### Two Type Systems
 
