@@ -265,6 +265,41 @@ mechanically detectable.
 
 ---
 
+## Vignette: Diagnosing and Fixing a Bug Class via the Architecture
+
+The new pipeline is not bug-free — but when bugs arise, the architecture
+makes them diagnosable and fixable in a principled way. An example:
+
+**The bug:** Runtime procedures like `datetime_now()` were being nested inside
+expressions (e.g., `x := Any..as_Composite!(datetime_now())`). Core rejects
+procedure calls in expression position, producing "0-ary op not found" errors.
+
+**Diagnosis via the architecture:** The grade monoid `{pure, err, heap, heapErr}`
+had no grade for "must be at statement level but has no specific effect." The
+architecture's value rule requires `grade(f) = 1` for a call to appear in an
+expression. But `datetime_now` was classified as `pure` (grade 1) because
+`gradeFromSignature` only checked for Error/Heap — not whether the callee is
+a Laurel `function` vs `procedure`.
+
+**The fix:** Extend the grade monoid to `{pure, proc, err, heap, heapErr}`.
+Update `gradeFromSignature` to check `isFunctional`. Update `synthValue` to
+reject grade > pure. Update `mkGradedCall` to handle `proc`. Each change
+traced directly to a section of the architecture — the grade lattice, the
+value rule precondition, the calling convention table.
+
+**Time to resolution:** One session. The architecture told us exactly what was
+missing (a grade for non-functional procedures), where to add it (the monoid,
+the signature function, the value rule), and how to verify the fix (grade trial
+list, calling convention dispatch). Compare this to PR #954's 100+ comments
+over weeks — same pipeline, same class of problem (calling convention confusion),
+but no specification to guide the resolution.
+
+The point is not that the new pipeline avoids bugs. It's that when bugs occur,
+the architecture provides a framework for diagnosing root causes and verifying
+fixes — rather than iterating through heuristics in PR review.
+
+---
+
 ## The Ask
 
 Adopt the new pipeline (`pyAnalyzeV2`) as the path forward for the Python frontend.
