@@ -745,12 +745,13 @@ cleanly: Translation emits structure, Elaboration handles semantics.
 | Inconclusive | 24 | 20 | −4 |
 | Internal error | 1 | 1 | same (test_unsupported_config, no CI expected) |
 
-The new pipeline strictly dominates: every test the old pipeline passes,
-the new pipeline passes too. Four tests that were previously inconclusive
-(test_class_field_any, test_missing_models, test_multiple_except,
-test_try_except) now produce successful analysis — the elaborator's
-coercion insertion and effect tracking resolve ambiguities that the old
-pipeline could not.
+Every test the old pipeline passes, the new pipeline passes too (zero
+regressions on RESULT line). Four tests report "Analysis success" where
+the old pipeline reports "Inconclusive" — however these are **vacuous
+passes** (0 VCs generated). The elaborator produces empty bodies for
+these procs, so Core trivially accepts them. These are NOT genuine
+improvements — they indicate elaboration is silently discarding proc
+bodies that it fails to elaborate.
 
 **VC generation differences:**
 
