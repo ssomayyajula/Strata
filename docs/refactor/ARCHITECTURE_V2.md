@@ -513,10 +513,22 @@ def subgrade : Grade → Grade → Option ConventionWitness
   | _,        _        => none
 ```
 
-**`procCall` convention:** `mkProcCall md callee args resultTy body` —
-binds the procedure's declared outputs (no extra error/heap added).
-The outputs match the proc's signature exactly. Used when a `proc`-grade
-callee appears in any ambient grade ≥ proc.
+**`procCall` convention:** `mkProcCall md callee args declaredOutputs body` —
+binds the procedure's DECLARED outputs (read from Laurel.Procedure.outputs
+or derived from the runtime program). No extra error/heap added. The outputs
+are NOT determined by the grade alone — they come from the proc's signature.
+
+This is the only witness that requires runtime information. The others
+(errorCall, heapCall, heapErrorCall) have fixed output patterns.
+
+Examples:
+- `print(msg: Any) returns ()` → 0 outputs → effectfulCall with [] → body receives no result
+- `datetime_now() returns (ret: Any)` → 1 output → effectfulCall with [ret] → body receives ret
+
+The call site must look up the proc's declared outputs to construct the
+effectfulCall. This information comes from the runtime program's
+`staticProcedures` list (for runtime procs) or from the user program's
+proc definitions (for user procs after signature rewriting).
 
 Application via smart constructors (read heapVar from state internally):
 
@@ -526,7 +538,7 @@ Application via smart constructors (read heapVar from state internally):
 -- prepend heap if needed, generate fresh output names (HOAS), extend Γ,
 -- call body closure.
 
-def mkProcCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
+def mkProcCall (md callee args declaredOutputs) (body : FGLValue → ElabM FGLProducer)
 def mkErrorCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 def mkHeapCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
 def mkHeapErrorCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
