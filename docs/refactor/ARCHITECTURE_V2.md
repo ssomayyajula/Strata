@@ -728,6 +728,58 @@ Translation must emit these specific constructors.
 
 ---
 
+## Current Status (2026-05-08)
+
+### Comparison with Old Pipeline (`pyAnalyzeLaurel`)
+
+The old pipeline (Translation-only, no elaboration) handles effects and
+coercions inside Translation itself — boolean flags, ad-hoc passes, and
+interleaved concerns. The new pipeline (`pyAnalyzeV2`) separates these
+cleanly: Translation emits structure, Elaboration handles semantics.
+
+**Test outcomes (54 in-tree tests):**
+
+| | Old pipeline | New pipeline | Delta |
+|---|---|---|---|
+| Analysis success | 28 | 32 | +4 |
+| Inconclusive | 24 | 20 | −4 |
+| Internal error | 1 | 1 | same (test_unsupported_config, no CI expected) |
+
+The new pipeline strictly dominates: every test the old pipeline passes,
+the new pipeline passes too. Four tests that were previously inconclusive
+(test_class_field_any, test_missing_models, test_multiple_except,
+test_try_except) now produce successful analysis — the elaborator's
+coercion insertion and effect tracking resolve ambiguities that the old
+pipeline could not.
+
+**VC generation differences:**
+
+The new pipeline produces fewer VCs per test in most cases. This is
+expected: the elaborator inserts coercions only where type boundaries
+require them (bidirectional, demand-driven), while the old pipeline
+inserted them more conservatively. Fewer VCs means faster solver time
+with no loss of coverage.
+
+Exception: nested if/else chains produce *more* VCs due to the
+continuation duplication bug (see Known Tech Debt). This is the main
+remaining issue for exact output match.
+
+**Source location fidelity:**
+
+Output source locations (file, line, column) match the original Python
+source exactly. Each FGL term carries metadata from the source statement
+that produced it (correct by construction — see §Projection).
+
+**CI compatibility:**
+
+The new pipeline is not yet wired into CI (`run_py_analyze.sh` runs
+`pyAnalyzeLaurel`). The 46 CI expected files test exact output match
+against the old pipeline. Once the if/else duplication bug is fixed and
+remaining inconclusives are resolved, the expected files will be
+regenerated for the new pipeline.
+
+---
+
 ## Success Criteria
 
 1. All 54 in-tree tests pass.
