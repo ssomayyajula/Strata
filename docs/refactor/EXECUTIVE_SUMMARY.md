@@ -148,6 +148,13 @@ one typing rule to Elaboration. Both can be verified independently: Translation'
 output must be well-formed Laurel (checkable by inspection), and Elaboration's
 typing rules must be mode-correct (checkable against the bidirectional discipline).
 
+This containment of blast radius is particularly important for validation of the
+front-end, which is one of our team's key goals. With separated passes and
+explicit intermediate invariants, we can validate each stage independently —
+confirming that Translation produces correct desugaring, that Elaboration
+preserves semantics, and that the composition is sound — rather than treating
+the entire pipeline as an opaque function from Python to Core.
+
 ---
 
 ## Relationship to Existing Documentation Efforts
