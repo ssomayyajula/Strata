@@ -67,7 +67,7 @@ spec is correct by construction, and code that deviates from it is identifiable
 by inspection rather than by waiting for downstream failures.
 
 The new architecture addresses these by providing a single source of truth
-(`ARCHITECTURE_V2.md`) that determines coercion insertion, effect classification,
+(`ARCHITECTURE.md`) that determines coercion insertion, effect classification,
 and calling conventions. The implementation is a mechanical transcription of this
 specification. When a question arises ("should this be Composite or Any?"), the
 specification answers it — not a reviewer's mental model.
@@ -242,7 +242,7 @@ reference to the spec.
 ## The New Architecture
 
 The new pipeline is governed by a formal specification
-(`ARCHITECTURE_V2.md`, 1000+ lines) that defines:
+(`ARCHITECTURE.md`, 1000+ lines) that defines:
 
 - A **subsumption table** specifying all type coercions and when they fire
 - A **grade monoid** `{pure, proc, err, heap, heapErr}` classifying effects
