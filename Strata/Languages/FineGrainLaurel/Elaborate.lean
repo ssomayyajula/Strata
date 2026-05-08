@@ -554,6 +554,13 @@ partial def elabAssign (md : Md) (target value : StmtExprMd) (rest : List StmtEx
       | _ => pure false
     let (tv, _) ← synthValue target
     match value.val with
+    | .IfThenElse cond thn els =>
+      let assignThn : StmtExprMd := ⟨.Assign [target] thn, value.md⟩
+      let assignEls : StmtExprMd := match els with
+        | some e => ⟨.Assign [target] e, value.md⟩
+        | none => ⟨.Block [] none, value.md⟩
+      let desugared : StmtExprMd := ⟨.IfThenElse cond assignThn (some assignEls), value.md⟩
+      checkProducer desugared rest grade
     | .Hole false _ =>
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_havoc"

@@ -466,6 +466,19 @@ partial def translateStmt (s : Python.stmt SourceRange) : TransM (List StmtExprM
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 partial def translateAssignSingle (sr : SourceRange) (target value : Python.expr SourceRange) : TransM (List StmtExprMd) := do
+  match target with
+  | .Subscript _ container slice _ => do
+    let containerExpr ← translateExpr container
+    let idx ← match slice with
+      | .Slice sr' start stop _ => do
+        let s ← match start.val with | some e => translateExpr e | none => mkExpr sr' (.LiteralInt 0)
+        let e ← match stop.val with | some e => translateExpr e | none => mkExpr sr' (.LiteralInt (-1))
+        mkExpr sr' (.StaticCall "from_Slice" [s, e])
+      | _ => translateExpr slice
+    let rhs ← translateExpr value
+    let setsCall ← mkExpr sr (.StaticCall "Any_sets" [idx, containerExpr, rhs])
+    pure [← mkExpr sr (.Assign [containerExpr] setsCall)]
+  | _ =>
   match value with
   | .Call _ (.Name _ calleeName _) callArgs callKwargs => do
     match (← lookupName calleeName.val) with
