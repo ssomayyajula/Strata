@@ -160,6 +160,13 @@ described here. They do not aim to specify:
   specification that determines calling conventions from grades would resolve it:
   the grade lattice computes which approach is correct.
 
+A related issue: the old pipeline's tech debt and Python construct coverage gaps
+are not explicitly documented. It is currently difficult to give a straight answer
+to the question "what does the Python front-end actually support?" without reading
+2100 lines of translation code. Which constructs are fully handled, which are
+approximated (e.g., Hole), and which silently produce incorrect output is implicit
+in the implementation rather than stated anywhere.
+
 The existing documentation efforts and this refactor are complementary. PRs #1136
 and #1144 document the system as it is — essential for onboarding and debugging.
 The architecture specification documents what the system should become, with enough
