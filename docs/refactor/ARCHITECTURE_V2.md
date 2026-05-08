@@ -58,7 +58,9 @@ A catamorphism over the Python AST. One case per constructor. Deterministic.
 
 **Does:** scope hoisting, object construction (.New + __init__), context managers,
 for-loop abstraction (havoc + assume), loop labels, calling convention (kwargs +
-defaults via Γ), module-level wrapping (__main__), mutable param copies.
+defaults via Γ), module-level wrapping (__main__), mutable param copies,
+error output declaration (`maybe_except: Error` in proc outputs — matches prelude
+convention so the variable is in scope for try/except assignment).
 
 **Does NOT:** cast insertion, literal wrapping, effect determination.
 
@@ -73,10 +75,22 @@ defaults via Γ), module-level wrapping (__main__), mutable param copies.
 
 ```lean
 def eraseType : HighType → LowType
-  | .UserDefined _ => .TCore "Composite"
   | .TInt => .TInt | .TBool => .TBool | .TString => .TString
   | .TFloat64 => .TFloat64 | .TVoid => .TVoid | .TCore n => .TCore n
+  | .UserDefined id => match id.text with
+    | "Any" => .TCore "Any" | "Error" => .TCore "Error"
+    | "ListAny" => .TCore "ListAny" | "DictStrAny" => .TCore "DictStrAny"
+    | "Box" => .TCore "Box" | "Field" => .TCore "Field" | "TypeTag" => .TCore "TypeTag"
+    | _ => .TCore "Composite"
+  | .THeap => .TCore "Heap"
+  | .TReal => .TCore "real" | .TTypedField _ => .TCore "Field"
+  | .TSet _ | .TMap _ _ | .Applied _ _ | .Intersection _ | .Unknown => .TCore "Any"
+  | .Pure _ => .TCore "Composite"
 ```
+
+Note: The Laurel parser produces `UserDefined "Any"` for the type name `Any`
+in runtime program sources. `eraseType` must handle these — otherwise runtime
+proc signatures get Composite where they should get Any, causing spurious coercions.
 
 ### The Grade Monoid (Residuated Partially-Ordered)
 
@@ -197,23 +211,29 @@ The output term applies BOTH witnesses:
 ### Subsumption Table (Type Coercions)
 
 ```lean
+-- CoercionResult carries (Md → FGLValue → FGLValue) so coercions inherit
+-- source metadata from the value being coerced.
+inductive CoercionResult where | refl | coerce (w : Md → FGLValue → FGLValue) | unrelated
+
 def subsume (actual expected : LowType) : CoercionResult :=
   if actual == expected then .refl else match actual, expected with
-  | .TInt, .TCore "Any"         => .coerce .fromInt
-  | .TBool, .TCore "Any"        => .coerce .fromBool
-  | .TString, .TCore "Any"      => .coerce .fromStr
-  | .TFloat64, .TCore "Any"     => .coerce .fromFloat
-  | .TCore "Composite", .TCore "Any" => .coerce .fromComposite
-  | .TCore "ListAny", .TCore "Any"   => .coerce .fromListAny
-  | .TCore "DictStrAny", .TCore "Any" => .coerce .fromDictStrAny
-  | .TVoid, .TCore "Any"        => .coerce (fun _ => .fromNone)
-  | .TCore "Any", .TBool        => .coerce (fun v => .staticCall "Any_to_bool" [v])
-  | .TCore "Any", .TInt         => .coerce (fun v => .staticCall "Any..as_int!" [v])
-  | .TCore "Any", .TString      => .coerce (fun v => .staticCall "Any..as_string!" [v])
-  | .TCore "Any", .TFloat64     => .coerce (fun v => .staticCall "Any..as_float!" [v])
-  | .TCore "Any", .TCore "Composite" => .coerce (fun v => .staticCall "Any..as_Composite!" [v])
-  -- No Box..AnyVal! — Box unwrapping is type-directed (see §Heap Field Access)
+  | .TInt, .TCore "Any"         => .coerce (fun md => .fromInt md)
+  | .TBool, .TCore "Any"        => .coerce (fun md => .fromBool md)
+  | .TString, .TCore "Any"      => .coerce (fun md => .fromStr md)
+  | .TFloat64, .TCore "Any"     => .coerce (fun md => .fromFloat md)
+  | .TCore "Composite", .TCore "Any" => .coerce (fun md => .fromComposite md)
+  | .TCore "ListAny", .TCore "Any"   => .coerce (fun md => .fromListAny md)
+  | .TCore "DictStrAny", .TCore "Any" => .coerce (fun md => .fromDictStrAny md)
+  | .TVoid, .TCore "Any"        => .coerce (fun md _ => .fromNone md)
+  | .TCore "Any", .TBool        => .coerce (fun md v => .staticCall md "Any_to_bool" [v])
+  | .TCore "Any", .TInt         => .coerce (fun md v => .staticCall md "Any..as_int!" [v])
+  | .TCore "Any", .TString      => .coerce (fun md v => .staticCall md "Any..as_string!" [v])
+  | .TCore "Any", .TFloat64     => .coerce (fun md v => .staticCall md "Any..as_float!" [v])
+  | .TCore "Any", .TCore "Composite" => .coerce (fun md v => .staticCall md "Any..as_Composite!" [v])
   | _, _ => .unrelated
+
+def applySubsume (val : FGLValue) (actual expected : LowType) : FGLValue :=
+  match subsume actual expected with | .refl => val | .coerce c => c val.getMd val | .unrelated => val
 ```
 
 ### Coercion Table (validated against PythonRuntimeLaurelPart.lean)
@@ -312,12 +332,14 @@ Application via smart constructors (read heapVar from state internally):
 
 ```lean
 -- Smart constructors dispatch on the convention witness.
--- They read heapVar from ElabState, prepend heap if needed,
--- generate fresh output names (HOAS), extend Γ, call body closure.
+-- They take md from the source statement, read heapVar from ElabState,
+-- prepend heap if needed, generate fresh output names (HOAS), extend Γ,
+-- call body closure.
 
-def mkErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
-def mkHeapCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
-def mkHeapErrorCall (callee args resultTy) (body : FGLValue → ElabM FGLProducer)
+def mkErrorCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
+def mkHeapCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
+def mkHeapErrorCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
+def mkVarDecl (md name ty init) (body : FGLValue → ElabM FGLProducer)
 ```
 
 ### Elaboration Structure
@@ -497,8 +519,21 @@ sigs, `checkArgsK` cannot insert coercions (e.g., int→Any for PAdd).
 iteration and Pass 2 elaboration iterate ONLY over `program.staticProcedures`.
 Runtime procedure bodies are never inspected.
 
-**Runtime grades** are pre-computed from output signatures (Error output → err).
+**Runtime grades** are derived structurally from procedure signatures via
+`gradeFromSignature`:
+
+```lean
+def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
+  let hasError := proc.outputs.any fun o => eraseType o.type.val == .TCore "Error"
+  let hasHeap := proc.inputs.any fun i => eraseType i.type.val == .TCore "Heap"
+  match hasHeap, hasError with
+  | true, true => .heapErr | true, false => .heap
+  | false, true => .err    | false, false => .pure
+```
+
 They enter `procGrades` as initial values before fixpoint iteration begins.
+Uses `eraseType` (not string matching on type names) so it handles both
+`TCore "Error"` and `UserDefined "Error"` from the Laurel parser uniformly.
 
 This makes confusion impossible: you cannot accidentally elaborate a runtime
 body (it's in `runtime`, not `program`). You cannot miss a coercion at a
@@ -517,10 +552,31 @@ After elaboration, no Hole nodes remain.
 
 Trivial catamorphism. Forget grades. Map GFGL → Laurel:
 
-- `effectfulCall f args outputs body` → `[decl outputs; Assign [outputs] (StaticCall f args); body]`
-- `assign target val body` → `[Assign [target] val; body]`
-- `varDecl x ty init body` → `[LocalVariable x ty init; body]`
+- `effectfulCall md f args outputs body` → `[decl outputs; Assign [outputs] (StaticCall f args); body]`
+- `assign md target val body` → `[Assign [target] val; body]`
+- `varDecl md x ty init body` → `[LocalVariable x ty init; body]`
 - Values map to their Laurel equivalents directly.
+
+### Source Metadata (Correct by Construction)
+
+Every FGL constructor carries an `md : Md` field (= `Imperative.MetaData Core.Expression`)
+from the source `StmtExprMd` that produced it. Projection extracts `md` structurally:
+
+```lean
+partial def projectValue : FGLValue → StmtExprMd
+  | .litInt md n => mkLaurel md (.LiteralInt n)
+  | .var md name => mkLaurel md (.Identifier ...)
+  | .staticCall md name args => mkLaurel md (.StaticCall ...)
+  ...
+
+partial def projectProducer : FGLProducer → List StmtExprMd
+  | .assert md cond body => [mkLaurel md (.Assert ...)] ++ projectProducer body
+  ...
+```
+
+No `md` parameter to projection — it's impossible to use the wrong metadata
+because each FGL term carries its own. Coercions inserted by subsumption inherit
+`md` from the value being coerced (via `val.getMd`).
 
 ---
 
@@ -557,6 +613,12 @@ Trivial catamorphism. Forget grades. Map GFGL → Laurel:
 ---
 
 ## Known Tech Debt
+
+**If/then/else continuation duplication:** `checkProducer` for `IfThenElse`
+threads `rest` into both branches. This is semantically correct (both branches
+must continue with the rest of the block) but causes exponential VC blowup on
+nested if/else chains. Fix: introduce a join point (labeled block) so `rest`
+is elaborated once and both branches exit to it.
 
 **Narrowing as pure function:** `Any_to_bool` etc. are modeled as pure (grade 1).
 In Python, `__bool__` can have side effects. If needed later, narrowing becomes
