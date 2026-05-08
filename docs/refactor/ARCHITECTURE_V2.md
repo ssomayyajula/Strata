@@ -952,6 +952,49 @@ in `preludeSignatures` so the elaborator can check args at correct types:
 
 ---
 
+## Python Construct Coverage
+
+Explicit accounting of what Translation handles, what it approximates,
+and what it does not support.
+
+**Fully handled (precise translation):**
+- Literals (int, bool, str, None)
+- Variables (identifiers, scope hoisting)
+- Binary/comparison/boolean/unary operators (→ prelude StaticCalls)
+- Function definitions (params, defaults, kwargs, return)
+- Class definitions (fields, __init__, methods with self)
+- Assignments (simple, augmented, annotated, tuple unpacking)
+- Control flow (if/elif/else, while, for, break, continue)
+- Return statements
+- Assert/assume
+- Try/except (labeled blocks + isError guards)
+- Context managers (with/as)
+- List/dict/tuple literals (→ ListAny_cons/DictStrAny_cons encoding)
+- F-strings (→ to_string_any)
+- Subscript read/write (→ Any_get/Any_sets)
+- Slice notation (→ from_Slice)
+- Module imports (→ qualified name resolution)
+- Class instantiation (→ New + __init__)
+- Method calls (→ qualified StaticCall with self)
+
+**Approximated (Hole — sound but imprecise):**
+- Unresolved names (not in Γ → nondeterministic Hole)
+- Lambda expressions
+- List/set/dict comprehensions
+- Generator expressions
+- Walrus operator (:=)
+- Match statements
+- Async constructs (async for, async with, await)
+- Decorators
+- Star expressions
+- Float literals (represented as string — no real arithmetic)
+
+**Not supported (Translation throws):**
+- Chained comparisons (`a < b < c`)
+- Multiple assignment targets (`x = y = 5`)
+
+---
+
 ## Known Tech Debt
 
 **Narrowing as pure function:** `Any_to_bool` etc. are modeled as pure (grade 1).

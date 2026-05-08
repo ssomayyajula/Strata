@@ -227,6 +227,21 @@ of try/except generates more complex VC structure), not soundness issues.
 
 ---
 
+## Traceability: Old Problems → Architecture Sections
+
+| Problem | Evidence | Architecture Section |
+|---------|----------|---------------------|
+| No rule for when coercions fire | Issue #882, PRs #727/#918/#954/#1106 | §Subsumption Table, §Coercion Table |
+| Pass-ordering bugs | PR #1011 | §Elaboration (single pass replaces 8) |
+| Illegal states representable | PR #835 | §FGL Term Structure, §HOAS Smart Constructors |
+| Architectural disagreement | PR #954 (100+ comments) | §Grade Monoid, §Calling Conventions |
+| Whole-pipeline blast radius | Every new construct | §Translation (syntax only), §Elaboration (semantics only) |
+| No specification to implement against | PRs #1136/#1144 document WHAT not WHEN/HOW | §Engineering Principles, §Typing Rules, §Assignment Rules |
+| Undocumented Python coverage | Implicit in 2100 lines | §Translation Desugarings, §Python Construct Coverage |
+| function vs procedure confusion | `datetime_now` nested in expressions | §Core Interface Requirements, §proc Grade |
+
+---
+
 ## The Ask
 
 Adopt the new pipeline (`pyAnalyzeV2`) as the path forward for the Python frontend.
