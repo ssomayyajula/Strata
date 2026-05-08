@@ -182,8 +182,8 @@ convention so the variable is in scope for try/except assignment).
 Elaboration is the heart of the pipeline. It is NOT a term-to-term
 transformation — it is the construction of a *GFGL typing derivation*
 from a *Laurel typing derivation*. The input is a well-typed Laurel term
-(implicitly effectful CBV); the output is a well-typed GFGL term (effects
-explicit via grades in the term structure). The GFGL term is the proof
+(implicitly effectful CBV); the output is a well-typed GGFGL term (effects
+explicit via grades in the term structure). The GGFGL term is the proof
 term of the typing derivation — it IS the derivation, not something
 derived from it.
 
@@ -224,7 +224,7 @@ syntax-directed. There are two modes:
 The mode switch happens at subsumption: when we synthesize a type A but
 need type B, we insert a coercion witness. When we synthesize grade d but
 the ambient grade is e, we insert the appropriate calling convention.
-Both witnesses are *proof-relevant* — they produce FGL term structure,
+Both witnesses are *proof-relevant* — they produce GFGL term structure,
 not just boolean "yes/no."
 
 ### Two Type Systems
@@ -552,7 +552,7 @@ during elaboration). The `Field` datatype is generated from all fields in
 ### Subgrading Witness (Defunctionalized Calling Convention)
 
 `subgrade(d, e)` returns a `ConventionWitness` when `d ≤ e`. The witness is
-proof-relevant: it determines the FGL term produced at the call site.
+proof-relevant: it determines the GFGL term produced at the call site.
 
 ```lean
 inductive ConventionWitness where
@@ -623,14 +623,14 @@ def mkVarDecl (md name ty init) (body : FGLValue → ElabM FGLProducer)
 synthValue (expr) : ElabM (FGLValue × LowType)
 checkValue (expr) (expected : HighType) : ElabM FGLValue
 
--- Producer synthesis: defunctionalized result (grade + enough to build FGL)
+-- Producer synthesis: defunctionalized result (grade + enough to build GFGL)
 inductive SynthResult where
   | value (val : FGLValue) (ty : LowType)         -- grade 1 (pure call or literal)
   | call (callee args retTy grade)                 -- grade > 1 (effectful call)
 
 synthExpr (expr) : ElabM SynthResult
 
--- Producer checking: inputs grade, produces FGL
+-- Producer checking: inputs grade, produces GFGL
 checkProducer (stmt) (rest : List Stmt) (grade : Grade) : ElabM FGLProducer
 ```
 
@@ -738,7 +738,7 @@ the ambient grade `e`, causing the trial to fail.
   with different grade assumptions until convergence.
 - `fullElaborate` calls `discoverGrades` FIRST (all grades determined),
   then calls `checkProducer` on each body with the FINAL grades to
-  produce FGL terms.
+  produce GFGL terms.
 
 **Coinduction:** Self-recursive and mutually recursive procedures work
 because `procGrades` is initialized with an assumption (⊥). The typing
@@ -748,7 +748,7 @@ succeeds. Convergence is guaranteed because the grade lattice is finite
 (5 elements) and grades only increase.
 
 **No on-demand discovery during elaboration.** By the time `checkProducer`
-runs to produce FGL terms (Pass 2), ALL grades are already known and
+runs to produce GFGL terms (Pass 2), ALL grades are already known and
 stable in the reader. `discoverGrade` is a simple HashMap lookup. No
 body evaluation. No cascading. No boolean flags.
 
@@ -856,7 +856,7 @@ elaborated output:
    and may crash. Therefore: elaboration MUST NOT fail on any proc. If a construct
    is unhandled, emit a havoc (nondeterministic hole) rather than failing.
 
-### FGL Term Structure
+### GFGL Term Structure
 
 ```lean
 inductive FGLProducer where
@@ -888,7 +888,7 @@ Trivial catamorphism. Forget grades. Map GFGL → Laurel:
 
 ### Source Metadata (Correct by Construction)
 
-Every FGL constructor carries an `md : Md` field (= `Imperative.MetaData Core.Expression`)
+Every GFGL constructor carries an `md : Md` field (= `Imperative.MetaData Core.Expression`)
 from the source `StmtExprMd` that produced it. Projection extracts `md` structurally:
 
 ```lean
@@ -904,7 +904,7 @@ partial def projectProducer : FGLProducer → List StmtExprMd
 ```
 
 No `md` parameter to projection — it's impossible to use the wrong metadata
-because each FGL term carries its own. Coercions inserted by subsumption inherit
+because each GFGL term carries its own. Coercions inserted by subsumption inherit
 `md` from the value being coerced (via `val.getMd`).
 
 ---

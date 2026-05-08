@@ -135,9 +135,9 @@ Two problems are visible here:
 
 The new pipeline addresses both: the architecture specifies exactly which
 constructs are values (can appear in assert conditions) vs. producers (must be
-bound at statement level). And HOAS smart constructors bind output variables via
-closures — the continuation receives only the result, so the error output is not
-in scope and cannot be accidentally referenced.
+bound at statement level). And the elaborator's smart constructors bind output
+variables via closures — the continuation receives only the result, so the error
+output is not in scope and cannot be accidentally referenced.
 
 ### 4. No shared specification means PRs become negotiations
 
@@ -313,7 +313,7 @@ mechanically detectable.
 |---------|----------|---------------------|
 | No rule for when coercions fire | Issue #882, PRs #727/#918/#954/#1106 | §Subsumption Table, §Coercion Table |
 | Pass-ordering bugs | PR #1011 | §Elaboration (single pass replaces 8) |
-| Illegal states representable | PR #835 | §FGL Term Structure, §HOAS Smart Constructors |
+| Illegal states representable | PR #835 | §GFGL Term Structure, §Smart Constructors |
 | Architectural disagreement | PR #954 (100+ comments) | §Grade Monoid, §Calling Conventions |
 | Whole-pipeline blast radius | Every new construct | §Translation (syntax only), §Elaboration (semantics only) |
 | No specification to implement against | PRs #1136/#1144 document WHAT not WHEN/HOW | §Engineering Principles, §Typing Rules, §Assignment Rules |
