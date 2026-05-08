@@ -232,36 +232,27 @@ def mkVarDecl (md : Md) (name : String) (ty : LowType) (init : Option FGLValue)
   let cont ← extendEnv name (liftType ty) (body (.var md name))
   pure (.varDecl md name ty init cont)
 
-def mkProcCall (md : Md) (callee : String) (args : List FGLValue)
-    (declaredOutputs : List (String × HighType))
-    (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer :=
-  mkEffectfulCall md callee args declaredOutputs
-    fun outs => match outs[0]? with
-      | some rv => body rv
-      | none => body (.fromNone md)
-
-def mkErrorCall (md : Md) (callee : String) (args : List FGLValue) (resultTy : HighType)
-    (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer :=
-  mkEffectfulCall md callee args [("result", resultTy), ("err", .TCore "Error")]
-    fun outs => body outs[0]!
-
-def mkHeapCall (md : Md) (callee : String) (args : List FGLValue) (resultTy : HighType)
+-- mkGradedCall: THE single call constructor for all grades > pure.
+-- Grade determines whether to prepend heap. Outputs come from the proc's declaration.
+def mkGradedCall (md : Md) (callee : String) (args : List FGLValue)
+    (declaredOutputs : List (String × HighType)) (callGrade : Grade)
     (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
-  let hv := (← get).heapVar
-  let heapArg := match hv with | some h => FGLValue.var md h | none => FGLValue.var md "$heap"
-  mkEffectfulCall md callee (heapArg :: args) [("heap", .THeap), ("result", resultTy)]
-    fun outs => do
-      match outs[0]! with | .var _ n => modify fun s => { s with heapVar := some n } | _ => pure ()
-      body outs[1]!
-
-def mkHeapErrorCall (md : Md) (callee : String) (args : List FGLValue) (resultTy : HighType)
-    (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
-  let hv := (← get).heapVar
-  let heapArg := match hv with | some h => FGLValue.var md h | none => FGLValue.var md "$heap"
-  mkEffectfulCall md callee (heapArg :: args) [("heap", .THeap), ("result", resultTy), ("err", .TCore "Error")]
-    fun outs => do
-      match outs[0]! with | .var _ n => modify fun s => { s with heapVar := some n } | _ => pure ()
-      body outs[1]!
+  let actualArgs ← if callGrade == .heap || callGrade == .heapErr then do
+    let hv := (← get).heapVar
+    let heapArg := match hv with | some h => FGLValue.var md h | none => FGLValue.var md "$heap"
+    pure (heapArg :: args)
+  else pure args
+  mkEffectfulCall md callee actualArgs declaredOutputs fun outs => do
+    if callGrade == .heap || callGrade == .heapErr then
+      match outs[0]? with
+      | some v => match v with | .var _ n => modify fun s => { s with heapVar := some n } | _ => pure ()
+      | none => pure ()
+    let resultVar := match callGrade with
+      | .heap | .heapErr => outs[1]?
+      | _ => outs[0]?
+    match resultVar with
+    | some rv => body rv
+    | none => body (.fromNone md)
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Subsumption
@@ -394,17 +385,25 @@ partial def checkArgs (args : List StmtExprMd) (params : List (String × HighTyp
       pure (v :: vs)
   go args paramTypes
 
--- Look up a proc's declared outputs from the runtime program
+-- Look up a proc's declared outputs, accounting for signature rewriting.
+-- For user procs: grade determines rewritten outputs.
+-- For runtime procs: outputs are as declared (never rewritten).
 partial def lookupProcOutputs (callee : String) : ElabM (List (String × HighType)) := do
   let env ← read
-  let findOutputs (procs : List Laurel.Procedure) : Option (List (String × HighType)) :=
-    match procs.find? (fun p => p.name.text == callee) with
-    | some proc => some (proc.outputs.map fun o => (o.name.text, o.type.val))
-    | none => none
-  match findOutputs env.runtime.staticProcedures with
-  | some outs => pure outs
-  | none => match findOutputs env.program.staticProcedures with
-    | some outs => pure outs
+  let g := env.procGrades[callee]?.getD .pure
+  let findProc (procs : List Laurel.Procedure) : Option Laurel.Procedure :=
+    procs.find? (fun p => p.name.text == callee)
+  match findProc env.runtime.staticProcedures with
+  | some proc => pure (proc.outputs.map fun o => (o.name.text, o.type.val))
+  | none => match findProc env.program.staticProcedures with
+    | some proc =>
+      let resultOutputs := proc.outputs.filter fun o => eraseType o.type.val != .TCore "Error"
+      let resultList := resultOutputs.map fun o => (o.name.text, o.type.val)
+      match g with
+      | .heap => pure ([("$heap", .THeap)] ++ resultList)
+      | .heapErr => pure ([("$heap", .THeap)] ++ resultList ++ [("maybe_except", .TCore "Error")])
+      | .err => pure (resultList ++ [("maybe_except", .TCore "Error")])
+      | _ => pure (proc.outputs.map fun o => (o.name.text, o.type.val))
     | none => pure [("result", .TCore "Any")]
 
 -- Dispatch smart constructor based on grade
@@ -412,13 +411,10 @@ partial def lookupProcOutputs (callee : String) : ElabM (List (String × HighTyp
 private partial def dispatchCall (md : Md) (callee : String) (args : List FGLValue) (retTy : HighType)
     (callGrade : Grade) (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
   match callGrade with
-  | .proc => do
+  | .pure => body (FGLValue.staticCall md callee args)
+  | _ => do
     let declaredOutputs ← lookupProcOutputs callee
-    mkProcCall md callee args declaredOutputs body
-  | .err => mkErrorCall md callee args retTy body
-  | .heap => mkHeapCall md callee args retTy body
-  | .heapErr => mkHeapErrorCall md callee args retTy body
-  | .pure => do let v := FGLValue.staticCall md callee args; body v
+    mkGradedCall md callee args declaredOutputs callGrade body
 
 -- checkArgsK: to-rule applied at expression level (ANF-lift effectful args)
 -- Architecture §"Block elaboration"

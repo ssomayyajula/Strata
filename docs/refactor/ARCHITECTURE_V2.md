@@ -538,10 +538,16 @@ Application via smart constructors (read heapVar from state internally):
 -- prepend heap if needed, generate fresh output names (HOAS), extend Γ,
 -- call body closure.
 
-def mkProcCall (md callee args declaredOutputs) (body : FGLValue → ElabM FGLProducer)
-def mkErrorCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
-def mkHeapCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
-def mkHeapErrorCall (md callee args resultTy) (body : FGLValue → ElabM FGLProducer)
+-- ALL graded call constructors use the proc's DECLARED outputs.
+-- The grade determines only whether to prepend the heap argument.
+-- Outputs are NEVER invented — they come from the proc's signature.
+
+def mkGradedCall (md callee args declaredOutputs grade) (body : FGLValue → ElabM FGLProducer)
+  -- grade pure: no binding (value level) — NOT a call constructor
+  -- grade proc/err: effectfulCall callee args declaredOutputs body
+  -- grade heap/heapErr: effectfulCall callee (heap::args) declaredOutputs body
+  --   (prepend heap arg, declared outputs already include heap output)
+
 def mkVarDecl (md name ty init) (body : FGLValue → ElabM FGLProducer)
 ```
 
