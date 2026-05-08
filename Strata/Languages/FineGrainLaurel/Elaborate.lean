@@ -124,6 +124,7 @@ def boxConstructorName (ty : HighType) : String :=
   | .TInt => "BoxInt" | .TBool => "BoxBool" | .TFloat64 => "BoxFloat64"
   | .TReal => "BoxReal" | .TString => "BoxString"
   | .UserDefined _ => "BoxComposite"
+  | .TCore "Any" => "BoxAny"
   | .TCore name => s!"Box..{name}"
   | _ => "BoxComposite"
 
@@ -132,6 +133,7 @@ def boxDestructorName (ty : HighType) : String :=
   | .TInt => "Box..intVal!" | .TBool => "Box..boolVal!" | .TFloat64 => "Box..float64Val!"
   | .TReal => "Box..realVal!" | .TString => "Box..stringVal!"
   | .UserDefined _ => "Box..compositeVal!"
+  | .TCore "Any" => "Box..anyVal!"
   | .TCore name => s!"Box..{name}Val!"
   | _ => "Box..compositeVal!"
 
@@ -140,6 +142,7 @@ def boxFieldName (ty : HighType) : String :=
   | .TInt => "intVal" | .TBool => "boolVal" | .TFloat64 => "float64Val"
   | .TReal => "realVal" | .TString => "stringVal"
   | .UserDefined _ => "compositeVal"
+  | .TCore "Any" => "anyVal"
   | .TCore name => s!"{name}Val"
   | _ => "compositeVal"
 

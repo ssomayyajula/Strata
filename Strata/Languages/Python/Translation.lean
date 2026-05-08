@@ -594,7 +594,8 @@ partial def translateFunction (s : Python.stmt SourceRange)
       let selfType := match className with
         | some cn => HighType.UserDefined (Identifier.mk cn none) | none => .TCore "Any"
       let selfParam : Parameter := { name := Identifier.mk "self" none, type := mkTypeDefault selfType }
-      let otherParams := if selfAlreadyStripped then allParams
+      let otherParams := if selfAlreadyStripped then
+        match allParams with | _ :: rest => rest | [] => []
         else if allParams.length > 0 then allParams.tail! else []
       let renamedParams := otherParams.map fun p => { p with name := Identifier.mk s!"$in_{p.name.text}" none }
       let copies ← emitMutableParamCopies sr (otherParams.map fun p => (p.name.text, p.type.val))

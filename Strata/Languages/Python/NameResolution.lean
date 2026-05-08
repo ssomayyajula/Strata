@@ -344,11 +344,12 @@ private def resolveClassDef (name : Ann String SourceRange)
         let qualName := s!"{name.val}@{methodName.val}"
         let allParams := extractParams methodArgs
         let allDefaults := extractDefaults methodArgs
+        let selfType := HighType.UserDefined (Identifier.mk name.val none)
         let params := match allParams with
-          | _ :: rest => rest
+          | (selfName, _) :: rest => (selfName, selfType) :: rest
           | [] => []
         let defaults := match allDefaults with
-          | _ :: rest => rest
+          | _ :: rest => none :: rest
           | [] => []
         let retTy := extractReturnType methodReturns
         let hasKw := hasKwargsArg methodArgs
