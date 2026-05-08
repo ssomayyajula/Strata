@@ -335,8 +335,18 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
   let rec go : List StmtExprMd → List HighType → List FGLValue → ElabM FGLProducer
     | [], _, acc => cont acc.reverse
     | arg :: rest, [], acc => do
-      let (v, _) ← synthValue arg
-      go rest [] (v :: acc)
+      let result ← synthExpr arg
+      match result with
+      | .value val _ => go rest [] (val :: acc)
+      | .call callee checkedArgs retTy callGrade =>
+        if !Grade.leq callGrade grade then failure
+        else if callGrade == .err then
+          mkErrorCall callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
+        else if callGrade == .heap then
+          mkHeapCall callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
+        else if callGrade == .heapErr then
+          mkHeapErrorCall callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
+        else go rest [] (FGLValue.staticCall callee checkedArgs :: acc)
     | arg :: rest, pty :: ptysRest, acc => do
       let result ← synthExpr arg
       match result with
@@ -572,7 +582,11 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
           mkHeapErrorCall callee.text checkedArgs retHty fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
-      checkArgsK args params grade doWithArgs
+      match sig with
+      | some _ => checkArgsK args params grade doWithArgs
+      | none => do
+        let checkedArgs ← args.mapM fun a => checkValue a (.TCore "Any")
+        doWithArgs checkedArgs
     | .FieldSelect obj field =>
       guard (Grade.leq .heap grade)
       let (ov, objTy) ← synthValue obj
