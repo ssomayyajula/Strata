@@ -60,8 +60,8 @@ Laurel program. The output is precisely typed but effects are still
 implicit — an effectful call looks the same as a pure one.
 
 **Elaboration** takes this implicitly-effectful program and makes effects
-explicit. It discovers each procedure's grade via coinduction on the call graph
-iteration, then elaborates each body: inserting coercions at type
+explicit. It discovers each procedure's grade via coinduction on the call
+graph, then elaborates each body: inserting coercions at type
 boundaries, threading heap state, binding effectful subexpressions via
 ANF-lifting, and rewriting procedure signatures to match the graded
 calling convention. The output is a GFGL (Graded Fine-Grain Laurel) program.
@@ -653,7 +653,7 @@ are sequenced into let-bindings (ANF). The defunctionalized `SynthResult`
 avoids closures — the grade is data, not a flag.
 
 **Grade lookup during elaboration** is a pure HashMap read from the
-environment (all grades pre-computed by fixpoint iteration). No body
+environment (all grades pre-computed by coinduction). No body
 evaluation during term production.
 
 ### Producer Subsumption (see §Subsumption above for the full rule)
@@ -702,10 +702,10 @@ on the body. The smallest grade at which `checkProducer` succeeds IS the grade.
 | grade(f) | `procGrades[f]` (HashMap lookup from reader — pre-computed) |
 
 **fullElaborate** structure:
-1. `discoverGrades` — fixpoint iteration (calls typing rules, updates grades)
+1. `discoverGrades` — coinduction (calls typing rules, updates grades)
 2. `checkProducer` on each body — term production (reads final grades, never mutates)
 
-### Grade Inference: Coinductive Fixpoint over the Call Graph
+### Grade Inference: Coinduction on the Call Graph
 
 Procedure grades are inferred by coinduction on the call graph — the
 standard technique for typing mutually recursive definitions in functional
@@ -720,7 +720,7 @@ discoverGrades(program, Γ) → procGrades:
        under the current procGrades assumption.
        Set procGrades[f] := smallest g that succeeds.
   3. If any grade changed, go to step 2.
-  4. Fixpoint reached. Return procGrades.
+  4. Stable (no changes). Return procGrades.
 ```
 
 The typing rules are the ORACLE: `checkProducer M retTy g` succeeds at
@@ -733,7 +733,7 @@ the ambient grade `e`, causing the trial to fail.
   textbook — pure transcriptions of the formal rules above. They read
   `procGrades` from the environment. They NEVER mutate grades. No boolean
   flags, no mode switching.
-- The FIXPOINT ITERATION (`discoverGrades`) is the only code that
+- The COINDUCTION (`discoverGrades`) is the only code that
   computes and updates grades. It calls the typing rules repeatedly
   with different grade assumptions until convergence.
 - `fullElaborate` calls `discoverGrades` FIRST (all grades determined),
@@ -743,7 +743,7 @@ the ambient grade `e`, causing the trial to fail.
 **Coinduction:** Self-recursive and mutually recursive procedures work
 because `procGrades` is initialized with an assumption (⊥). The typing
 rules read this assumption during the trial. If the assumption was too
-low, the trial fails, the grade is bumped, and the next iteration
+low, the trial fails, the grade is bumped, and the next round
 succeeds. Convergence is guaranteed because the grade lattice is finite
 (5 elements) and grades only increase.
 
@@ -788,8 +788,8 @@ primitives (PAdd, PGt, ...), AND runtime library procedures. Elaboration
 uses these to type-check arguments at call boundaries. Without runtime
 sigs, `checkArgsK` cannot insert coercions (e.g., int→Any for PAdd).
 
-**Program** contains only user-defined procedure bodies. The fixpoint
-iteration and Pass 2 elaboration iterate ONLY over `program.staticProcedures`.
+**Program** contains only user-defined procedure bodies. The coinduction
+and Pass 2 elaboration walk ONLY `program.staticProcedures`.
 Runtime procedure bodies are never inspected.
 
 **Runtime grades** are derived structurally from procedure signatures via
@@ -811,7 +811,7 @@ expressions) from `procedure` (must be at statement level). A runtime
 procedure with no Error/Heap gets grade `proc` — ensuring it's ANF-lifted
 to statement level rather than nested in expressions.
 
-They enter `procGrades` as initial values before fixpoint iteration begins.
+They enter `procGrades` as initial values before coinduction begins.
 Uses `eraseType` (not string matching on type names) so it handles both
 `TCore "Error"` and `UserDefined "Error"` from the Laurel parser uniformly.
 
