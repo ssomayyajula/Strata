@@ -31,7 +31,7 @@ specification answers it — not a reviewer's mental model.
 
 ## Problems with the Current Pipeline
 
-### 1. Type coercions have no governing rule
+### 1. Endemic internal errors (example: ad-hoc type coercion)
 
 Internal errors and tool errors from type mismatches are endemic to the existing
 pipeline. The Composite↔Any coercion problem is not an isolated issue — it is a
