@@ -42,7 +42,7 @@ Issue #882 documents 13 failing tests from this. Four PRs have attempted fixes:
 | PR | Approach | Outcome |
 |----|----------|---------|
 | #727 | Replace Composite values with Hole (unconstrained) | Merged; explicitly "limits bug-finding ability" |
-| #918 | Rename heap datatypes + coercion pathways | Draft, abandoned (Git conflicts) |
+| #918 | Add Composite→Any coercion for containers/comparisons + rename Box→$Box | Draft, abandoned (Git conflicts) |
 | #954 | DynamicComposite + heap parameterization extension | 100+ comments, architectural disagreement, still open |
 | #1106 | Coerce all args to Any at call sites | Open; reviewer notes it "defeats the type-wrapping discipline" |
 
