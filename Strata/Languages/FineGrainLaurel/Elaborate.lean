@@ -95,7 +95,7 @@ inductive FGLProducer where
   | effectfulCall (md : Md) (callee : String) (args : List FGLValue)
       (outputs : List (String × LowType)) (body : FGLProducer)
   | exit (md : Md) (label : String)
-  | labeledBlock (md : Md) (label : String) (body : FGLProducer)
+  | labeledBlock (md : Md) (label : String) (body : FGLProducer) (after : FGLProducer)
   | unit
   deriving Inhabited
 
@@ -462,9 +462,15 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (grade : 
   | .StaticCall callee args => elabCall md callee args rest grade
 
   -- CHECK RULE: Block = sequence of statements
+  -- Labeled blocks: Exit jumps to end of block, then rest continues.
+  -- Thread `rest` OUTSIDE the block (not inside where Exit would skip it).
   | .Block stmts label =>
-    let prod ← elabRest (stmts ++ rest) grade
-    pure (match label with | some l => .labeledBlock md l prod | none => prod)
+    match label with
+    | some l =>
+      let blockProd ← elabRest stmts grade
+      let after ← elabRest rest grade
+      pure (.labeledBlock md l blockProd after)
+    | none => elabRest (stmts ++ rest) grade
 
   -- SYNTH RULE: new C ⇒ Composite & heap
   | .New classId =>
@@ -691,7 +697,7 @@ partial def projectProducer : FGLProducer → List StmtExprMd
     let targets := outputs.map fun (n, _) => mkLaurel md (.Identifier (Identifier.mk n none))
     decls ++ [mkLaurel md (.Assign targets call)] ++ projectProducer body
   | .exit md label => [mkLaurel md (.Exit label)]
-  | .labeledBlock md label body => [mkLaurel md (.Block (projectProducer body) (some label))]
+  | .labeledBlock md label body after => [mkLaurel md (.Block (projectProducer body) (some label))] ++ projectProducer after
   | .unit => []
 end
 
