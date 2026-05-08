@@ -93,7 +93,6 @@ structure ElabState where
   freshCounter : Nat := 0
   heapVar : Option String := none
   usedBoxConstructors : List (String × String × HighType) := []
-  discoveryMode : Bool := false
 
 abbrev ElabM := ReaderT ElabEnv (StateT ElabState Option)
 
@@ -278,9 +277,6 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     let sig ← lookupFuncSig callee.text
     match sig with
     | some s =>
-      unless (← get).discoveryMode do
-        let g ← discoverGrade callee.text
-        guard (g == .pure)
       let checkedArgs ← checkArgs args s.params
       pure (.staticCall callee.text checkedArgs, eraseType s.returnType)
     | none =>
@@ -294,14 +290,14 @@ partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValu
   pure (applySubsume val actual (eraseType expected))
 
 -- synthExpr: synthesize an expression as value OR producer (defunctionalized)
--- Returns SynthResult without needing the continuation.
+-- Grade lookup is a pure HashMap read from the environment. No body evaluation.
 partial def synthExpr (expr : StmtExprMd) : ElabM SynthResult := do
   match expr.val with
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
+    let g := (← read).procGrades[callee.text]?.getD .pure
     match sig with
     | some s =>
-      let g ← discoverGrade callee.text
       let checkedArgs ← checkArgs args s.params
       if g == .pure then
         pure (.value (.staticCall callee.text checkedArgs) (eraseType s.returnType))
@@ -309,7 +305,10 @@ partial def synthExpr (expr : StmtExprMd) : ElabM SynthResult := do
         pure (.call callee.text checkedArgs s.returnType g)
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
-      pure (.value (.staticCall callee.text checkedArgs) (.TCore "Any"))
+      if g == .pure then
+        pure (.value (.staticCall callee.text checkedArgs) (.TCore "Any"))
+      else
+        pure (.call callee.text checkedArgs (.TCore "Any") g)
   | _ =>
     let (val, ty) ← synthValue expr
     pure (.value val ty)
@@ -458,13 +457,13 @@ partial def elabRest (stmts : List StmtExprMd) (grade : Grade) : ElabM FGLProduc
   | [] => pure .unit
   | stmt :: rest => checkProducer stmt rest grade
 
--- elabCall: StaticCall with grade discovery + smart constructor dispatch
+-- elabCall: StaticCall with grade lookup + smart constructor dispatch
 partial def elabCall (callee : Identifier) (args : List StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
   let sig ← lookupFuncSig callee.text
   let (checkedArgs, retTy) ← match sig with
     | some s => do let ca ← checkArgs args s.params; pure (ca, s.returnType)
     | none => do let ca ← args.mapM fun a => checkValue a (.TCore "Any"); pure (ca, .TCore "Any")
-  let callGrade ← discoverGrade callee.text
+  let callGrade := (← read).procGrades[callee.text]?.getD .pure
   guard (Grade.leq callGrade grade)
   match callGrade with
   | .pure =>
@@ -548,7 +547,7 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
       let sig ← lookupFuncSig callee.text
       let retHty := match sig with | some s => s.returnType | none => .TCore "Any"
       let params := match sig with | some s => s.params | none => []
-      let callGrade ← discoverGrade callee.text
+      let callGrade := (← read).procGrades[callee.text]?.getD .pure
       guard (Grade.leq callGrade grade)
       let assignOrDecl (val : FGLValue) : ElabM FGLProducer := do
         if needsDecl then
@@ -573,10 +572,7 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
           mkHeapErrorCall callee.text checkedArgs retHty fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
-      let checkedArgs ← match sig with
-        | some s => checkArgs args s.params
-        | none => args.mapM fun a => checkValue a (.TCore "Any")
-      doWithArgs checkedArgs
+      checkArgsK args params grade doWithArgs
     | .FieldSelect obj field =>
       guard (Grade.leq .heap grade)
       let (ov, objTy) ← synthValue obj
@@ -609,61 +605,22 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
         let after ← elabRest rest grade
         pure (.assign tv cv after)
 
--- discoverGrade: typing rules as oracle
--- Reads procGrades from the reader (no state mutation). Uses `local` for coinduction.
-partial def discoverGrade (callee : String) : ElabM Grade := do
-  match (← read).procGrades[callee]? with
-  | some g => pure g
-  | none =>
-    -- Functions (isFunctional) are always pure — skip grade discovery
-    -- Also: procs without heap/error outputs whose body we'd cascade into
-    let env ← read
-    -- Grade from output signature structure (proof-relevant: outputs ARE the grade)
-    let env ← read
-    let findProc (procs : List Laurel.Procedure) := procs.find? (fun p => p.name.text == callee)
-    let proc := findProc env.program.staticProcedures |>.orElse fun _ => findProc env.runtime.staticProcedures
-    let gradeFromOutputs (outputs : List Laurel.Parameter) : Grade :=
-      let hasError := outputs.any fun o => match o.type.val with | .TCore "Error" => true | _ => false
-      let hasHeap := outputs.any fun o => match o.type.val with | .THeap => true | _ => false
-      match hasHeap, hasError with
-      | true, true => .heapErr
-      | true, false => .heap
-      | false, true => .err
-      | false, false => .pure
-    -- Only use signature-based grade for RUNTIME procs (already correctly configured)
-    let runtimeProc := findProc env.runtime.staticProcedures
-    match runtimeProc with
-    | some p => pure (gradeFromOutputs p.outputs)
-    | none =>
-      -- User proc or not found: discover from body
-      let body ← lookupProcBody callee
-      match body with
-      | some bodyExpr =>
-        let sig ← lookupFuncSig callee
-        let retTy := match sig with | some s => eraseType s.returnType | none => .TCore "Any"
-        let paramEnv := match sig with
-          | some s => s.params.foldl (fun e (n, t) =>
-              { e with typeEnv := { e.typeEnv with names := e.typeEnv.names.insert n (.variable t) } }) env
-          | none => env
-        tryGrades callee paramEnv bodyExpr retTy [.pure, .err, .heap, .heapErr]
-      | none => pure .pure
-
-partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd) (retTy : LowType) (grades : List Grade) : ElabM Grade := do
-  match grades with
-  | [] => pure .heapErr
-  | g :: rest =>
-    let st ← get
-    let trialSt : ElabState := { st with
-      freshCounter := 0
-      heapVar := if g == .heap || g == .heapErr then some "$heap" else none
-      discoveryMode := true }
-    -- Use local to add coinductive sentinel: callee assumed at grade g
-    let trialEnv := { env with procGrades := env.procGrades.insert callee g }
-    match (checkProducer body [] g).run trialEnv |>.run trialSt with
-    | some _ => pure g
-    | none => tryGrades callee env body retTy rest
-
 end
+
+-- tryGrades: try checkProducer at each grade, return smallest that succeeds.
+-- Standalone (not in mutual block). Used by discoverGrades fixpoint.
+partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd)
+    (grades : List Grade) : Option Grade :=
+  match grades with
+  | [] => some .heapErr
+  | g :: rest =>
+    let st : ElabState := {
+      freshCounter := 0
+      heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
+    let trialEnv := { env with procGrades := env.procGrades.insert callee g }
+    match (checkProducer body [] g).run trialEnv |>.run st with
+    | some _ => some g
+    | none => tryGrades callee env body rest
 
 -- Projection
 
@@ -711,33 +668,30 @@ def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) 
 def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laurel.Program := default) (initialGrades : Std.HashMap String Grade := {}) : Except String Laurel.Program := do
   let baseEnv : ElabEnv := { typeEnv := typeEnv, program := program, runtime := runtime }
 
-  -- PASS 1: SYNTH — discover all proc grades
+  -- PASS 1: SYNTH — coinductive fixpoint iteration over call graph
+  -- Iterate until grades stabilize. Convergence guaranteed (finite lattice, monotone).
   let mut knownGrades : Std.HashMap String Grade := initialGrades
-  for proc in program.staticProcedures do
-    let bodyOpt := match proc.body with
-      | .Transparent b => some b
-      | .Opaque _ (some impl) _ => some impl
-      | _ => none
-    match bodyOpt with
-    | some bodyExpr =>
-      let extEnv := (proc.inputs ++ proc.outputs).foldl
-        (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
-      let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
-      let grade := [Grade.pure, Grade.err, Grade.heap, Grade.heapErr].findSome? fun g =>
-        let st : ElabState := {
-          freshCounter := 0
-          heapVar := if g == .heap || g == .heapErr then some "$heap" else none
-          discoveryMode := true }
-        let trialEnv := { procEnv with procGrades := knownGrades.insert proc.name.text g }
-        match (checkProducer bodyExpr [] g).run trialEnv |>.run st with
-        | some _ => some g
-        | none => none
-      match grade with
-      | some g =>
-        let g := if proc.outputs.length > 1 then Grade.join g .err else g
-        knownGrades := knownGrades.insert proc.name.text g
+  let mut changed := true
+  while changed do
+    changed := false
+    for proc in program.staticProcedures do
+      let bodyOpt := match proc.body with
+        | .Transparent b => some b
+        | .Opaque _ (some impl) _ => some impl
+        | _ => none
+      match bodyOpt with
+      | some bodyExpr =>
+        let extEnv := (proc.inputs ++ proc.outputs).foldl
+          (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
+        let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
+        match tryGrades proc.name.text procEnv bodyExpr [.pure, .err, .heap, .heapErr] with
+        | some g =>
+          let g := if proc.outputs.length > 1 then Grade.join g .err else g
+          if knownGrades[proc.name.text]? != some g then
+            knownGrades := knownGrades.insert proc.name.text g
+            changed := true
+        | none => pure ()
       | none => pure ()
-    | none => pure ()
 
   -- PASS 2: CHECK — elaborate each proc with all grades known
   let mut procs : List Laurel.Procedure := []
