@@ -88,7 +88,7 @@ inductive FGLProducer where
   | returnValue (md : Md) (v : FGLValue)
   | assign (md : Md) (target : FGLValue) (val : FGLValue) (body : FGLProducer)
   | varDecl (md : Md) (name : String) (ty : LowType) (init : Option FGLValue) (body : FGLProducer)
-  | ifThenElse (md : Md) (cond : FGLValue) (thn : FGLProducer) (els : FGLProducer)
+  | ifThenElse (md : Md) (cond : FGLValue) (thn : FGLProducer) (els : FGLProducer) (after : FGLProducer)
   | whileLoop (md : Md) (cond : FGLValue) (body : FGLProducer) (after : FGLProducer)
   | assert (md : Md) (cond : FGLValue) (body : FGLProducer)
   | assume (md : Md) (cond : FGLValue) (body : FGLProducer)
@@ -408,13 +408,15 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (grade : 
   match stmt.val with
 
   -- CHECK RULE: if V then M else N ⇐ A & e
+  -- Both branches elaborate standalone. Rest goes in `after` (elaborated once).
   | .IfThenElse cond thn els =>
     let cc ← checkValue cond .TBool
-    let tp ← checkProducer thn rest grade
+    let tp ← checkProducer thn [] grade
     let ep ← match els with
-      | some e => checkProducer e rest grade
-      | none => elabRest rest grade
-    pure (.ifThenElse md cc tp ep)
+      | some e => checkProducer e [] grade
+      | none => pure .unit
+    let after ← elabRest rest grade
+    pure (.ifThenElse md cc tp ep after)
 
   -- SYNTH RULE: while V do M ⇒ TVoid & e
   | .While cond _invs _dec body =>
@@ -687,7 +689,11 @@ partial def projectProducer : FGLProducer → List StmtExprMd
   | .returnValue md v => [projectValue v]
   | .assign md target val body => [mkLaurel md (.Assign [projectValue target] (projectValue val))] ++ projectProducer body
   | .varDecl md name ty init body => [mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (liftType ty)) (init.map projectValue))] ++ projectProducer body
-  | .ifThenElse md cond thn els => [mkLaurel md (.IfThenElse (projectValue cond) (mkLaurel md (.Block (projectProducer thn) none)) (some (mkLaurel md (.Block (projectProducer els) none))))]
+  | .ifThenElse md cond thn els after =>
+    let elsProj := match els with
+      | .unit => none
+      | _ => some (mkLaurel md (.Block (projectProducer els) none))
+    [mkLaurel md (.IfThenElse (projectValue cond) (mkLaurel md (.Block (projectProducer thn) none)) elsProj)] ++ projectProducer after
   | .whileLoop md cond body after => [mkLaurel md (.While (projectValue cond) [] none (mkLaurel md (.Block (projectProducer body) none)))] ++ projectProducer after
   | .assert md cond body => [mkLaurel md (.Assert (projectValue cond))] ++ projectProducer body
   | .assume md cond body => [mkLaurel md (.Assume (projectValue cond))] ++ projectProducer body
