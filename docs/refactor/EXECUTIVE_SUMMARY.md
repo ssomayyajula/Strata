@@ -80,22 +80,31 @@ that Core can consume directly, because it makes effects explicit in the term
 structure (values vs. producers, graded calling conventions). There is no
 intermediate representation that requires further transformation.
 
-### 3. The intermediate representation allows illegal states
+### 3. No architectural discipline prevents incorrect transformations
 
-PR #835 ("Lift Procedure Calls in Asserts") introduced a bug where `getLast`
-selected a procedure's error output instead of its result (fixed in `001e735`).
-The code compiled and tests passed because both output variables have the same
-Lean type (`StmtExprMd`). The bug was caught only by manual review of generated
-Laurel output.
+PR #835 ("Lift Procedure Calls in Asserts") initially lifted assignments out of
+assert conditions — which is semantically incorrect (assignments in asserts should
+be rejected, not silently hoisted). Review caught this and the scope was narrowed
+to lift only procedure calls. A secondary issue then emerged: for multi-output
+procedures, the lifting logic selected the wrong output variable (the error channel
+instead of the result), because both have the same Lean type (`StmtExprMd`).
 
-This is a representation problem: the Lean types don't encode which output
-variable is the result and which is the error channel. Any transformation that
-reorders or selects outputs must be manually verified.
+Two problems are visible here:
 
-The new pipeline uses HOAS (Higher-Order Abstract Syntax) smart constructors that
-bind output variables via closures. The continuation function receives only the
-result variable as a parameter — the error output is not in scope and cannot be
-referenced accidentally. This makes the bug class from PR #835 unrepresentable.
+1. **No rule specifying what can be lifted from asserts.** The pass had to be
+   iteratively refined through review because there was no written specification
+   of assert semantics to implement against. The initial over-lifting was a
+   reasonable interpretation — it just happened to be wrong.
+
+2. **Output variables are not distinguished by type.** The result and error
+   outputs of a procedure call are both `StmtExprMd`. Any code that selects
+   between them must be manually verified — the type system doesn't help.
+
+The new pipeline addresses both: the architecture specifies exactly which
+constructs are values (can appear in assert conditions) vs. producers (must be
+bound at statement level). And HOAS smart constructors bind output variables via
+closures — the continuation receives only the result, so the error output is not
+in scope and cannot be accidentally referenced.
 
 ### 4. No shared specification means PRs become negotiations
 
