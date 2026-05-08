@@ -63,30 +63,39 @@ def liftType : LowType → HighType
   | .TInt => .TInt | .TBool => .TBool | .TString => .TString
   | .TFloat64 => .TFloat64 | .TVoid => .TVoid | .TCore n => .TCore n
 
--- FGL Terms
+-- FGL Terms — every constructor carries source metadata (correct by construction)
+
+abbrev Md := Imperative.MetaData Core.Expression
 
 inductive FGLValue where
-  | litInt (n : Int) | litBool (b : Bool) | litString (s : String) | var (name : String)
-  | fromInt (inner : FGLValue) | fromStr (inner : FGLValue)
-  | fromBool (inner : FGLValue) | fromFloat (inner : FGLValue)
-  | fromComposite (inner : FGLValue) | fromListAny (inner : FGLValue)
-  | fromDictStrAny (inner : FGLValue) | fromNone
-  | fieldAccess (obj : FGLValue) (field : String)
-  | staticCall (name : String) (args : List FGLValue)
+  | litInt (md : Md) (n : Int) | litBool (md : Md) (b : Bool) | litString (md : Md) (s : String)
+  | var (md : Md) (name : String)
+  | fromInt (md : Md) (inner : FGLValue) | fromStr (md : Md) (inner : FGLValue)
+  | fromBool (md : Md) (inner : FGLValue) | fromFloat (md : Md) (inner : FGLValue)
+  | fromComposite (md : Md) (inner : FGLValue) | fromListAny (md : Md) (inner : FGLValue)
+  | fromDictStrAny (md : Md) (inner : FGLValue) | fromNone (md : Md)
+  | fieldAccess (md : Md) (obj : FGLValue) (field : String)
+  | staticCall (md : Md) (name : String) (args : List FGLValue)
   deriving Inhabited
 
+def FGLValue.getMd : FGLValue → Md
+  | .litInt md _ | .litBool md _ | .litString md _ | .var md _
+  | .fromInt md _ | .fromStr md _ | .fromBool md _ | .fromFloat md _
+  | .fromComposite md _ | .fromListAny md _ | .fromDictStrAny md _ | .fromNone md
+  | .fieldAccess md _ _ | .staticCall md _ _ => md
+
 inductive FGLProducer where
-  | returnValue (v : FGLValue)
-  | assign (target : FGLValue) (val : FGLValue) (body : FGLProducer)
-  | varDecl (name : String) (ty : LowType) (init : Option FGLValue) (body : FGLProducer)
-  | ifThenElse (cond : FGLValue) (thn : FGLProducer) (els : FGLProducer)
-  | whileLoop (cond : FGLValue) (body : FGLProducer) (after : FGLProducer)
-  | assert (cond : FGLValue) (body : FGLProducer)
-  | assume (cond : FGLValue) (body : FGLProducer)
-  | effectfulCall (callee : String) (args : List FGLValue)
+  | returnValue (md : Md) (v : FGLValue)
+  | assign (md : Md) (target : FGLValue) (val : FGLValue) (body : FGLProducer)
+  | varDecl (md : Md) (name : String) (ty : LowType) (init : Option FGLValue) (body : FGLProducer)
+  | ifThenElse (md : Md) (cond : FGLValue) (thn : FGLProducer) (els : FGLProducer)
+  | whileLoop (md : Md) (cond : FGLValue) (body : FGLProducer) (after : FGLProducer)
+  | assert (md : Md) (cond : FGLValue) (body : FGLProducer)
+  | assume (md : Md) (cond : FGLValue) (body : FGLProducer)
+  | effectfulCall (md : Md) (callee : String) (args : List FGLValue)
       (outputs : List (String × LowType)) (body : FGLProducer)
-  | exit (label : String)
-  | labeledBlock (label : String) (body : FGLProducer)
+  | exit (md : Md) (label : String)
+  | labeledBlock (md : Md) (label : String) (body : FGLProducer)
   | unit
   deriving Inhabited
 
@@ -186,9 +195,9 @@ def resolveFieldOwner (fieldName : String) : ElabM (Option String) := do
     if fields.any (fun (n, _) => n == fieldName) then return some className
   pure none
 
--- HOAS Smart Constructors
+-- HOAS Smart Constructors — all take md from the source statement
 
-def mkEffectfulCall (callee : String) (args : List FGLValue)
+def mkEffectfulCall (md : Md) (callee : String) (args : List FGLValue)
     (outputSpecs : List (String × HighType))
     (body : List FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
   let mut names : List String := []
@@ -197,63 +206,63 @@ def mkEffectfulCall (callee : String) (args : List FGLValue)
     let n ← freshVar pfx
     names := names ++ [n]
     lowOutputs := lowOutputs ++ [(n, eraseType ty)]
-  let vars := names.map FGLValue.var
+  let vars := names.map (FGLValue.var md)
   let cont ← names.zip (outputSpecs.map (·.2)) |>.foldr
     (fun (n, ty) acc => extendEnv n ty acc) (body vars)
-  pure (.effectfulCall callee args lowOutputs cont)
+  pure (.effectfulCall md callee args lowOutputs cont)
 
-def mkVarDecl (name : String) (ty : LowType) (init : Option FGLValue)
+def mkVarDecl (md : Md) (name : String) (ty : LowType) (init : Option FGLValue)
     (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
-  let cont ← extendEnv name (liftType ty) (body (.var name))
-  pure (.varDecl name ty init cont)
+  let cont ← extendEnv name (liftType ty) (body (.var md name))
+  pure (.varDecl md name ty init cont)
 
-def mkErrorCall (callee : String) (args : List FGLValue) (resultTy : HighType)
+def mkErrorCall (md : Md) (callee : String) (args : List FGLValue) (resultTy : HighType)
     (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer :=
-  mkEffectfulCall callee args [("result", resultTy), ("err", .TCore "Error")]
+  mkEffectfulCall md callee args [("result", resultTy), ("err", .TCore "Error")]
     fun outs => body outs[0]!
 
-def mkHeapCall (callee : String) (args : List FGLValue) (resultTy : HighType)
+def mkHeapCall (md : Md) (callee : String) (args : List FGLValue) (resultTy : HighType)
     (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
   let hv := (← get).heapVar
-  let heapArg := match hv with | some h => FGLValue.var h | none => FGLValue.var "$heap"
-  mkEffectfulCall callee (heapArg :: args) [("heap", .THeap), ("result", resultTy)]
+  let heapArg := match hv with | some h => FGLValue.var md h | none => FGLValue.var md "$heap"
+  mkEffectfulCall md callee (heapArg :: args) [("heap", .THeap), ("result", resultTy)]
     fun outs => do
-      match outs[0]! with | .var n => modify fun s => { s with heapVar := some n } | _ => pure ()
+      match outs[0]! with | .var _ n => modify fun s => { s with heapVar := some n } | _ => pure ()
       body outs[1]!
 
-def mkHeapErrorCall (callee : String) (args : List FGLValue) (resultTy : HighType)
+def mkHeapErrorCall (md : Md) (callee : String) (args : List FGLValue) (resultTy : HighType)
     (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
   let hv := (← get).heapVar
-  let heapArg := match hv with | some h => FGLValue.var h | none => FGLValue.var "$heap"
-  mkEffectfulCall callee (heapArg :: args) [("heap", .THeap), ("result", resultTy), ("err", .TCore "Error")]
+  let heapArg := match hv with | some h => FGLValue.var md h | none => FGLValue.var md "$heap"
+  mkEffectfulCall md callee (heapArg :: args) [("heap", .THeap), ("result", resultTy), ("err", .TCore "Error")]
     fun outs => do
-      match outs[0]! with | .var n => modify fun s => { s with heapVar := some n } | _ => pure ()
+      match outs[0]! with | .var _ n => modify fun s => { s with heapVar := some n } | _ => pure ()
       body outs[1]!
 
--- Subsumption
+-- Subsumption — coercions inherit md from the value being coerced
 
-inductive CoercionResult where | refl | coerce (w : FGLValue → FGLValue) | unrelated
+inductive CoercionResult where | refl | coerce (w : Md → FGLValue → FGLValue) | unrelated
   deriving Inhabited
 
 def subsume (actual expected : LowType) : CoercionResult :=
   if actual == expected then .refl else match actual, expected with
-  | .TInt, .TCore "Any" => .coerce .fromInt
-  | .TBool, .TCore "Any" => .coerce .fromBool
-  | .TString, .TCore "Any" => .coerce .fromStr
-  | .TFloat64, .TCore "Any" => .coerce .fromFloat
-  | .TCore "Composite", .TCore "Any" => .coerce .fromComposite
-  | .TCore "ListAny", .TCore "Any" => .coerce .fromListAny
-  | .TCore "DictStrAny", .TCore "Any" => .coerce .fromDictStrAny
-  | .TVoid, .TCore "Any" => .coerce (fun _ => .fromNone)
-  | .TCore "Any", .TBool => .coerce (fun v => .staticCall "Any_to_bool" [v])
-  | .TCore "Any", .TInt => .coerce (fun v => .staticCall "Any..as_int!" [v])
-  | .TCore "Any", .TString => .coerce (fun v => .staticCall "Any..as_string!" [v])
-  | .TCore "Any", .TFloat64 => .coerce (fun v => .staticCall "Any..as_float!" [v])
-  | .TCore "Any", .TCore "Composite" => .coerce (fun v => .staticCall "Any..as_Composite!" [v])
+  | .TInt, .TCore "Any" => .coerce (fun md => .fromInt md)
+  | .TBool, .TCore "Any" => .coerce (fun md => .fromBool md)
+  | .TString, .TCore "Any" => .coerce (fun md => .fromStr md)
+  | .TFloat64, .TCore "Any" => .coerce (fun md => .fromFloat md)
+  | .TCore "Composite", .TCore "Any" => .coerce (fun md => .fromComposite md)
+  | .TCore "ListAny", .TCore "Any" => .coerce (fun md => .fromListAny md)
+  | .TCore "DictStrAny", .TCore "Any" => .coerce (fun md => .fromDictStrAny md)
+  | .TVoid, .TCore "Any" => .coerce (fun md _ => .fromNone md)
+  | .TCore "Any", .TBool => .coerce (fun md v => .staticCall md "Any_to_bool" [v])
+  | .TCore "Any", .TInt => .coerce (fun md v => .staticCall md "Any..as_int!" [v])
+  | .TCore "Any", .TString => .coerce (fun md v => .staticCall md "Any..as_string!" [v])
+  | .TCore "Any", .TFloat64 => .coerce (fun md v => .staticCall md "Any..as_float!" [v])
+  | .TCore "Any", .TCore "Composite" => .coerce (fun md v => .staticCall md "Any..as_Composite!" [v])
   | _, _ => .unrelated
 
 def applySubsume (val : FGLValue) (actual expected : LowType) : FGLValue :=
-  match subsume actual expected with | .refl => val | .coerce c => c val | .unrelated => val
+  match subsume actual expected with | .refl => val | .coerce c => c val.getMd val | .unrelated => val
 
 -- Defunctionalized producer synthesis result.
 -- Describes what an expression produces WITHOUT needing the rest of the block.
@@ -269,15 +278,16 @@ inductive SynthResult where
 mutual
 
 partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
+  let md := expr.md
   match expr.val with
-  | .LiteralInt n => pure (.litInt n, .TInt)
-  | .LiteralBool b => pure (.litBool b, .TBool)
-  | .LiteralString s => pure (.litString s, .TString)
+  | .LiteralInt n => pure (.litInt md n, .TInt)
+  | .LiteralBool b => pure (.litBool md b, .TBool)
+  | .LiteralString s => pure (.litString md s, .TString)
   | .Identifier id =>
     match (← lookupEnv id.text) with
-    | some (.variable ty) => pure (.var id.text, eraseType ty)
-    | some (.function sig) => pure (.var id.text, eraseType sig.returnType)
-    | _ => pure (.var id.text, .TCore "Any")
+    | some (.variable ty) => pure (.var md id.text, eraseType ty)
+    | some (.function sig) => pure (.var md id.text, eraseType sig.returnType)
+    | _ => pure (.var md id.text, .TCore "Any")
   | .FieldSelect obj field =>
     let (ov, objTy) ← synthValue obj
     match (← get).heapVar with
@@ -289,19 +299,19 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
         | none => pure (.TCore "Any")
       recordBoxUse fieldTy
       let compositeObj := applySubsume ov objTy (.TCore "Composite")
-      let read := FGLValue.staticCall "readField" [.var hv, compositeObj, .staticCall qualifiedName []]
-      pure (.staticCall (boxDestructorName fieldTy) [read], eraseType fieldTy)
+      let read := FGLValue.staticCall md "readField" [.var md hv, compositeObj, .staticCall md qualifiedName []]
+      pure (.staticCall md (boxDestructorName fieldTy) [read], eraseType fieldTy)
     | none => failure
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
     match sig with
     | some s =>
       let checkedArgs ← checkArgs args s.params
-      pure (.staticCall callee.text checkedArgs, eraseType s.returnType)
+      pure (.staticCall md callee.text checkedArgs, eraseType s.returnType)
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
-      pure (.staticCall callee.text checkedArgs, .TCore "Any")
-  | .Hole _ _ => pure (.var "_hole", .TCore "Any")
+      pure (.staticCall md callee.text checkedArgs, .TCore "Any")
+  | .Hole _ _ => pure (.var md "_hole", .TCore "Any")
   | _ => failure
 
 partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValue := do
@@ -311,6 +321,7 @@ partial def checkValue (expr : StmtExprMd) (expected : HighType) : ElabM FGLValu
 -- synthExpr: synthesize an expression as value OR producer (defunctionalized)
 -- Grade lookup is a pure HashMap read from the environment. No body evaluation.
 partial def synthExpr (expr : StmtExprMd) : ElabM SynthResult := do
+  let md := expr.md
   match expr.val with
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
@@ -319,13 +330,13 @@ partial def synthExpr (expr : StmtExprMd) : ElabM SynthResult := do
     | some s =>
       let checkedArgs ← checkArgs args s.params
       if g == .pure then
-        pure (.value (.staticCall callee.text checkedArgs) (eraseType s.returnType))
+        pure (.value (.staticCall md callee.text checkedArgs) (eraseType s.returnType))
       else
         pure (.call callee.text checkedArgs s.returnType g)
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
       if g == .pure then
-        pure (.value (.staticCall callee.text checkedArgs) (.TCore "Any"))
+        pure (.value (.staticCall md callee.text checkedArgs) (.TCore "Any"))
       else
         pure (.call callee.text checkedArgs (.TCore "Any") g)
   | _ =>
@@ -360,12 +371,12 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
       | .call callee checkedArgs retTy callGrade =>
         if !Grade.leq callGrade grade then failure
         else if callGrade == .err then
-          mkErrorCall callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
+          mkErrorCall arg.md callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
         else if callGrade == .heap then
-          mkHeapCall callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
+          mkHeapCall arg.md callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
         else if callGrade == .heapErr then
-          mkHeapErrorCall callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
-        else go rest [] (FGLValue.staticCall callee checkedArgs :: acc)
+          mkHeapErrorCall arg.md callee checkedArgs retTy fun rv => go rest [] (rv :: acc)
+        else go rest [] (FGLValue.staticCall arg.md callee checkedArgs :: acc)
     | arg :: rest, pty :: ptysRest, acc => do
       let result ← synthExpr arg
       match result with
@@ -375,16 +386,16 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
       | .call callee checkedArgs retTy callGrade =>
         if !Grade.leq callGrade grade then failure
         else if callGrade == .err then
-          mkErrorCall callee checkedArgs retTy fun rv =>
+          mkErrorCall arg.md callee checkedArgs retTy fun rv =>
             go rest ptysRest (applySubsume rv (eraseType retTy) (eraseType pty) :: acc)
         else if callGrade == .heap then
-          mkHeapCall callee checkedArgs retTy fun rv =>
+          mkHeapCall arg.md callee checkedArgs retTy fun rv =>
             go rest ptysRest (applySubsume rv (eraseType retTy) (eraseType pty) :: acc)
         else if callGrade == .heapErr then
-          mkHeapErrorCall callee checkedArgs retTy fun rv =>
+          mkHeapErrorCall arg.md callee checkedArgs retTy fun rv =>
             go rest ptysRest (applySubsume rv (eraseType retTy) (eraseType pty) :: acc)
         else do
-          let val := FGLValue.staticCall callee checkedArgs
+          let val := FGLValue.staticCall arg.md callee checkedArgs
           go rest ptysRest (applySubsume val (eraseType retTy) (eraseType pty) :: acc)
   go args paramTypes []
 
@@ -393,90 +404,90 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
 -- `grade` is the ambient grade (from the enclosing check context).
 -- The function produces the FGL for `stmt; rest` nested together.
 partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
+  let md := stmt.md
   match stmt.val with
 
   -- CHECK RULE: if V then M else N ⇐ A & e
-  -- Both branches get the rest threaded in (duplicated).
   | .IfThenElse cond thn els =>
     let cc ← checkValue cond .TBool
     let tp ← checkProducer thn rest grade
     let ep ← match els with
       | some e => checkProducer e rest grade
       | none => elabRest rest grade
-    pure (.ifThenElse cc tp ep)
+    pure (.ifThenElse md cc tp ep)
 
-  -- SYNTH RULE: while V do M ⇒ TVoid & e (body checked at same grade)
+  -- SYNTH RULE: while V do M ⇒ TVoid & e
   | .While cond _invs _dec body =>
     let cc ← checkValue cond .TBool
     let bp ← checkProducer body [] grade
     let after ← elabRest rest grade
-    pure (.whileLoop cc bp after)
+    pure (.whileLoop md cc bp after)
 
   -- CHECK RULE: return V ⇐ A & e
   | .Return valueOpt =>
     match valueOpt with
-    | some v => let cv ← checkValue v (.TCore "Any"); pure (.returnValue cv)
-    | none => pure (.returnValue .fromNone)
+    | some v => let cv ← checkValue v (.TCore "Any"); pure (.returnValue md cv)
+    | none => pure (.returnValue md (.fromNone md))
 
   -- SYNTH RULE: exit label ⇒ TVoid & 1
-  | .Exit target => pure (.exit target)
+  | .Exit target => pure (.exit md target)
 
   -- CHECK RULE: var x:T := V; body ⇐ A & e
   | .LocalVariable nameId typeMd initOpt =>
     let ci ← match initOpt with
       | some ⟨.Hole false _, _⟩ => pure none
-      | some ⟨.Hole true _, _⟩ => do let hv ← freshVar "hole"; pure (some (.staticCall hv []))
+      | some ⟨.Hole true _, _⟩ => do let hv ← freshVar "hole"; pure (some (.staticCall md hv []))
       | some i => do let v ← checkValue i typeMd.val; pure (some v)
       | none => pure none
-    mkVarDecl nameId.text (eraseType typeMd.val) ci fun _ => elabRest rest grade
+    mkVarDecl md nameId.text (eraseType typeMd.val) ci fun _ => elabRest rest grade
 
   -- SYNTH RULE: assert V ⇒ TVoid & 1
   | .Assert cond =>
     let cc ← checkValue cond .TBool
     let after ← elabRest rest grade
-    pure (.assert cc after)
+    pure (.assert md cc after)
 
   -- SYNTH RULE: assume V ⇒ TVoid & 1
   | .Assume cond =>
     let cc ← checkValue cond .TBool
     let after ← elabRest rest grade
-    pure (.assume cc after)
+    pure (.assume md cc after)
 
   -- SYNTH RULE: x := V ⇒ TVoid & 1
   | .Assign targets value => match targets with
-    | [target] => elabAssign target value rest grade
+    | [target] => elabAssign md target value rest grade
     | _ => elabRest rest grade
 
   -- SYNTH RULE: f(args) ⇒ B & d (effectful call, d > 1)
-  | .StaticCall callee args => elabCall callee args rest grade
+  | .StaticCall callee args => elabCall md callee args rest grade
 
   -- CHECK RULE: Block = sequence of statements
   | .Block stmts label =>
     let prod ← elabRest (stmts ++ rest) grade
-    pure (match label with | some l => .labeledBlock l prod | none => prod)
+    pure (match label with | some l => .labeledBlock md l prod | none => prod)
 
   -- SYNTH RULE: new C ⇒ Composite & heap
   | .New classId =>
     guard (Grade.leq .heap grade)
     match (← get).heapVar with
     | some hv =>
-      let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
-      let newHeap := FGLValue.staticCall "increment" [.var hv]
-      let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
+      let ref := FGLValue.staticCall md "Heap..nextReference!" [.var md hv]
+      let newHeap := FGLValue.staticCall md "increment" [.var md hv]
+      let obj := FGLValue.staticCall md "MkComposite" [ref, .staticCall md (classId.text ++ "_TypeTag") []]
       let freshH ← freshVar "heap"
       modify fun s => { s with heapVar := some freshH }
       extendEnv freshH .THeap do
         let after ← elabRest rest grade
-        pure (.varDecl freshH (.TCore "Heap") (some newHeap) (.returnValue obj))
+        pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.returnValue md obj))
     | none => failure
 
   | .Hole deterministic _ =>
     if deterministic then do
       let hv ← freshVar "hole"
       let after ← elabRest rest grade
-      pure (.returnValue (.staticCall hv []))
+      pure (.returnValue md (.staticCall md hv []))
     else
-      mkVarDecl "_havoc" (.TCore "Any") none fun _ => elabRest rest grade
+      mkVarDecl md "_havoc" (.TCore "Any") none fun _ => elabRest rest grade
 
   | _ => elabRest rest grade
 
@@ -487,7 +498,7 @@ partial def elabRest (stmts : List StmtExprMd) (grade : Grade) : ElabM FGLProduc
   | stmt :: rest => checkProducer stmt rest grade
 
 -- elabCall: StaticCall with grade lookup + checkArgsK (ANF-lifts effectful args)
-partial def elabCall (callee : Identifier) (args : List StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
+partial def elabCall (md : Md) (callee : Identifier) (args : List StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
   let sig ← lookupFuncSig callee.text
   let params := match sig with | some s => s.params | none => []
   let retTy := match sig with | some s => s.returnType | none => .TCore "Any"
@@ -496,12 +507,12 @@ partial def elabCall (callee : Identifier) (args : List StmtExprMd) (rest : List
   checkArgsK args params grade fun checkedArgs => do
     match callGrade with
     | .pure => elabRest rest grade
-    | .err => mkErrorCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
-    | .heap => mkHeapCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
-    | .heapErr => mkHeapErrorCall callee.text checkedArgs retTy fun _rv => elabRest rest grade
+    | .err => mkErrorCall md callee.text checkedArgs retTy fun _rv => elabRest rest grade
+    | .heap => mkHeapCall md callee.text checkedArgs retTy fun _rv => elabRest rest grade
+    | .heapErr => mkHeapErrorCall md callee.text checkedArgs retTy fun _rv => elabRest rest grade
 
 -- elabAssign: assignment with multiple sub-cases
-partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
+partial def elabAssign (md : Md) (target value : StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
   match target.val with
   -- Field write: Assign [FieldSelect obj f] v → updateField
   | .FieldSelect obj field =>
@@ -517,13 +528,13 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
       recordBoxUse fieldTy
       let cv ← checkValue value fieldTy
       let compositeObj := applySubsume ov objTy (.TCore "Composite")
-      let boxed := FGLValue.staticCall (boxConstructorName fieldTy) [cv]
-      let newHeap := FGLValue.staticCall "updateField" [.var hv, compositeObj, .staticCall qualifiedName [], boxed]
+      let boxed := FGLValue.staticCall md (boxConstructorName fieldTy) [cv]
+      let newHeap := FGLValue.staticCall md "updateField" [.var md hv, compositeObj, .staticCall md qualifiedName [], boxed]
       let freshH ← freshVar "heap"
       modify fun s => { s with heapVar := some freshH }
       extendEnv freshH .THeap do
         let after ← elabRest rest grade
-        pure (.varDecl freshH (.TCore "Heap") (some newHeap) after)
+        pure (.varDecl md freshH (.TCore "Heap") (some newHeap) after)
     | none => failure
 
   | _ =>
@@ -538,34 +549,34 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
     | .Hole false _ =>
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_havoc"
-        mkVarDecl name (eraseType targetTy) none fun _ => elabRest rest grade
+        mkVarDecl md name (eraseType targetTy) none fun _ => elabRest rest grade
       else
-        mkVarDecl "_havoc" (eraseType targetTy) none fun hv => do
-          let after ← elabRest rest grade; pure (.assign tv hv after)
+        mkVarDecl md "_havoc" (eraseType targetTy) none fun hv => do
+          let after ← elabRest rest grade; pure (.assign md tv hv after)
     | .Hole true _ =>
       let hv ← freshVar "hole"
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_x"
-        mkVarDecl name (eraseType targetTy) (some (.staticCall hv [])) fun _ => elabRest rest grade
+        mkVarDecl md name (eraseType targetTy) (some (.staticCall md hv [])) fun _ => elabRest rest grade
       else do
-        let after ← elabRest rest grade; pure (.assign tv (.staticCall hv []) after)
+        let after ← elabRest rest grade; pure (.assign md tv (.staticCall md hv []) after)
     | .New classId =>
       guard (Grade.leq .heap grade)
       match (← get).heapVar with
       | some hv =>
-        let ref := FGLValue.staticCall "Heap..nextReference!" [.var hv]
-        let newHeap := FGLValue.staticCall "increment" [.var hv]
-        let obj := FGLValue.staticCall "MkComposite" [ref, .staticCall (classId.text ++ "_TypeTag") []]
+        let ref := FGLValue.staticCall md "Heap..nextReference!" [.var md hv]
+        let newHeap := FGLValue.staticCall md "increment" [.var md hv]
+        let obj := FGLValue.staticCall md "MkComposite" [ref, .staticCall md (classId.text ++ "_TypeTag") []]
         let freshH ← freshVar "heap"
         modify fun s => { s with heapVar := some freshH }
         extendEnv freshH .THeap do
           if needsDecl then
             let name := match target.val with | .Identifier id => id.text | _ => "_x"
             let cont ← extendEnv name (.UserDefined (Identifier.mk classId.text none)) (elabRest rest grade)
-            pure (.varDecl freshH (.TCore "Heap") (some newHeap) (.varDecl name (.TCore "Composite") (some obj) cont))
+            pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.varDecl md name (.TCore "Composite") (some obj) cont))
           else do
             let after ← elabRest rest grade
-            pure (.varDecl freshH (.TCore "Heap") (some newHeap) (.assign tv obj after))
+            pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.assign md tv obj after))
       | none => failure
     | .StaticCall callee args =>
       let sig ← lookupFuncSig callee.text
@@ -576,24 +587,24 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
       let assignOrDecl (val : FGLValue) : ElabM FGLProducer := do
         if needsDecl then
           let name := match target.val with | .Identifier id => id.text | _ => "_x"
-          mkVarDecl name (eraseType targetTy) (some val) fun _ => elabRest rest grade
-        else do let after ← elabRest rest grade; pure (.assign tv val after)
+          mkVarDecl md name (eraseType targetTy) (some val) fun _ => elabRest rest grade
+        else do let after ← elabRest rest grade; pure (.assign md tv val after)
       let doWithArgs (checkedArgs : List FGLValue) : ElabM FGLProducer := do
         match callGrade with
         | .pure =>
-          let cv := FGLValue.staticCall callee.text checkedArgs
+          let cv := FGLValue.staticCall md callee.text checkedArgs
           let coerced := applySubsume cv (eraseType retHty) (eraseType targetTy)
           assignOrDecl coerced
         | .err =>
-          mkErrorCall callee.text checkedArgs retHty fun rv => do
+          mkErrorCall md callee.text checkedArgs retHty fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
         | .heap =>
-          mkHeapCall callee.text checkedArgs retHty fun rv => do
+          mkHeapCall md callee.text checkedArgs retHty fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
         | .heapErr =>
-          mkHeapErrorCall callee.text checkedArgs retHty fun rv => do
+          mkHeapErrorCall md callee.text checkedArgs retHty fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
       checkArgsK args params grade doWithArgs
@@ -609,25 +620,25 @@ partial def elabAssign (target value : StmtExprMd) (rest : List StmtExprMd) (gra
           | none => pure (.TCore "Any")
         recordBoxUse fieldTy
         let compositeObj := applySubsume ov objTy (.TCore "Composite")
-        let read := FGLValue.staticCall "readField" [.var hv, compositeObj, .staticCall qualifiedName []]
-        let unboxed := FGLValue.staticCall (boxDestructorName fieldTy) [read]
+        let read := FGLValue.staticCall md "readField" [.var md hv, compositeObj, .staticCall md qualifiedName []]
+        let unboxed := FGLValue.staticCall md (boxDestructorName fieldTy) [read]
         let coerced := applySubsume unboxed (eraseType fieldTy) (eraseType targetTy)
         if needsDecl then
           let name := match target.val with | .Identifier id => id.text | _ => "_x"
-          mkVarDecl name (eraseType targetTy) (some coerced) fun _ => elabRest rest grade
-        else do let after ← elabRest rest grade; pure (.assign tv coerced after)
+          mkVarDecl md name (eraseType targetTy) (some coerced) fun _ => elabRest rest grade
+        else do let after ← elabRest rest grade; pure (.assign md tv coerced after)
       | none =>
-        let fv := FGLValue.fieldAccess ov field.text
+        let fv := FGLValue.fieldAccess md ov field.text
         let after ← elabRest rest grade
-        pure (.assign tv fv after)
+        pure (.assign md tv fv after)
     | _ =>
       let cv ← checkValue value targetTy
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_x"
-        mkVarDecl name (eraseType targetTy) (some cv) fun _ => elabRest rest grade
+        mkVarDecl md name (eraseType targetTy) (some cv) fun _ => elabRest rest grade
       else do
         let after ← elabRest rest grade
-        pure (.assign tv cv after)
+        pure (.assign md tv cv after)
 
 end
 
@@ -649,43 +660,43 @@ partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd)
 -- Projection
 
 mutual
-partial def projectValue (md : Imperative.MetaData Core.Expression) : FGLValue → StmtExprMd
-  | .litInt n => mkLaurel md (.LiteralInt n)
-  | .litBool b => mkLaurel md (.LiteralBool b)
-  | .litString s => mkLaurel md (.LiteralString s)
-  | .var "_hole" => mkLaurel md (.Hole)
-  | .var name => mkLaurel md (.Identifier (Identifier.mk name none))
-  | .fromInt v => mkLaurel md (.StaticCall (Identifier.mk "from_int" none) [projectValue md v])
-  | .fromStr v => mkLaurel md (.StaticCall (Identifier.mk "from_str" none) [projectValue md v])
-  | .fromBool v => mkLaurel md (.StaticCall (Identifier.mk "from_bool" none) [projectValue md v])
-  | .fromFloat v => mkLaurel md (.StaticCall (Identifier.mk "from_float" none) [projectValue md v])
-  | .fromComposite v => mkLaurel md (.StaticCall (Identifier.mk "from_Composite" none) [projectValue md v])
-  | .fromListAny v => mkLaurel md (.StaticCall (Identifier.mk "from_ListAny" none) [projectValue md v])
-  | .fromDictStrAny v => mkLaurel md (.StaticCall (Identifier.mk "from_DictStrAny" none) [projectValue md v])
-  | .fromNone => mkLaurel md (.StaticCall (Identifier.mk "from_None" none) [])
-  | .fieldAccess obj f => mkLaurel md (.FieldSelect (projectValue md obj) (Identifier.mk f none))
-  | .staticCall name args => mkLaurel md (.StaticCall (Identifier.mk name none) (args.map (projectValue md)))
+partial def projectValue : FGLValue → StmtExprMd
+  | .litInt md n => mkLaurel md (.LiteralInt n)
+  | .litBool md b => mkLaurel md (.LiteralBool b)
+  | .litString md s => mkLaurel md (.LiteralString s)
+  | .var md "_hole" => mkLaurel md (.Hole)
+  | .var md name => mkLaurel md (.Identifier (Identifier.mk name none))
+  | .fromInt md v => mkLaurel md (.StaticCall (Identifier.mk "from_int" none) [projectValue v])
+  | .fromStr md v => mkLaurel md (.StaticCall (Identifier.mk "from_str" none) [projectValue v])
+  | .fromBool md v => mkLaurel md (.StaticCall (Identifier.mk "from_bool" none) [projectValue v])
+  | .fromFloat md v => mkLaurel md (.StaticCall (Identifier.mk "from_float" none) [projectValue v])
+  | .fromComposite md v => mkLaurel md (.StaticCall (Identifier.mk "from_Composite" none) [projectValue v])
+  | .fromListAny md v => mkLaurel md (.StaticCall (Identifier.mk "from_ListAny" none) [projectValue v])
+  | .fromDictStrAny md v => mkLaurel md (.StaticCall (Identifier.mk "from_DictStrAny" none) [projectValue v])
+  | .fromNone md => mkLaurel md (.StaticCall (Identifier.mk "from_None" none) [])
+  | .fieldAccess md obj f => mkLaurel md (.FieldSelect (projectValue obj) (Identifier.mk f none))
+  | .staticCall md name args => mkLaurel md (.StaticCall (Identifier.mk name none) (args.map projectValue))
 
-partial def projectProducer (md : Imperative.MetaData Core.Expression) : FGLProducer → List StmtExprMd
-  | .returnValue v => [projectValue md v]
-  | .assign target val body => [mkLaurel md (.Assign [projectValue md target] (projectValue md val))] ++ projectProducer md body
-  | .varDecl name ty init body => [mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (liftType ty)) (init.map (projectValue md)))] ++ projectProducer md body
-  | .ifThenElse cond thn els => [mkLaurel md (.IfThenElse (projectValue md cond) (mkLaurel md (.Block (projectProducer md thn) none)) (some (mkLaurel md (.Block (projectProducer md els) none))))]
-  | .whileLoop cond body after => [mkLaurel md (.While (projectValue md cond) [] none (mkLaurel md (.Block (projectProducer md body) none)))] ++ projectProducer md after
-  | .assert cond body => [mkLaurel md (.Assert (projectValue md cond))] ++ projectProducer md body
-  | .assume cond body => [mkLaurel md (.Assume (projectValue md cond))] ++ projectProducer md body
-  | .effectfulCall callee args outputs body =>
-    let call := mkLaurel md (.StaticCall (Identifier.mk callee none) (args.map (projectValue md)))
+partial def projectProducer : FGLProducer → List StmtExprMd
+  | .returnValue md v => [projectValue v]
+  | .assign md target val body => [mkLaurel md (.Assign [projectValue target] (projectValue val))] ++ projectProducer body
+  | .varDecl md name ty init body => [mkLaurel md (.LocalVariable (Identifier.mk name none) (mkHighTypeMd md (liftType ty)) (init.map projectValue))] ++ projectProducer body
+  | .ifThenElse md cond thn els => [mkLaurel md (.IfThenElse (projectValue cond) (mkLaurel md (.Block (projectProducer thn) none)) (some (mkLaurel md (.Block (projectProducer els) none))))]
+  | .whileLoop md cond body after => [mkLaurel md (.While (projectValue cond) [] none (mkLaurel md (.Block (projectProducer body) none)))] ++ projectProducer after
+  | .assert md cond body => [mkLaurel md (.Assert (projectValue cond))] ++ projectProducer body
+  | .assume md cond body => [mkLaurel md (.Assume (projectValue cond))] ++ projectProducer body
+  | .effectfulCall md callee args outputs body =>
+    let call := mkLaurel md (.StaticCall (Identifier.mk callee none) (args.map projectValue))
     let decls := outputs.map fun (n, ty) => mkLaurel md (.LocalVariable (Identifier.mk n none) (mkHighTypeMd md (liftType ty)) (some (mkLaurel md (.Hole))))
     let targets := outputs.map fun (n, _) => mkLaurel md (.Identifier (Identifier.mk n none))
-    decls ++ [mkLaurel md (.Assign targets call)] ++ projectProducer md body
-  | .exit label => [mkLaurel md (.Exit label)]
-  | .labeledBlock label body => [mkLaurel md (.Block (projectProducer md body) (some label))]
+    decls ++ [mkLaurel md (.Assign targets call)] ++ projectProducer body
+  | .exit md label => [mkLaurel md (.Exit label)]
+  | .labeledBlock md label body => [mkLaurel md (.Block (projectProducer body) (some label))]
   | .unit => []
 end
 
-def projectBody (md : Imperative.MetaData Core.Expression) (prod : FGLProducer) : StmtExprMd :=
-  mkLaurel md (.Block (projectProducer md prod) none)
+def projectBody (md : Md) (prod : FGLProducer) : StmtExprMd :=
+  mkLaurel md (.Block (projectProducer prod) none)
 
 -- fullElaborate: entry point
 
@@ -744,14 +755,14 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
         match g with
         | .heap =>
           let heapInit := mkLaurel md (.Assign [mkLaurel md (.Identifier (Identifier.mk "$heap" none))] (mkLaurel md (.Identifier (Identifier.mk "$heap_in" none))))
-          let newBody := mkLaurel md (.Block ([heapInit] ++ (projectProducer md fgl)) none)
+          let newBody := mkLaurel md (.Block ([heapInit] ++ (projectProducer fgl)) none)
           procs := procs ++ [{ proc with
             inputs := [heapInParam] ++ proc.inputs
             outputs := [heapOutParam] ++ resultOutputs
             body := .Transparent newBody }]
         | .heapErr =>
           let heapInit := mkLaurel md (.Assign [mkLaurel md (.Identifier (Identifier.mk "$heap" none))] (mkLaurel md (.Identifier (Identifier.mk "$heap_in" none))))
-          let newBody := mkLaurel md (.Block ([heapInit] ++ (projectProducer md fgl)) none)
+          let newBody := mkLaurel md (.Block ([heapInit] ++ (projectProducer fgl)) none)
           procs := procs ++ [{ proc with
             inputs := [heapInParam] ++ proc.inputs
             outputs := [heapOutParam] ++ resultOutputs ++ [errOutParam]
