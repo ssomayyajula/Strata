@@ -42,7 +42,7 @@ Python AST (user code)
   ↓ [Translation: fold over AST, type-directed via Γ]
 e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
   ↓ [Elaboration: impure CBV → Graded FGCBV, coinductive grade inference]
-e' : GFGL.Program (Graded Fine-Grain Call-By-Value, after McDermott 2025 — effects explicit via grades)
+e' : GFGL.Program (Graded Fine-Grain Laurel — effects explicit via grades)
   ↓ [Projection: forget grading, trivial cata]
 Laurel.Program (ready for Core)
   ↓ [Core translation]
@@ -64,10 +64,10 @@ explicit. It discovers each procedure's grade via coinductive fixpoint
 iteration, then elaborates each body: inserting coercions at type
 boundaries, threading heap state, binding effectful subexpressions via
 ANF-lifting, and rewriting procedure signatures to match the graded
-calling convention. The output is a GFGL (Graded Fine-Grain Call-By-Value,
-after McDermott 2025) program — "Laurel" because it reuses Laurel's AST
-types, "Graded Fine-Grain CBV" because it makes effects explicit via grades
-in the term structure.
+calling convention. The output is a GFGL (Graded Fine-Grain Laurel) program.
+GFGL is Laurel's AST enriched with graded effect information, based on the
+theory of graded fine-grain call-by-value (McDermott 2025, building on
+Levy 2003 and Gaboardi et al. 2016).
 
 **Projection** forgets the grading — a trivial structural map from GFGL
 back to Laurel syntax. The effect information is now encoded in the
@@ -182,10 +182,10 @@ convention so the variable is in scope for try/except assignment).
 Elaboration is the heart of the pipeline. It is NOT a term-to-term
 transformation — it is the construction of a *GFGL typing derivation*
 from a *Laurel typing derivation*. The input is a well-typed Laurel term
-(implicitly effectful CBV); the output is a well-typed GFGL term
-(explicitly graded fine-grain CBV, after McDermott 2025). The GFGL term
-is the proof term of the typing derivation — it IS the derivation, not
-something derived from it.
+(implicitly effectful CBV); the output is a well-typed GFGL term (effects
+explicit via grades in the term structure). The GFGL term is the proof
+term of the typing derivation — it IS the derivation, not something
+derived from it.
 
 Concretely: the elaborator takes a Laurel program where effects are
 implicit (an effectful call `f(x)` is syntactically identical to a pure
