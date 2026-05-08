@@ -1,4 +1,4 @@
-# Executive Summary: Python→Laurel Pipeline Refactor
+# Executive Summary: Architecture-Driven Python Front-End Development
 
 ## Summary
 
@@ -231,7 +231,7 @@ to the question "what does the Python front-end actually support?" without readi
 approximated (e.g., Hole), and which silently produce incorrect output is implicit
 in the implementation rather than stated anywhere.
 
-The existing documentation efforts and this refactor are complementary. PRs #1136
+The existing documentation efforts and this work are complementary. PRs #1136
 and #1144 document the system as it is — essential for onboarding and debugging.
 The architecture specification documents what the system should become, with enough
 precision that implementation is mechanical and disagreements are resolvable by
