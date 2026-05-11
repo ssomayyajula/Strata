@@ -381,10 +381,7 @@ partial def checkArgs (args : List StmtExprMd) (params : List (String × HighTyp
       let v ← checkValue arg pty
       let vs ← go rest ptys
       pure (v :: vs)
-    | arg :: rest, [] => do
-      let (v, _) ← synthValue arg
-      let vs ← go rest []
-      pure (v :: vs)
+    | _, [] => failure
   go args paramTypes
 
 -- Look up a proc's declared outputs, accounting for signature rewriting.
@@ -425,13 +422,7 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
   let paramTypes := params.map (·.2)
   let rec go : List StmtExprMd → List HighType → List FGLValue → ElabM FGLProducer
     | [], _, acc => cont acc.reverse
-    | arg :: rest, [], acc => do
-      let result ← synthExpr arg
-      match result with
-      | .value val _ => go rest [] (val :: acc)
-      | .call callee checkedArgs _retTy callGrade =>
-        guard (Grade.leq callGrade grade)
-        dispatchCall arg.md callee checkedArgs callGrade fun rv => go rest [] (rv :: acc)
+    | _, [], _ => failure
     | arg :: rest, pty :: ptysRest, acc => do
       let result ← synthExpr arg
       match result with
