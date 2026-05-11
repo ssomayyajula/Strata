@@ -635,8 +635,6 @@ def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
 ---
 
 
----
-
 ## Projection
 
 Trivial catamorphism. Forget grades. Map GFGL → Laurel:
@@ -691,8 +689,6 @@ and what it does not support.
 
 ---
 
----
-
 ## Known Tech Debt
 
 **Narrowing as pure function:** `Any_to_bool` etc. are modeled as pure (grade 1).
@@ -704,8 +700,6 @@ grade > 1 and the coercion scheme changes.
 
 **Prelude data encodings:** Lists/dicts are recursive ADTs (`ListAny_cons`/`DictStrAny_cons`).
 Translation must emit these specific constructors.
-
----
 
 ---
 
@@ -743,8 +737,6 @@ that the solver needs more time to handle.
 - `ifThenElse`/`labeledBlock` have `after` continuation (no VC blowup)
 - `__main__` has metadata (VCs generated from module-level asserts)
 - `gradeFromSignature` uses `isFunctional` (function vs procedure)
-
----
 
 ---
 
