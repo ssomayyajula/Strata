@@ -282,10 +282,10 @@ Left residual (d \ e):
   heapErr \ heapErr = pure
 ```
 
-### eraseType
+### Translation on types (⟦·⟧ : HighType → LowType)
 
 ```lean
-def eraseType : HighType → LowType
+def ⟦·⟧ : HighType → LowType
   | .TInt => .TInt | .TBool => .TBool | .TString => .TString
   | .TFloat64 => .TFloat64 | .TVoid => .TVoid | .TCore n => .TCore n
   | .UserDefined id => match id.text with
@@ -295,6 +295,8 @@ def eraseType : HighType → LowType
   | .THeap => .TCore "Heap"
   | _ => .TCore "Any"
 ```
+
+(Implementation name: `eraseType`)
 
 ### GFGL Type System (Target — Bidirectional, Graded)
 
@@ -405,18 +407,16 @@ the current continuation (control flows to the enclosing after-block).
 
 ### The Translation ⟦·⟧
 
-#### Types and contexts
+#### Translation on contexts
 
 ```
-⟦A⟧ = eraseType(A)
 ⟦Γ⟧ = { (x : ⟦A⟧) | (x:A) ∈ Γ } ∪ { l | l ∈ Γ }
 ```
 
-The context translation ⟦Γ⟧ erases every type binding and preserves
-labels. Each translation clause extends ⟦Γ⟧ with new bindings at
-erased types: effectfulCall adds fresh output variables at ⟦Tᵢ⟧,
-varDecl adds the declared name at ⟦T⟧. These extensions are visible
-in the recursive call on continuation K.
+Each translation clause extends ⟦Γ⟧ with new bindings at erased types:
+effectfulCall adds fresh output variables at ⟦Tᵢ⟧, varDecl adds the
+declared name at ⟦T⟧. These extensions are visible in the recursive
+call on continuation K.
 
 #### The four functions
 
