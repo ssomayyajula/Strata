@@ -356,19 +356,6 @@ Let [x₁:T₁,...,xₖ:Tₖ] = outputs(f) and r = resultIdx(d):
 `xᵣ` is the result output (position r among the declared outputs).
 c coerces it to the target type. K is checked at residual d\e.
 
-The grade d determines the calling convention:
-
-```
-d = pure:                (no effectfulCall — handled by ⟦·⟧⇒ᵥ)
-d ∈ {proc, err}:         effectfulCall f args outputs(f) K
-d ∈ {heap, heapErr}:     effectfulCall f ($heap::args) outputs(f) K
-```
-
-`$heap` is the current heap variable (initialized from `$heap_in` at
-proc entry for heap-graded procs, updated to fresh names by each
-effectfulCall whose outputs include a Heap). `outputs(f)` comes from
-f's declared signature after grade-based rewriting.
-
 #### Producer checking rules
 
 ```
@@ -433,9 +420,6 @@ in the recursive call on continuation K.
 
 #### The four functions
 
-**Input:** a Laurel.Program (typed procedures with bodies).  
-**Output:** a GFGL.Program (same procedures with graded, effect-explicit bodies).
-
 The translation is four mutually recursive functions. Each takes a Laurel
 typing derivation D — the context Γ, type A, and term structure are all
 inherited from D. The only additional input is the ambient grade e for
@@ -452,6 +436,9 @@ an effectfulCall).
 ⟦·⟧⇒ₚ has exactly one clause (call with grade > pure); inversion is trivial.
 
 #### Grade inference
+
+**Input** to elaboration: a Laurel.Program (typed procedures with bodies).  
+**Output** of elaboration: a GFGL.Program (same procedures, graded, effect-explicit bodies).
 
 Elaboration proceeds in two passes over the program's procedure list.
 
@@ -502,27 +489,30 @@ grade(f) ∈ {pure, proc}:
 
 Elaboration begins:
 ```
-⟦Γ,p₁:⟦T₁⟧,...,pₘ:⟦Tₘ⟧ ⊢_L B : ⟦R⟧⟧⇐ₚ at grade e
+⟦Γ,p₁:T₁,...,pₘ:Tₘ ⊢_L B : R⟧⇐ₚ at grade e
 ```
 
 #### Subgrading
 
 A subgrading judgment `d ≤ e` has a *witness*: the calling convention
-transformation and the residual grade for the continuation. The witness
-is what distinguishes grades operationally.
+transformation applied at that call site. The witness determines what
+arguments are passed, what outputs are declared, and which output
+position holds the result.
 
 ```
-d ≤ e    witness(d, e):
-─────────────────────────────────────────────────────────────────────────
-d = pure             no effectfulCall (value-level staticCall)
-d ∈ {proc, err}      effectfulCall f args outputs(f) K;  continuation at d\e
-d ∈ {heap, heapErr}  effectfulCall f ($heap::args) outputs(f) K;  continuation at d\e
-                     (outs[0] = new heap, outs[resultIdx(d)] = result)
+d            args prepended    outputs(f)                         resultIdx   d\e
+───────────────────────────────────────────────────────────────────────────────────────
+pure         (none)            (none — value-level staticCall)    —           e
+proc         (none)            [result : ⟦B⟧]                    0           proc\e
+err          (none)            [result : ⟦B⟧, maybe_except : Error]  0       err\e
+heap         [$heap]           [$heap : Heap, result : ⟦B⟧]      1           heap\e
+heapErr      [$heap]           [$heap : Heap, result : ⟦B⟧, maybe_except : Error]  1  heapErr\e
 ```
 
 `d\e` is defined iff `d ≤ e`. If not, elaboration fails (drives grade
 inference upward). `$heap` is the current heap variable (initialized from
-`$heap_in` at proc entry, updated by each effectfulCall that produces a Heap).
+`$heap_in` at proc entry, updated to a fresh name by each effectfulCall
+whose outputs include a Heap position).
 
 #### Auxiliary definitions
 
@@ -591,11 +581,16 @@ D :: Γ ⊢_L ?  : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v staticCall $ho
 
 #### ⟦·⟧⇐ᵥ
 
+Synthesize via ⟦·⟧⇒ᵥ, then apply subsumption to the target type ⟦A⟧:
+
 ```
-⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ A    subsume(A, B) = c
-────────────────────────────────────────────────
-⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ B
+⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧    subsume(⟦A⟧, ⟦T⟧) = c
+──────────────────────────────────────────────────────
+⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ ⟦T⟧
 ```
+
+Here T is the type expected by the enclosing context (parameter type
+in a call, variable type in an assignment). When ⟦A⟧ = ⟦T⟧, c = id.
 
 #### ⟦·⟧⇒ₚ
 
