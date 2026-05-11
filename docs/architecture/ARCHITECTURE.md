@@ -444,14 +444,10 @@ an effectfulCall).
 
 ```
 ⟦·⟧⇒ᵥ : (D :: Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧)
-⟦·⟧⇐ᵥ = ⟦·⟧⇒ᵥ composed with subsumption (target ⟦T⟧ from enclosing derivation)
+⟦·⟧⇐ᵥ : (D :: Γ ⊢_L e : A) → (B : LowType) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ B)
 ⟦·⟧⇒ₚ : (D :: Γ ⊢_L f(e₁,...,eₙ) : A) → ∃M. (⟦Γ⟧ ⊢_p M ⇒ ⟦A⟧ & procGrades[f])
 ⟦·⟧⇐ₚ : (D :: Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
-
-⟦·⟧⇐ᵥ is not an independent function — it synthesizes via ⟦·⟧⇒ᵥ then
-applies `subsume(⟦A⟧, ⟦T⟧)` where T is the type the enclosing Laurel
-derivation expects at that position (parameter type, assignment target type).
 
 ⟦·⟧⇒ₚ has exactly one clause (call with grade > pure); inversion is trivial.
 
