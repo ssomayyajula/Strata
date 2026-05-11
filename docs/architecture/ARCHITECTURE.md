@@ -179,13 +179,18 @@ convention so the variable is in scope for try/except assignment).
 
 ## Elaboration
 
-Elaboration is the heart of the pipeline. It is NOT a term-to-term
-transformation — it is the construction of a *GFGL typing derivation*
-from a *Laurel typing derivation*. The input is a well-typed Laurel term
-(implicitly effectful CBV); the output is a well-typed GFGL term (effects
-explicit via grades in the term structure). The GFGL term is the proof
-term of the typing derivation — it IS the derivation, not something
-derived from it.
+> **Full rule set:** the complete Translation and Elaboration rules
+> (bidirectional judgments + rule→implementation mapping) live in
+> [`ELABORATION.md`](ELABORATION.md). That document is the source of
+> truth for the rules; the presentation here is prose overview.
+
+Elaboration pattern-matches on the **Laurel AST** produced by
+Translation, consults Γ (from Resolution) and the pre-computed grade
+environment `G = procGrades` (from coinduction), and constructs a
+**GFGL typing derivation**. The Laurel AST is source syntax, not a
+typing derivation; the only typing derivation in play is the one
+elaboration builds on the GFGL side. The GFGL term is the proof term
+of that derivation.
 
 Concretely: the elaborator takes a Laurel program where effects are
 implicit (an effectful call `f(x)` is syntactically identical to a pure
