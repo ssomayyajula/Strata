@@ -507,19 +507,22 @@ Elaboration begins:
 
 #### Subgrading
 
-Every call site checks `d ≤ e` (callee's grade ≤ ambient grade) before
-emitting effectfulCall. This is the operational content of the residual:
-`d\e` is defined iff `d ≤ e`. If it's not, elaboration fails.
+A subgrading judgment `d ≤ e` has a *witness*: the calling convention
+transformation and the residual grade for the continuation. The witness
+is what distinguishes grades operationally.
 
-The calling convention is determined by d:
 ```
-d ∈ {proc, err}:         effectfulCall f args outputs(f) K
-d ∈ {heap, heapErr}:     effectfulCall f ($heap::args) outputs(f) K
+d ≤ e    witness(d, e):
+─────────────────────────────────────────────────────────────────────────
+d = pure             no effectfulCall (value-level staticCall)
+d ∈ {proc, err}      effectfulCall f args outputs(f) K;  continuation at d\e
+d ∈ {heap, heapErr}  effectfulCall f ($heap::args) outputs(f) K;  continuation at d\e
+                     (outs[0] = new heap, outs[resultIdx(d)] = result)
 ```
 
-`$heap` is the current heap variable (initialized from `$heap_in` at
-proc entry, updated to a fresh name by each effectfulCall whose outputs
-include a Heap).
+`d\e` is defined iff `d ≤ e`. If not, elaboration fails (drives grade
+inference upward). `$heap` is the current heap variable (initialized from
+`$heap_in` at proc entry, updated by each effectfulCall that produces a Heap).
 
 #### Auxiliary definitions
 
@@ -796,26 +799,33 @@ D :: Γ ⊢_L g(e₁,...,eₙ); rest : A    (expression as statement)
 ⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
 ```
 
-### Subsumption Table
+### Subsumption (Subtyping Witness)
 
-```lean
-def subsume (actual expected : LowType) : CoercionResult :=
-  if actual == expected then .refl else match actual, expected with
-  | .TInt, .TCore "Any"              => .coerce (fun md => .fromInt md)
-  | .TBool, .TCore "Any"             => .coerce (fun md => .fromBool md)
-  | .TString, .TCore "Any"           => .coerce (fun md => .fromStr md)
-  | .TFloat64, .TCore "Any"          => .coerce (fun md => .fromFloat md)
-  | .TCore "Composite", .TCore "Any" => .coerce (fun md => .fromComposite md)
-  | .TCore "ListAny", .TCore "Any"   => .coerce (fun md => .fromListAny md)
-  | .TCore "DictStrAny", .TCore "Any"=> .coerce (fun md => .fromDictStrAny md)
-  | .TVoid, .TCore "Any"             => .coerce (fun md _ => .fromNone md)
-  | .TCore "Any", .TBool             => .coerce (fun md v => .staticCall md "Any_to_bool" [v])
-  | .TCore "Any", .TInt              => .coerce (fun md v => .staticCall md "Any..as_int!" [v])
-  | .TCore "Any", .TString           => .coerce (fun md v => .staticCall md "Any..as_string!" [v])
-  | .TCore "Any", .TFloat64          => .coerce (fun md v => .staticCall md "Any..as_float!" [v])
-  | .TCore "Any", .TCore "Composite" => .coerce (fun md v => .staticCall md "Any..as_Composite!" [v])
-  | _, _ => .unrelated
+A subsumption judgment `A ≤ B` has a *witness*: a coercion function
+`c : FGLValue → FGLValue` that wraps or unwraps the value. When
+`A = B`, the witness is the identity (`.refl`). Otherwise:
+
 ```
+A ≤ B                    witness c(v)
+─────────────────────────────────────────────────
+TInt ≤ Any               fromInt(v)
+TBool ≤ Any              fromBool(v)
+TString ≤ Any            fromStr(v)
+TFloat64 ≤ Any           fromFloat(v)
+Composite ≤ Any          fromComposite(v)
+ListAny ≤ Any            fromListAny(v)
+DictStrAny ≤ Any         fromDictStrAny(v)
+TVoid ≤ Any              fromNone
+Any ≤ TBool              Any_to_bool(v)
+Any ≤ TInt               Any..as_int!(v)
+Any ≤ TString            Any..as_string!(v)
+Any ≤ TFloat64           Any..as_float!(v)
+Any ≤ Composite          Any..as_Composite!(v)
+```
+
+Upward coercions (T ≤ Any) are value constructors (boxing).
+Downward coercions (Any ≤ T) are pure function calls (unboxing/narrowing).
+If neither A ≤ B nor A = B, the coercion is undefined (`.unrelated`).
 
 
 ## Projection
