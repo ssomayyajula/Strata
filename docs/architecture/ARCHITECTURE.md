@@ -427,9 +427,9 @@ inherited from D. The only additional input is the ambient grade e for
 an effectfulCall).
 
 ```
-⟦·⟧⇒ᵥ : (Γ : Ctx) → (e : Expr) → ∃(A' : HighType)(V : FGLValue). (Γ ⊢_L e : A') → (⟦Γ⟧ ⊢_v V ⇒ ⟦A'⟧)
+⟦·⟧⇒ᵥ : (Γ : Ctx) → (e : StmtExpr) → ∃(A' : HighType)(V : FGLValue). (Γ ⊢_L e : A') → (⟦Γ⟧ ⊢_v V ⇒ ⟦A'⟧)
 ⟦·⟧⇐ᵥ : (A : LowType) → (Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ A)
-⟦·⟧⇒ₚ : (Γ : Ctx) → (e : Expr) → ∃(A' : HighType)(M : FGLProducer)(d : Grade). (Γ ⊢_L e : A') → (⟦Γ⟧ ⊢_p M ⇒ ⟦A'⟧ & d)
+⟦·⟧⇒ₚ : (Γ : Ctx) → (e : StmtExpr) → ∃(A' : HighType)(M : FGLProducer)(d : Grade). (Γ ⊢_L e : A') → (⟦Γ⟧ ⊢_p M ⇒ ⟦A'⟧ & d)
 ⟦·⟧⇐ₚ : (A : LowType) → (e : Grade) → (Γ ⊢_L S;rest : A) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ A & e)
 ```
 
