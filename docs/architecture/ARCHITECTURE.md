@@ -49,11 +49,59 @@ Laurel.Program (ready for Core)
 Core
 ```
 
+
+## Engineering Principles
+
+| Principle | Eliminates |
+|---|---|
+| Representation invariants | Runtime checks, dead branches |
+| Proof-relevant elimination | Boolean blindness |
+| Catamorphisms | Traversal choices |
+| Correct by construction | Post-hoc rewrites |
+| Separation of concerns | Decisions in wrong place |
+| Monad carries context | Ad-hoc parameter passing |
+| Types flow down | Bottom-up guessing |
+| Illegal states unrepresentable | Undefined name references, invalid calls |
+| No strings | Type-level resolution, not runtime checks |
+
+### Illegal States Unrepresentable
+
+**Resolution → Translation contract:** Translation CANNOT emit a `StaticCall`
+to a name that is not in Γ. This is enforced representationally:
+
+```lean
+-- Resolution produces resolved names, not strings
+structure ResolvedCall where
+  sig : FuncSig            -- proof that the callee exists in Γ
+  resolvedArgs : List StmtExprMd  -- args already matched to params
+
+-- Translation's StaticCall takes a ResolvedCall, not an Identifier
+-- If lookupName returns none → emit Hole (undefined = nondeterministic)
+-- There is NO path that produces StaticCall with an unresolved name
+```
+
+This eliminates an entire class of bugs:
+- Undefined function calls (→ Core "not found" errors)
+- Arity mismatches (args checked against sig at construction time)
+- Type-level module resolution failures silently producing garbage names
+
+**No strings for types:** Types flow through the pipeline as `HighType`
+values, never as strings. `extractTypeStr` + `pythonTypeToLaurel` is
+ABOLISHED. Type annotations go directly from Python AST → `HighType`
+via `Resolution.annotationToHighType`. Union types that can't be
+represented → `.TCore "Any"` (handled in Resolution, not Translation).
+
+**No boolean blindness in Resolution:** `NameInfo` is an inductive —
+pattern matching on it gives you the data you need. There is no
+`isResolved : String → Bool` followed by a separate lookup. The lookup
+IS the check. `Option NameInfo` is the only interface.
+
+
 ---
 
 ## Resolution
 
-**Input:** Python AST + stubs
+**Input:** Python AST + stubs  
 **Output:** `TypeEnv` (= Γ)
 
 ```lean
@@ -77,11 +125,21 @@ inductive NameInfo where
   | module_ (fullName : String)
 ```
 
-Every name Translation wants to call MUST be in `TypeEnv.names`. If the
+Resolution does NOT determine effects. Effects are inferred by elaboration.
+
+**Contract with Translation:** Every name Translation wants to call MUST be
+in `TypeEnv.names`. Translation looks up names via `Option NameInfo`. If the
 lookup returns `none`, Translation emits `Hole` (nondeterministic havoc).
 There is no code path that produces `StaticCall` for an unresolved name.
 
+**No strings for types:** `annotationToHighType` goes directly from Python
+annotation AST → `HighType`. Union types (`int | bool`, `Optional[X]`,
+`List[X]`) that can't be precisely represented → `.TCore "Any"`. This
+decision is made in Resolution, not in Translation.
+
+
 ---
+
 
 ## Translation
 
@@ -112,6 +170,7 @@ error output declaration (`maybe_except: Error` in proc outputs).
 | `f"{expr}"` | `to_string_any(expr)` |
 
 ---
+
 
 ## Elaboration
 
@@ -575,6 +634,9 @@ def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
 
 ---
 
+
+---
+
 ## Projection
 
 Trivial catamorphism. Forget grades. Map GFGL → Laurel:
@@ -588,28 +650,129 @@ Trivial catamorphism. Forget grades. Map GFGL → Laurel:
 
 ## Python Construct Coverage
 
-**Fully handled:**
-Literals, variables, operators, function/class definitions, assignments,
-control flow (if/while/for/break/continue), return, assert/assume,
-try/except, context managers, list/dict literals, f-strings, subscript,
-slice, imports, class instantiation, method calls.
+Explicit accounting of what Translation handles, what it approximates,
+and what it does not support.
 
-**Approximated (Hole):**
-Unresolved names, lambda, comprehensions, generators, walrus, match,
-async, decorators, star expressions, float literals.
+**Fully handled (precise translation):**
+- Literals (int, bool, str, None)
+- Variables (identifiers, scope hoisting)
+- Binary/comparison/boolean/unary operators (→ prelude StaticCalls)
+- Function definitions (params, defaults, kwargs, return)
+- Class definitions (fields, __init__, methods with self)
+- Assignments (simple, augmented, annotated, tuple unpacking)
+- Control flow (if/elif/else, while, for, break, continue)
+- Return statements
+- Assert/assume
+- Try/except (labeled blocks + isError guards)
+- Context managers (with/as)
+- List/dict/tuple literals (→ ListAny_cons/DictStrAny_cons encoding)
+- F-strings (→ to_string_any)
+- Subscript read/write (→ Any_get/Any_sets)
+- Slice notation (→ from_Slice)
+- Module imports (→ qualified name resolution)
+- Class instantiation (→ New + __init__)
+- Method calls (→ qualified StaticCall with self)
+
+**Approximated (Hole — sound but imprecise):**
+- Unresolved names (not in Γ → nondeterministic Hole)
+- Lambda expressions
+- List/set/dict comprehensions
+- Generator expressions
+- Walrus operator (:=)
+- Match statements
+- Async constructs (async for, async with, await)
+- Decorators
+- Star expressions
+- Float literals (represented as string — no real arithmetic)
+
+**Not supported (Translation throws):**
+- Chained comparisons (`a < b < c`)
+- Multiple assignment targets (`x = y = 5`)
+
+---
+
+---
+
+## Known Tech Debt
+
+**Narrowing as pure function:** `Any_to_bool` etc. are modeled as pure (grade 1).
+In Python, `__bool__` can have side effects. If needed later, narrowing becomes
+grade > 1 and the coercion scheme changes.
+
+**Instance procedures:** Methods emitted as top-level statics with `self` as first param.
+`instanceProcedures` on CompositeType is empty.
+
+**Prelude data encodings:** Lists/dicts are recursive ADTs (`ListAny_cons`/`DictStrAny_cons`).
+Translation must emit these specific constructors.
+
+---
 
 ---
 
 ## Current Status (2026-05-08)
 
-On the 46 CI tests with expected outputs:
-- **42/46:** same result as current pipeline
-- **3/46:** current passes, new is inconclusive (encoding quality gap)
-- **1/46:** new passes where current was inconclusive (test_multiple_except)
+### Parity with the Current Pipeline
 
-Two non-CI tests crash due to missing runtime function (`Any_type_to_Any`).
+The question is not "how many tests pass" but "are we replicating the current
+pipeline's results?" On the 46 CI tests with expected outputs:
+
+- **42/46 tests:** New pipeline replicates the current pipeline's result
+  (same RESULT line — both pass, or both inconclusive)
+- **3/46 tests:** Current pipeline passes, new pipeline is inconclusive
+  (solver can't prove VCs that the current encoding allows — encoding quality
+  gap in try/except and module-level code, not a correctness issue)
+- **1/46 tests:** New pipeline passes where current was inconclusive
+  (test_multiple_except: 8 real VCs proven — genuine improvement)
+
+Zero crashes on the 46 CI tests. Two non-CI tests (`test_foo_client_folder`,
+`test_invalid_client_type`) crash due to a missing runtime function
+(`Any_type_to_Any` — the Python `type()` builtin is not yet in the prelude).
+The current pipeline is verified intact and serves as the comparison baseline.
+
+The 3 encoding gaps are in tests with nested try/except (`test_try_except_scoping`)
+and module-level code that calls runtime procedures (`test_datetime`,
+`test_dict_operations`). These produce correct but more complex VC structure
+that the solver needs more time to handle.
+
+### Key Implementation Decisions
+
+- `annotationToHighType` handles Union/generic types directly (→ Any)
+- Translation emits Hole for unresolved names (no undefined StaticCalls)
+- `mkGradedCall` uses proc's declared outputs (no output arity mismatch)
+- `proc` grade for runtime procedures (statement-level binding)
+- `ifThenElse`/`labeledBlock` have `after` continuation (no VC blowup)
+- `__main__` has metadata (VCs generated from module-level asserts)
+- `gradeFromSignature` uses `isFunctional` (function vs procedure)
 
 ---
+
+---
+
+## Success Criteria
+
+1. All 54 in-tree tests pass.
+2. Translation is a fold — no post-hoc rewrites.
+3. Elaboration is separate — translation emits no casts or grades.
+4. Types from annotations — `Any` only when annotation absent.
+5. One file per pass.
+6. Implementation reads as transcription of the typing rules.
+
+
+---
+
+
+## Files
+
+```
+NameResolution.lean    -- Build Γ
+Translation.lean       -- Fold over AST → Laurel
+Elaborate.lean         -- Graded bidirectional elaboration
+Pipeline.lean          -- Wire passes, CLI
+```
+
+
+---
+
 
 ## References
 
