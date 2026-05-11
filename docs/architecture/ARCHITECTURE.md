@@ -418,22 +418,44 @@ the current continuation (control flows to the enclosing after-block).
 
 ### The Translation ⟦·⟧
 
-The translation is defined by four mutually recursive functions with an
-induced translation on types (⟦A⟧ = eraseType(A)) and contexts
-(⟦Γ⟧ = { (x : ⟦A⟧) | (x:A) ∈ Γ } ∪ { l | l ∈ Γ }).
+#### Types and contexts
+
+Induced translation on types: `⟦A⟧ = eraseType(A)`.
+
+Contexts grow during elaboration. The initial GFGL context for a procedure is:
+```
+Γ₀ = { (x : eraseType(A)) | (x:A) ∈ Γ_Laurel } ∪ { l | l ∈ Γ_Laurel }
+```
+Each effectfulCall extends it with fresh output variables. Each varDecl
+extends it with the declared name. We write Γ for the current GFGL context
+throughout — the extensions are visible in the recursive calls on
+continuation K.
+
+#### The four functions
 
 ```
-⟦·⟧⇒ᵥ : (Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧)
-⟦·⟧⇐ᵥ : (Γ ⊢_L e : A) → (B : LowType) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ B)
-⟦·⟧⇒ₚ : (Γ ⊢_L e : A) → ∃M,d. (⟦Γ⟧ ⊢_p M ⇒ ⟦A⟧ & d)
-⟦·⟧⇐ₚ : (Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
+⟦·⟧⇒ᵥ : (Γ ⊢_L e : A) → ∃V. (Γ ⊢_v V ⇒ ⟦A⟧)
+⟦·⟧⇐ᵥ : (Γ ⊢_L e : A) → (B : LowType) → ∃V. (Γ ⊢_v V ⇐ B)
+⟦·⟧⇒ₚ : (Γ ⊢_L e : A) → ∃M,d. (Γ ⊢_p M ⇒ ⟦A⟧ & d)
+⟦·⟧⇐ₚ : (Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (Γ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
+
+Mode discipline:
+- ⟦·⟧⇒ᵥ: input is a Laurel derivation. Output is a GFGL value and its synthesized type.
+- ⟦·⟧⇐ᵥ: inputs are a Laurel derivation AND a target type B. Output is a checked GFGL value.
+- ⟦·⟧⇒ₚ: input is a Laurel derivation of a call with grade > pure. Output is a GFGL producer, its type, and its grade.
+- ⟦·⟧⇐ₚ: inputs are a Laurel derivation of a statement-with-continuation AND an ambient grade e. Output is a checked GFGL producer.
+
+Each function's output mode is determined by its inputs — no backtracking.
+⟦·⟧⇒ₚ has exactly one clause (call with d > pure); inversion is trivial.
 
 #### Grade inference
 
-These functions need procGrades[g] for every callee g before they can run.
-Runtime grades are computed from signatures:
+Elaboration has two passes.
 
+**Pass 1 — grade inference (coinduction over the call graph):**
+
+Runtime procedure grades are structural:
 ```lean
 def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
   let hasError := proc.outputs.any fun o => eraseType o.type.val == .TCore "Error"
@@ -443,17 +465,20 @@ def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
   | false, true => .err    | false, false => if proc.isFunctional then .pure else .proc
 ```
 
-User grades are discovered by coinduction: attempt ⟦body⟧⇐ₚ at increasing
-grades until one succeeds (the residual d\e is undefined when a callee's
-grade exceeds the trial grade, causing failure). The smallest succeeding
-grade is the procedure's grade. Convergence in ≤5 iterations (finite lattice,
-monotone).
+User procedure grades are inferred by coinduction: for each user procedure f,
+attempt `⟦body(f)⟧⇐ₚ` at grade pure, then proc, then err, then heap, then
+heapErr. The first grade where elaboration succeeds is f's grade. When a
+callee's grade exceeds the trial grade, `d\e` is undefined and elaboration
+fails — this is what drives the iteration upward. The process converges
+because the grade lattice is finite and the grades are monotone.
 
-#### Entry point
+**Pass 2 — term production:**
 
-With all grades known, term production elaborates each user procedure
-`f(p₁:T₁,...,pₘ:Tₘ) → R` with body `B`. The grade determines signature
-rewriting before elaboration begins:
+With all grades known, elaborate each procedure body.
+
+#### Entry point (per-procedure)
+
+For procedure `f(p₁:T₁,...,pₘ:Tₘ) → R` with grade e = procGrades[f]:
 
 ```
 grade(f) ∈ {heap, heapErr}:
@@ -468,31 +493,64 @@ grade(f) ∈ {pure, proc}:
   (no rewriting)
 ```
 
-The entry point elaborates the (possibly rewritten) body:
+Elaboration begins:
+```
+⟦Γ,p₁:⟦T₁⟧,...,pₘ:⟦Tₘ⟧ ⊢_L B : ⟦R⟧⟧⇐ₚ at grade e
+```
+
+#### Subgrading
+
+Every call site checks `d ≤ e` (callee's grade ≤ ambient grade) before
+emitting effectfulCall. This is the operational content of the residual:
+`d\e` is defined iff `d ≤ e`. If it's not, elaboration fails.
+
+The calling convention is determined by d:
+```
+d ∈ {proc, err}:         effectfulCall f args outputs(f) K
+d ∈ {heap, heapErr}:     effectfulCall f ($heap::args) outputs(f) K
+```
+
+`$heap` is the current heap variable (initialized from `$heap_in` at
+proc entry, updated to a fresh name by each effectfulCall whose outputs
+include a Heap).
+
+#### Auxiliary definitions
 
 ```
-⟦Γ,p₁:T₁,...,pₘ:Tₘ ⊢_L B : R⟧⇐ₚ at grade procGrades[f]
+outputs(g)    = declared outputs of g after signature rewriting
+resultIdx(d)  = 1 if d ∈ {proc, err}; 2 if d ∈ {heap, heapErr}
+$field.C.f    = zero-arity Field datatype constructor (one per class field)
+boxCtor(T)    = boxConstructorName(T)  (e.g. BoxInt, BoxComposite, BoxAny)
 ```
 
-Auxiliary definitions for the translation clauses:
+#### Argument sequencing
+
+The call clauses below use `⟦Dᵢ⟧⇐ᵥ` on each argument. This is only
+valid when every argument synthesizes as a value (grade = pure). When
+argument eᵢ has procGrades[callee(eᵢ)] > pure, it must be sequenced:
 
 ```
-outputs(g) = declared outputs of g after signature rewriting
-resultIdx(d) = 1 if d ∈ {proc, err}; 2 if d ∈ {heap, heapErr}
-  (heap in position 1 when present; result follows)
-$field.C.f = zero-arity Field datatype constructor (one per class field)
-boxCtor(T) = boxConstructorName(T)  (e.g. BoxInt, BoxComposite, BoxAny)
+⟦Dᵢ⟧⇒ₚ :: Γ ⊢_p gᵢ(W₁,...,Wₘ) ⇒ Bᵢ & dᵢ    dᵢ ≤ e
+Γ,y₁:T₁,...,yⱼ:Tⱼ ⊢_p ... ⇐ A & (dᵢ\e)
+──────────────────────────────────────────────────────────────────────────
+Γ ⊢_p effectfulCall gᵢ [W₁,...,Wₘ] [y₁:T₁,...,yⱼ:Tⱼ] (... uses yᵣ as Vᵢ ...) ⇐ A & e
 ```
+
+The result variable yᵣ (at resultIdx(dᵢ)) is then used in place of Vᵢ
+in the outer call. Multiple effectful arguments nest left-to-right.
+This turns the outer call from a value-level staticCall into a producer.
 
 
 #### Clauses of ⟦·⟧⇒ᵥ
 
 ```
-D :: Γ ⊢_L n : int                   ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v litInt n ⇒ TInt
+D :: Γ ⊢_L n : int       ↦    ⟦D⟧⇒ᵥ :: Γ ⊢_v litInt n ⇒ TInt
+D :: Γ ⊢_L b : bool      ↦    ⟦D⟧⇒ᵥ :: Γ ⊢_v litBool b ⇒ TBool
+D :: Γ ⊢_L s : string    ↦    ⟦D⟧⇒ᵥ :: Γ ⊢_v litString s ⇒ TString
 
 (x : A) ∈ Γ
 ─────────────────
-D :: Γ ⊢_L x : A                     ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v var x ⇒ ⟦A⟧
+D :: Γ ⊢_L x : A                     ↦    ⟦D⟧⇒ᵥ :: Γ ⊢_v var x ⇒ ⟦A⟧
 
 
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ
@@ -501,24 +559,39 @@ D :: Γ ⊢_L f(e₁,...,eₙ) : B    where procGrades[f] = pure
 
         ↦
 
-⟦D₁⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
-────────────────────────────────────────────────────────────────────────
-⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v staticCall f [V₁,...,Vₙ] ⇒ ⟦B⟧
+⟦D₁⟧⇐ᵥ :: Γ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: Γ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
+────────────────────────────────────────────────────────────────────
+⟦D⟧⇒ᵥ :: Γ ⊢_v staticCall f [V₁,...,Vₙ] ⇒ ⟦B⟧
 
 
-D :: Γ ⊢_L ?? : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧,$havoc_N ⊢_v staticCall $havoc_N [] ⇒ Any
-D :: Γ ⊢_L ?  : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧,$hole_N ⊢_v staticCall $hole_N [] ⇒ Any
+D_obj :: Γ ⊢_L obj : C    fields(C,f) = T    ($heap : Heap) ∈ Γ
+─────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L obj.f : T
+
+        ↦
+
+⟦D_obj⟧⇐ᵥ :: Γ ⊢_v V_obj ⇐ Composite
+────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇒ᵥ :: Γ ⊢_v staticCall (boxDestructor(T)) [staticCall readField [$heap, V_obj, $field.C.f]] ⇒ ⟦T⟧
+
+
+D :: Γ ⊢_L ?? : A       ↦    ⟦D⟧⇒ᵥ :: Γ ⊢_v staticCall $havoc_N [] ⇒ Any
+D :: Γ ⊢_L ?  : A       ↦    ⟦D⟧⇒ᵥ :: Γ ⊢_v staticCall $hole_N [] ⇒ Any
 ```
 
 #### ⟦·⟧⇐ᵥ
 
 ```
-⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ A    subsume(A, B) = c
-────────────────────────────────────────────────
-⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ B
+⟦D⟧⇒ᵥ :: Γ ⊢_v V ⇒ A    subsume(A, B) = c
+─────────────────────────────────────────────
+⟦D⟧⇐ᵥ :: Γ ⊢_v c(V) ⇐ B
 ```
 
 #### ⟦·⟧⇒ₚ
+
+There is exactly one clause. procGrades[f] = pure implies ⟦·⟧⇒ₚ is
+undefined (delegate to ⟦·⟧⇒ᵥ). Inversion on any producer synthesis
+derivation immediately gives you f, the checked args, ⟦B⟧, and d.
 
 ```
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ
@@ -527,12 +600,10 @@ D :: Γ ⊢_L f(e₁,...,eₙ) : B    where procGrades[f] = d > pure
 
         ↦
 
-⟦D₁⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
-────────────────────────────────────────────────────────────────────────
-⟦D⟧⇒ₚ :: ⟦Γ⟧ ⊢_p f(V₁,...,Vₙ) ⇒ ⟦B⟧ & d
+⟦D₁⟧⇐ᵥ :: Γ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: Γ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
+──────────────────────────────────────────────────────────────────
+⟦D⟧⇒ₚ :: Γ ⊢_p f(V₁,...,Vₙ) ⇒ ⟦B⟧ & d
 ```
-
-Side condition: procGrades[f] = pure implies ⟦·⟧⇒ₚ is undefined (delegate to ⟦·⟧⇒ᵥ).
 
 #### Producer subsumption in the translation
 
@@ -544,10 +615,10 @@ D :: Γ ⊢_L g(e₁,...,eₙ); rest : A    where procGrades[g] = d > pure
 
         ↦    let [x₁:T₁,...,xₖ:Tₖ] = outputs(g)
 
-⟦D₁⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
-⟦K⟧⇐ₚ :: ⟦Γ⟧,x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d\e)
+⟦D₁⟧⇐ᵥ :: Γ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: Γ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
+⟦K⟧⇐ₚ :: Γ,x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d\e)
 ────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
 ```
 
 #### Clauses of ⟦·⟧⇐ₚ
@@ -559,9 +630,9 @@ D :: Γ ⊢_L (if c then t else f); rest : A
 
         ↦
 
-⟦D_c⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ bool    ⟦D_t⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_t ⇐ ⟦A⟧ & e    ⟦D_f⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_f ⇐ ⟦A⟧ & e    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_c⟧⇐ᵥ :: Γ ⊢_v V ⇐ bool    ⟦D_t⟧⇐ₚ :: Γ ⊢_p M_t ⇐ ⟦A⟧ & e    ⟦D_f⟧⇐ₚ :: Γ ⊢_p M_f ⇐ ⟦A⟧ & e    ⟦K⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p ifThenElse V M_t M_f M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p ifThenElse V M_t M_f M_k ⇐ ⟦A⟧ & e
 
 
 D_e :: Γ ⊢_L e : A
@@ -570,9 +641,9 @@ D :: Γ ⊢_L (return e) : A
 
         ↦
 
-⟦D_e⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ ⟦A⟧
+⟦D_e⟧⇐ᵥ :: Γ ⊢_v V ⇐ ⟦A⟧
 ─────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p returnValue V ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p returnValue V ⇐ ⟦A⟧ & e
 
 
 D_init :: Γ ⊢_L e : T    K :: Γ,x:T ⊢_L rest : A
@@ -581,9 +652,9 @@ D :: Γ ⊢_L (var x:T := e); rest : A
 
         ↦
 
-⟦D_init⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ ⟦T⟧    ⟦K⟧⇐ₚ :: ⟦Γ⟧,x:⟦T⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_init⟧⇐ᵥ :: Γ ⊢_v V ⇐ ⟦T⟧    ⟦K⟧⇐ₚ :: Γ,x:⟦T⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
 ──────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧,x:⟦T⟧ ⊢_p varDecl x ⟦T⟧ V M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ,x:⟦T⟧ ⊢_p varDecl x ⟦T⟧ V M_k ⇐ ⟦A⟧ & e
 
 
 D_c :: Γ ⊢_L c : bool    K :: Γ ⊢_L rest : A
@@ -592,9 +663,9 @@ D :: Γ ⊢_L (assert c); rest : A
 
         ↦
 
-⟦D_c⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ bool    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_c⟧⇐ᵥ :: Γ ⊢_v V ⇐ bool    ⟦K⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e
 ────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assert V M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p assert V M_k ⇐ ⟦A⟧ & e
 
 
 D_e :: Γ ⊢_L e : B    K :: Γ ⊢_L rest : A    e is not a call to g with procGrades[g] > pure
@@ -603,9 +674,9 @@ D :: Γ ⊢_L (x := e); rest : A
 
         ↦
 
-⟦D_e⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ ⟦Γ(x)⟧    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_e⟧⇐ᵥ :: Γ ⊢_v V ⇐ ⟦Γ(x)⟧    ⟦K⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e
 ────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assign x V M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p assign x V M_k ⇐ ⟦A⟧ & e
 
 
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ    K :: Γ ⊢_L rest : A    procGrades[g] = d > pure
@@ -614,10 +685,10 @@ D :: Γ ⊢_L (x := g(e₁,...,eₙ)); rest : A
 
         ↦    let [x₁:T₁,...,xₖ:Tₖ] = outputs(g), r = resultIdx(d)
 
-⟦D₁⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
-⟦K⟧⇐ₚ :: ⟦Γ⟧,x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d\e)
+⟦D₁⟧⇐ᵥ :: Γ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: Γ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
+⟦K⟧⇐ₚ :: Γ,x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d\e)
 ──────────────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] (assign x (subsume(xᵣ, ⟦Γ(x)⟧)) M_k) ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] (assign x (subsume(xᵣ, ⟦Γ(x)⟧)) M_k) ⇐ ⟦A⟧ & e
 
 
 D_body :: Γ,l ⊢_L body : A    K :: Γ ⊢_L rest : A
@@ -626,9 +697,9 @@ D :: Γ ⊢_L {body}ₗ; rest : A
 
         ↦
 
-⟦D_body⟧⇐ₚ :: ⟦Γ⟧,l ⊢_p M_b ⇐ ⟦A⟧ & e    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_body⟧⇐ₚ :: Γ,l ⊢_p M_b ⇐ ⟦A⟧ & e    ⟦K⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e
 ────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p labeledBlock l M_b M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p labeledBlock l M_b M_k ⇐ ⟦A⟧ & e
 
 
 l ∈ Γ
@@ -637,7 +708,7 @@ D :: Γ ⊢_L (exit l) : A
 
         ↦
 
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p exit l ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p exit l ⇐ ⟦A⟧ & e
 
 
 D_c :: Γ ⊢_L c : bool    D_b :: Γ ⊢_L body : A    K :: Γ ⊢_L rest : A
@@ -646,9 +717,9 @@ D :: Γ ⊢_L (while c do body); rest : A
 
         ↦
 
-⟦D_c⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ bool    ⟦D_b⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_b ⇐ ⟦A⟧ & e    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_c⟧⇐ᵥ :: Γ ⊢_v V ⇐ bool    ⟦D_b⟧⇐ₚ :: Γ ⊢_p M_b ⇐ ⟦A⟧ & e    ⟦K⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e
 ───────────────────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p whileLoop V M_b M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p whileLoop V M_b M_k ⇐ ⟦A⟧ & e
 
 
 D_c :: Γ ⊢_L c : bool    K :: Γ ⊢_L rest : A
@@ -657,9 +728,9 @@ D :: Γ ⊢_L (assume c); rest : A
 
         ↦
 
-⟦D_c⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ bool    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_c⟧⇐ᵥ :: Γ ⊢_v V ⇐ bool    ⟦K⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e
 ────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assume V M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p assume V M_k ⇐ ⟦A⟧ & e
 
 
 D_obj :: Γ ⊢_L obj : C    D_v :: Γ ⊢_L v : fieldType(C,f)    K :: Γ ⊢_L rest : A
@@ -668,9 +739,9 @@ D :: Γ ⊢_L (obj.f := v); rest : A
 
         ↦
 
-⟦D_obj⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_obj ⇐ Composite    ⟦D_v⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_val ⇐ ⟦fieldType(C,f)⟧    ⟦K⟧⇐ₚ :: ⟦Γ⟧,$h:Heap ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_obj⟧⇐ᵥ :: Γ ⊢_v V_obj ⇐ Composite    ⟦D_v⟧⇐ᵥ :: Γ ⊢_v V_val ⇐ ⟦fieldType(C,f)⟧    ⟦K⟧⇐ₚ :: Γ,$h:Heap ⊢_p M_k ⇐ ⟦A⟧ & e
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧,$h:Heap ⊢_p varDecl $h Heap (updateField($heap, V_obj, $field.C.f, boxCtor(fieldType(C,f))(V_val))) M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ,$h:Heap ⊢_p varDecl $h Heap (updateField($heap, V_obj, $field.C.f, boxCtor(fieldType(C,f))(V_val))) M_k ⇐ ⟦A⟧ & e
 
 
 D_r :: Γ ⊢_L root : Any    D_i :: Γ ⊢_L idx : Any    D_v :: Γ ⊢_L v : Any    K :: Γ ⊢_L rest : A
@@ -679,9 +750,9 @@ D :: Γ ⊢_L (root[idx] := v); rest : A
 
         ↦
 
-⟦D_r⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_r ⇐ Any    ⟦D_i⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_i ⇐ Any    ⟦D_v⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_v ⇐ Any    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦D_r⟧⇐ᵥ :: Γ ⊢_v V_r ⇐ Any    ⟦D_i⟧⇐ᵥ :: Γ ⊢_v V_i ⇐ Any    ⟦D_v⟧⇐ᵥ :: Γ ⊢_v V_v ⇐ Any    ⟦K⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assign root (staticCall Any_sets [V_i, V_r, V_v]) M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p assign root (staticCall Any_sets [V_i, V_r, V_v]) M_k ⇐ ⟦A⟧ & e
 
 
 K :: Γ ⊢_L rest : A
@@ -690,9 +761,9 @@ D :: Γ ⊢_L ??; rest : A
 
         ↦
 
-⟦K⟧⇐ₚ :: ⟦Γ⟧,$hv:Any ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦K⟧⇐ₚ :: Γ,$hv:Any ⊢_p M_k ⇐ ⟦A⟧ & e
 ────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧,$hv:Any ⊢_p varDecl $hv Any none M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ,$hv:Any ⊢_p varDecl $hv Any none M_k ⇐ ⟦A⟧ & e
 
 
 D_e :: Γ ⊢_L e : B    K :: Γ ⊢_L rest : A    e is not a call to g with procGrades[g] > pure
@@ -701,9 +772,9 @@ D :: Γ ⊢_L e; rest : A
 
         ↦
 
-⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+⟦K⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e
 ──────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e    (value discarded)
+⟦D⟧⇐ₚ :: Γ ⊢_p M_k ⇐ ⟦A⟧ & e    (value discarded)
 
 
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ    K :: Γ ⊢_L rest : A    procGrades[g] = d > pure
@@ -712,10 +783,10 @@ D :: Γ ⊢_L g(e₁,...,eₙ); rest : A    (expression as statement)
 
         ↦    let [x₁:T₁,...,xₖ:Tₖ] = outputs(g)
 
-⟦D₁⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
-⟦K⟧⇐ₚ :: ⟦Γ⟧,x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d\e)
+⟦D₁⟧⇐ᵥ :: Γ ⊢_v V₁ ⇐ ⟦A₁⟧  ...  ⟦Dₙ⟧⇐ᵥ :: Γ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
+⟦K⟧⇐ₚ :: Γ,x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d\e)
 ────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
+⟦D⟧⇐ₚ :: Γ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
 ```
 
 ### Subsumption Table
