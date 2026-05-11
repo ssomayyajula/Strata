@@ -4,689 +4,559 @@
 
 ## Purpose
 
-This document specifies the Elaboration pass: a partial map
-`⟦·⟧ : LaurelDeriv → GFGLDeriv` defined by recursion on Laurel typing
-derivations. The Translation pass that feeds this one (Python AST →
-Laurel AST) is specified in a sibling file, `TRANSLATION.md`; the
-prose overview of the whole pipeline is in `ARCHITECTURE.md`.
+This document specifies the Elaboration pass: the construction of a
+**GFGL typing derivation** from a **Laurel typing derivation**.
+Elaboration is a tree-to-tree map `⟦·⟧` defined by mutual recursion
+on the Laurel derivation; its output derivation *is* the GFGL proof
+term (term and typing derivation are one and the same object in
+GFGL's bidirectional system).
+
+The Translation pass that feeds this one (Python AST → Laurel AST)
+is specified in the sibling file `TRANSLATION.md`. The pipeline's
+prose overview is in `ARCHITECTURE.md`.
 
 ### The shape of this pass
 
 ```
-  Laurel AST  ──── checked against Laurel typing rules [L-*] ────▶  candidate Laurel derivation D
-                                                                          │
-                                                                          │   Elaboration ⟦·⟧
-                                                                          │   (tree → tree, recursion on D)
-                                                                          ▼
-                                                              GFGL derivation ⟦D⟧
+  Laurel AST  ──── checked against Laurel typing rules ────▶  Laurel derivation D
+                                                                    │
+                                                                    │   Elaboration ⟦·⟧
+                                                                    │   (derivation → derivation)
+                                                                    ▼
+                                                         GFGL derivation ⟦D⟧
 ```
 
-- The Laurel AST coming out of Translation admits a *candidate*
-  typing derivation under Laurel's own rules, but this derivation may
-  be invalid (undefined names, bad types). If the candidate is
-  invalid the pipeline errors; if valid, we have a genuine Laurel
-  derivation `D`.
-- Elaboration is defined by recursion on `D`, not on the AST. Side
-  conditions (grades `G(f)`, ambient `g`, `subsume`, `subgrade`) live
-  on the elaboration arrow, because they are elaboration-time facts
-  consulted to choose which GFGL rule to build with. Sub-derivations
-  of the input tree get elaborated to sub-derivations of the output
-  tree.
+- The Laurel AST coming out of Translation is checked against
+  Laurel's rules to produce a derivation `D`. Elaboration's input is
+  `D`, not the AST.
+- Elaboration is defined by four mutually recursive functions,
+  indexed by the two GFGL sorts (value / producer) and the two
+  bidirectional modes (synthesis `⇒` / checking `⇐`).
+- Side conditions that do not live in Laurel — procedure grades
+  `procGrades[f]` and the ambient grade `e` — sit on the elaboration
+  arrow, where they select which GFGL rule to build with.
 
-This is what "tree → tree" means here: a Laurel derivation with root
-rule `[L-X]` and sub-derivations `D₁,…,Dₖ` is mapped to a GFGL
-derivation with root rule `[G-Y]` and sub-derivations `⟦D₁⟧,…,⟦Dₖ⟧`
-(sometimes reordered or inserted under subsumption witnesses).
+### Prerequisite: grade inference
 
-### Notation conventions
+Procedure grades must be known before term production begins. Runtime
+grades are read structurally from signatures via `gradeFromSignature`.
+User grades are discovered by coinduction on the call graph: attempt
+`⟦body⟧⇐ₚ` at increasing grades `[pure, proc, err, heap, heapErr]`
+until one succeeds; the smallest succeeding grade is the procedure's
+grade. The lattice has five elements, so the fixpoint converges in
+at most five iterations.
 
-- `Γ` — typing environment from Resolution. Maps names to `NameInfo`.
-  Laurel's typing judgments and elaboration's Γ are the same object.
-- `G` — grade environment, `procGrades : name → Grade`. Built before
-  elaboration by coinduction on the call graph. Read-only during rule
-  application.
-- `g`, `e`, `d` — grades from `{1, proc, err, heap, heapErr}`. The
-  symbols `1` and `pure` are synonymous.
-- `⇒` / `⇐` — bidirectional synthesis/checking modes on the GFGL side.
-- `⌊A⌋ = eraseType(A)` — erasure from Laurel `HighType` to GFGL `LowType`.
-- `A`, `B` — Laurel types; `T`, `U` — GFGL types.
-- `V`, `W` — GFGL values; `M`, `N` — GFGL producers.
-- `D`, `D'`, `Dᵢ` — Laurel derivations; `⟦D⟧` — its elaboration.
-- `[L-X]` — Laurel typing rule. `[G-X]` — GFGL typing rule.
-  `[E-X]` — elaboration clause mapping a Laurel rule to a GFGL rule.
+"Success" here means all side conditions on the arrow are
+satisfiable. In particular, the residual `d \ e` is undefined when a
+callee's grade `d` exceeds the trial grade `e` — that is the signal
+the coinduction uses to bump `e`.
+
+### Notation
+
+- `Γ` — Laurel context (variable bindings `(x : A)` and label
+  bindings `(l : A)`).
+- `Γ'` — GFGL context (variable bindings `(x : T)` and label
+  bindings `(l : T & e)` — labels carry a grade).
+- `⟦A⟧` — `eraseType(A)` from Laurel `HighType` to GFGL `LowType`.
+  `⟦Γ⟧ = { (x : ⟦A⟧) | (x:A) ∈ Γ }` extended analogously on labels.
+- `d`, `e`, `g` — grades from `{1, proc, err, heap, heapErr}`
+  (`1 = pure`).
+- `d \ e` — grade residual (left residuated on the monoid; see
+  `ARCHITECTURE.md` §Grade Monoid).
+- `⇒ᵥ` / `⇐ᵥ` — GFGL value synthesis / checking.
+- `⇒ₚ` / `⇐ₚ` — GFGL producer synthesis / checking.
+- `D`, `Dᵢ` — Laurel derivations; `⟦D⟧` — its elaboration.
 
 ### The judgments in play
 
-Translation is not a typing system — it is an AST-to-AST fold. Python
-has no static typing derivation, so there is no derivation-tree
-correspondence between Translation's input and output. The translation
-pass is presented below as a plain two-column desugaring table.
+| System       | Judgment                    | Reading                                                            |
+|--------------|-----------------------------|--------------------------------------------------------------------|
+| Laurel       | `Γ ⊢_L e : A`               | Laurel expression / statement list `e` has type `A`.               |
+| GFGL value   | `Γ' ⊢_v V ⇒ A`              | GFGL value `V` synthesizes low type `A`.                           |
+| GFGL value   | `Γ' ⊢_v V ⇐ A`              | GFGL value `V` checks against low type `A`.                        |
+| GFGL producer| `Γ' ⊢_p M ⇒ A & d`          | GFGL producer `M` synthesizes return type `A` and grade `d`.       |
+| GFGL producer| `Γ' ⊢_p M ⇐ A & e`          | GFGL producer `M` checks against return type `A` at ambient grade `e`. |
+| Elaboration  | `⟦D⟧ = D'`                  | Laurel derivation `D` elaborates to GFGL derivation `D'`.          |
 
-Laurel and GFGL both have typing systems. Elaboration is the
-derivation-to-derivation map between them.
-
-| System       | Judgment                       | Reading                                                       |
-|--------------|--------------------------------|---------------------------------------------------------------|
-| Laurel       | `Γ ⊢_L e : A`                  | Laurel expression `e` has type `A`.                           |
-| Laurel       | `Γ ⊢_L ss`                     | Laurel statement list is well-formed (in a body of type void).|
-| GFGL         | `Γ ⊢_v V ⇒ T`                  | GFGL value `V` synthesizes low type `T`.                      |
-| GFGL         | `Γ ⊢_v V ⇐ T`                  | GFGL value `V` checks against `T`.                            |
-| GFGL         | `Γ; g ⊢_p M ⇐ void & g`        | GFGL producer `M` checks at ambient grade `g`.                |
-| Elaboration  | `⟦D⟧ = D'`                     | Laurel derivation `D` elaborates to GFGL derivation `D'`.     |
-
-Checking a producer is always "at void" — procedures communicate
-results through declared outputs, not a return value in the FGCBV
-sense. The grade `g` is the object of checking.
+Laurel has a single judgment `Γ ⊢_L e : A` that is used both for
+expressions (which carry a type) and for statement lists (whose type
+is the return type of the enclosing procedure — statements at the
+tail of a control-flow path terminate with `return e : A` or
+`exit l : A`).
 
 ---
 
-## Laurel Type System
+## Laurel Type System (Source)
 
-Laurel has two judgments:
+Laurel is an impure CBV language. Effects are implicit; a call to an
+effectful procedure is syntactically indistinguishable from a pure
+call. One judgment: `Γ ⊢_L e : A`.
 
-- `Γ ⊢_L e : A` — the Laurel AST expression `e` has type `A`.
-- `Γ ⊢_L ss` — the Laurel statement list `ss` is well-formed as a
-  body (void-typed, i.e. it does not compute a value).
-
-There are no grades in Laurel. Effects are implicit; a call to an
-effectful procedure is syntactically indistinguishable from a call to
-a pure function at this layer. What the candidate derivation records
-is just "the names exist and the types match at the surface level".
-Effect information is discovered later by elaboration.
-
-### Expression rules
+The context `Γ` carries variable bindings `(x : A)` and label bindings
+`(l : A)`. Labels are bound by labeled blocks and consumed by `exit`.
 
 ```
-                                                        [L-LitInt]
-──────────────────────
-Γ ⊢_L LiteralInt n : int
-
-                                                        [L-LitBool]
-──────────────────────────
-Γ ⊢_L LiteralBool b : bool
-
-                                                        [L-LitStr]
-───────────────────────────────
-Γ ⊢_L LiteralString s : str
-
-                                                        [L-Var]
-Γ(x) = .variable A
-──────────────────
-Γ ⊢_L Identifier x : A
+─────────────────            ─────────────────            ─────────────────
+Γ ⊢_L n : int                Γ ⊢_L b : bool               Γ ⊢_L s : string
 
 
-                                                        [L-Call]
-Γ(f) = .function (FuncSig params=(Aᵢ) ret=B)
-Dᵢ :: Γ ⊢_L eᵢ : Aᵢ                       (for i = 1..n)
-──────────────────────────────────────────────
-Γ ⊢_L StaticCall f [e₁,…,eₙ] : B
+(x : A) ∈ Γ
+─────────────────
+Γ ⊢_L x : A
 
 
-                                                        [L-Field]
-D_obj :: Γ ⊢_L e_obj : C
-classFields(C) includes (f : A)
-────────────────────────────────
-Γ ⊢_L FieldSelect e_obj f : A
+f : (A₁,...,Aₙ) → B ∈ Γ       Γ ⊢_L e₁ : A₁   ...   Γ ⊢_L eₙ : Aₙ
+──────────────────────────────────────────────────────────────────
+Γ ⊢_L f(e₁,...,eₙ) : B
 
 
-                                                        [L-Hole]
-──────────────────
-Γ ⊢_L Hole : Any
-```
-
-`[L-Call]` does NOT distinguish effectful from pure — the side condition
-is just "there is a FuncSig in Γ". Whether that function's grade is
-pure, proc, err, heap, or heapErr is a separate fact determined by
-elaboration.
-
-### Statement rules
-
-```
-                                                        [L-Nil]
-──────────────
-Γ ⊢_L  (empty list)
+Γ ⊢_L e : C       fields(C, f) = T
+──────────────────────────────────
+Γ ⊢_L e.f : T
 
 
-                                                        [L-Assign]
-Γ(x) = .variable A        D :: Γ ⊢_L e : A
-D_k :: Γ ⊢_L ss
-────────────────────────────────────────────
-Γ ⊢_L  (Assign [x] e) :: ss
+C ∈ classes(Γ)
+─────────────────
+Γ ⊢_L new C : C
 
 
-                                                        [L-VarDecl]
-D_e :: Γ ⊢_L e : A         D_k :: Γ, x:A ⊢_L ss
-──────────────────────────────────────────────────
-Γ ⊢_L  (LocalVariable x A (some e)) :: ss
+─────────────────             ─────────────────
+Γ ⊢_L ?? : A  (nondet)        Γ ⊢_L ? : A  (det)
 
 
-                                                        [L-VarDeclNoInit]
-D_k :: Γ, x:A ⊢_L ss
-────────────────────────────────────────────────
-Γ ⊢_L  (LocalVariable x A none) :: ss
-
-
-                                                        [L-Assert]
-D_c :: Γ ⊢_L c : bool         D_k :: Γ ⊢_L ss
-────────────────────────────────────────────────
-Γ ⊢_L  (Assert c) :: ss
-
-
-                                                        [L-If]
-D_c :: Γ ⊢_L c : bool
-D_t :: Γ ⊢_L sst        D_f :: Γ ⊢_L ssf      D_k :: Γ ⊢_L ss
-───────────────────────────────────────────────────────────────
-Γ ⊢_L  (If c sst ssf) :: ss
-
-
-                                                        [L-While]
-D_c :: Γ ⊢_L c : bool       D_b :: Γ ⊢_L ssb       D_k :: Γ ⊢_L ss
-─────────────────────────────────────────────────────────────────
-Γ ⊢_L  (While c ssb) :: ss
-
-
-                                                        [L-Label]
-D_b :: Γ ⊢_L ssb       D_k :: Γ ⊢_L ss
+Γ ⊢_L e : Γ(x)        Γ ⊢_L rest : A
 ─────────────────────────────────────
-Γ ⊢_L  (LabeledBlock L ssb) :: ss
+Γ ⊢_L (x := e); rest : A
 
 
-                                                        [L-Exit]
-────────────────────────────
-Γ ⊢_L  (Exit L) :: ss
+Γ ⊢_L e : T       Γ, x:T ⊢_L rest : A
+──────────────────────────────────────
+Γ ⊢_L (var x:T := e); rest : A
 
 
-                                                        [L-Return]
-D_e :: Γ ⊢_L e : returnType
-──────────────────────────────────────────
-Γ ⊢_L  (Return e) :: ss          (ss dead)
-
-
-                                                        [L-CallStmt]
-Γ(f) = .function (FuncSig params=(Aᵢ) ret=B)
-Dᵢ :: Γ ⊢_L eᵢ : Aᵢ        D_k :: Γ ⊢_L ss
-─────────────────────────────────────────────────
-Γ ⊢_L  (StaticCall f [e₁,…,eₙ]) :: ss
-
-
-                                                        [L-AssignCall]
-Γ(f) = .function (FuncSig params=(Aᵢ) ret=B)
-Γ(x) = .variable U          Dᵢ :: Γ ⊢_L eᵢ : Aᵢ
-D_k :: Γ ⊢_L ss
-─────────────────────────────────────────────────
-Γ ⊢_L  (Assign [x] (StaticCall f [e₁,…,eₙ])) :: ss
-
-
-                                                        [L-New]
-Γ(x) = .variable (UserDefined C)        classFields(C) defined
-D_k :: Γ ⊢_L ss
-────────────────────────────────────────────────
-Γ ⊢_L  (Assign [x] (New C)) :: ss
-
-
-                                                        [L-FieldWrite]
-D_obj :: Γ ⊢_L obj : C         classFields(C) includes (f : A)
-D_v   :: Γ ⊢_L v : A           D_k :: Γ ⊢_L ss
+Γ ⊢_L c : bool   Γ ⊢_L t : A   Γ ⊢_L f : A   Γ ⊢_L rest : A
 ─────────────────────────────────────────────────────────────
-Γ ⊢_L  (Assign [FieldSelect obj f] v) :: ss
+Γ ⊢_L (if c then t else f); rest : A
+
+
+Γ ⊢_L c : bool   Γ ⊢_L body : A   Γ ⊢_L rest : A
+───────────────────────────────────────────────────
+Γ ⊢_L (while c do body); rest : A
+
+
+Γ, l:A ⊢_L body : A       Γ ⊢_L rest : A
+──────────────────────────────────────────
+Γ ⊢_L {body}ₗ; rest : A
+
+
+(l : A) ∈ Γ
+───────────────────
+Γ ⊢_L (exit l) : A
+
+
+Γ ⊢_L e : A
+─────────────────────
+Γ ⊢_L (return e) : A
+
+
+Γ ⊢_L c : bool       Γ ⊢_L rest : A
+────────────────────────────────────
+Γ ⊢_L (assert c); rest : A
+
+
+Γ ⊢_L c : bool       Γ ⊢_L rest : A
+────────────────────────────────────
+Γ ⊢_L (assume c); rest : A
+
+
+Γ ⊢_L obj : C     Γ ⊢_L v : fieldType(C, f)     Γ ⊢_L rest : A
+────────────────────────────────────────────────────────────────
+Γ ⊢_L (obj.f := v); rest : A
+
+
+Γ ⊢_L root : Any   Γ ⊢_L idx : Any   Γ ⊢_L v : Any   Γ ⊢_L rest : A
+─────────────────────────────────────────────────────────────────────
+Γ ⊢_L (root[idx] := v); rest : A
 ```
 
 Observations:
 
-- Laurel statement rules carry a continuation derivation `D_k`. A
-  Laurel derivation of a statement list is literally a nested
-  structure mirroring the list: each node is a rule
-  application consuming the head statement and pointing to the tail
-  derivation. Elaboration exploits this directly — `⟦D_k⟧` is where
-  the continuation elaborates.
-- `[L-Return]` and `[L-Exit]` have `ss` dead in the sense that control
-  does not reach `ss`; we leave the premise `D_k :: … ⊢_L ss` absent
-  here. Elaboration similarly ignores the rest.
-- `[L-Call]` and `[L-CallStmt]` share a side condition (`f` is in Γ as
-  a function with matching param types). There is no effect premise,
-  which is the point: Laurel does not know about effects.
+- Statement-list rules carry the procedure's return type `A`,
+  propagated through the continuation `rest`. This is what lets
+  `return e : A` and `exit l : A` tie off a control-flow path with
+  the same `A`.
+- `new C : C` is a value in Laurel. Heap threading only appears at
+  elaboration time.
+- There is no grade premise anywhere. Laurel does not know about
+  effects.
 
 ---
 
-## Elaboration: `⟦·⟧ : LaurelDeriv → GFGLDeriv`
+## GFGL Type System (Target — Bidirectional, Graded)
 
-Elaboration is defined by recursion on the Laurel derivation. Each
-clause says: given a Laurel derivation whose root is a specific
-`[L-X]`, produce a GFGL derivation whose root is a specific `[G-Y]`,
-using recursive calls to elaborate each sub-derivation. Side
-conditions involving `G` (procedure grades) and `g` (ambient grade)
-live on the elaboration arrow, not on the Laurel premise.
-
-Each elaboration clause is presented in two parts, separated by the
-elaboration arrow `⇝`:
+GFGL has two sorts, **values** (pure) and **producers** (effectful,
+graded). Typing is bidirectional. The context carries variable
+bindings `(x : A)` and label bindings `(l : A & e)` — labels record
+the grade at which they were bound.
 
 ```
- ⟦·⟧
-  Input Laurel derivation              (by [L-X])
-  ═══════════════════════ ⇝ with side conditions on G, g, subsume, subgrade
-  Output GFGL derivation               (by [G-Y])
+Γ' ⊢_v V ⇒ A             value synthesis
+Γ' ⊢_v V ⇐ A             value checking
+Γ' ⊢_p M ⇒ A & d         producer synthesis
+Γ' ⊢_p M ⇐ A & e         producer checking
 ```
 
-Sub-derivations on each side line up: the elaboration of each Laurel
-premise is exactly the premise of the GFGL conclusion (possibly after
-reordering / coercion insertion, noted inline).
-
-### GFGL value derivations
-
-#### [E-LitInt], [E-LitBool], [E-LitStr]
+### Value rules
 
 ```
- ⟦·⟧
-  ─────────────────────── [L-LitInt]
-  Γ ⊢_L LiteralInt n : int
-  ══════════════════════════ ⇝
-  ────────────────────── [G-LitInt]
-  Γ ⊢_v litInt n ⇒ TInt
+─────────────────────────        ─────────────────────────        ──────────────────────────────
+Γ' ⊢_v litInt n ⇒ TInt           Γ' ⊢_v litBool b ⇒ TBool          Γ' ⊢_v litString s ⇒ TString
+
+
+(x : A) ∈ Γ'
+─────────────────────────
+Γ' ⊢_v var x ⇒ A
+
+
+f : (A₁,...,Aₙ) → B ∈ Γ'       Γ' ⊢_v V₁ ⇐ A₁   ...   Γ' ⊢_v Vₙ ⇐ Aₙ
+──────────────────────────────────────────────────────────────────────
+Γ' ⊢_v staticCall f [V₁,...,Vₙ] ⇒ B
+
+
+Γ' ⊢_v V ⇒ A      subsume(A, B) = c
+───────────────────────────────────
+Γ' ⊢_v c(V) ⇐ B                          (value mode switch)
 ```
 
-(analogous for [L-LitBool]/[G-LitBool], [L-LitStr]/[G-LitStr])
-
-#### [E-Var]
+### Producer synthesis
 
 ```
- ⟦·⟧
-  Γ(x) = .variable A
-  ──────────────────────── [L-Var]
-  Γ ⊢_L Identifier x : A
-  ══════════════════════════════ ⇝
-  ────────────────────── [G-Var]
-  Γ ⊢_v var x ⇒ ⌊A⌋
+(l : A & e) ∈ Γ'
+─────────────────────────
+Γ' ⊢_p exit l ⇒ A & e
+
+
+f : (A₁,...,Aₙ) → B & d ∈ Γ'    Γ' ⊢_v V₁ ⇐ A₁   ...   Γ' ⊢_v Vₙ ⇐ Aₙ
+───────────────────────────────────────────────────────────────────────
+Γ' ⊢_p f(V₁,...,Vₙ) ⇒ B & d
 ```
 
-#### [E-PureCall]
+### Producer subsumption (mode switch ⇒ₚ to ⇐ₚ)
+
+This is the single rule that binds a synthesized producer into the
+checking context. All effectful calls enter the derivation through it.
 
 ```
- ⟦·⟧
-  Γ(f) = .function (params=Aᵢ, ret=B)
-  Dᵢ :: Γ ⊢_L eᵢ : Aᵢ
-  ──────────────────────────────────── [L-Call]
-  Γ ⊢_L StaticCall f [e₁,…,eₙ] : B
-  ════════════════════════════════════ ⇝ requires G(f) = 1
-  ⟦Dᵢ⟧ :: Γ ⊢_v Vᵢ ⇐ Aᵢ
-  ───────────────────────────────────────── [G-PureCall]
-  Γ ⊢_v staticCall f [V₁,…,Vₙ] ⇒ ⌊B⌋
+Γ' ⊢_p M ⇒ B & d      subsume(B, A) = c
+Γ', x₁:T₁,...,xₖ:Tₖ ⊢_p K ⇐ A & (d \ e)
+────────────────────────────────────────────────────────────────────
+Γ' ⊢_p effectfulCall M [x₁:T₁,...,xₖ:Tₖ] (c(xⱼ); K) ⇐ A & e
 ```
 
-Each `⟦Dᵢ⟧` is a recursive elaboration of the corresponding Laurel
-sub-derivation `Dᵢ`, fed through the subsumption clause [E-Sub] below
-to shift into checking mode. Applicability of [E-PureCall] **requires
-`G(f) = 1`**; if the grade is higher, this [L-Call] derivation only
-elaborates at statement position via [E-CallStmt] / [E-AssignCall].
+`M` synthesizes producer type `B & d`. Its outputs `[x₁:T₁,...,xₖ:Tₖ]`
+(from the callee's declared signature) extend the context for the
+continuation `K`, which is checked at the **residual grade** `d \ e`.
+The coercion `c` is applied to the relevant output `xⱼ` inside `K`.
 
-#### [E-FieldRead]
-
-```
- ⟦·⟧
-  D_obj :: Γ ⊢_L e_obj : C
-  classFields(C) includes (f : A)
-  ────────────────────────────── [L-Field]
-  Γ ⊢_L FieldSelect e_obj f : A
-  ════════════════════════════════════ ⇝ let Bconstr = boxDestructor(A)
-  ⟦D_obj⟧ :: Γ ⊢_v V_obj ⇒ T_obj       (then coerced to Composite)
-  ────────────────────────────────────────────────────────────────────── [G-FieldRead]
-  Γ ⊢_v Bconstr(readField($heap, sub(V_obj, Composite), C.f)) ⇒ ⌊A⌋
-```
-
-#### [E-Hole]
+### Producer checking rules
 
 ```
- ⟦·⟧
-  ───────────────── [L-Hole]
-  Γ ⊢_L Hole : Any
-  ═══════════════════ ⇝ fresh $havoc_N or $hole_N (extends Γ)
-  ──────────────────────── [G-HoleValue]
-  Γ ⊢_v $havoc_N() ⇒ Any
+─────────────────────────
+Γ' ⊢_p unit ⇐ A & e
+
+
+Γ' ⊢_v V ⇐ A
+──────────────────────────────────────
+Γ' ⊢_p returnValue V ⇐ A & e
+
+
+Γ' ⊢_v V ⇐ Γ'(x)        Γ' ⊢_p K ⇐ A & e
+─────────────────────────────────────────
+Γ' ⊢_p assign x V K ⇐ A & e
+
+
+Γ' ⊢_v V ⇐ T        Γ', x:T ⊢_p K ⇐ A & e
+───────────────────────────────────────────
+Γ', x:T ⊢_p varDecl x T V K ⇐ A & e
+
+
+Γ' ⊢_v V ⇐ bool   Γ' ⊢_p M_t ⇐ A & e   Γ' ⊢_p M_f ⇐ A & e   Γ' ⊢_p K ⇐ A & e
+──────────────────────────────────────────────────────────────────────────────
+Γ' ⊢_p ifThenElse V M_t M_f K ⇐ A & e
+
+
+Γ' ⊢_v V ⇐ bool    Γ' ⊢_p M_b ⇐ A & e    Γ' ⊢_p K ⇐ A & e
+─────────────────────────────────────────────────────────────
+Γ' ⊢_p whileLoop V M_b K ⇐ A & e
+
+
+Γ' ⊢_v V ⇐ bool        Γ' ⊢_p K ⇐ A & e
+────────────────────────────────────────
+Γ' ⊢_p assert V K ⇐ A & e
+
+
+Γ' ⊢_v V ⇐ bool        Γ' ⊢_p K ⇐ A & e
+────────────────────────────────────────
+Γ' ⊢_p assume V K ⇐ A & e
+
+
+Γ', l:(A & e) ⊢_p M_b ⇐ A & e        Γ' ⊢_p K ⇐ A & e
+───────────────────────────────────────────────────────
+Γ' ⊢_p labeledBlock l M_b K ⇐ A & e
+
+
+f : (A₁,...,Aₙ) → [x₁:T₁,...,xₖ:Tₖ] & d ∈ Γ'
+Γ' ⊢_v V₁ ⇐ A₁   ...   Γ' ⊢_v Vₙ ⇐ Aₙ
+Γ', x₁:T₁,...,xₖ:Tₖ ⊢_p K ⇐ A & (d \ e)
+─────────────────────────────────────────────────────────────────
+Γ' ⊢_p effectfulCall f [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] K ⇐ A & e
 ```
 
-#### [E-Sub] (mode switch)
+The final rule is the specialized form of producer subsumption where
+`M = f(V₁,...,Vₙ)` is a direct call — the outputs are read from `f`'s
+signature and no coercion witness is applied at the output.
 
-Whenever a value derivation in synthesis mode is consumed in a
-checking context, a subsumption witness is inserted. This is the only
-"rule" that is not a direct Laurel→GFGL mapping — it is how
-elaboration weaves the bidirectional check into GFGL.
+---
 
-```
- [E-Sub]
-  ⟦D⟧ :: Γ ⊢_v V ⇒ T     subsume(T, ⌊A⌋) = c
-  ──────────────────────────────────────────────
-  Γ ⊢_v c(V) ⇐ A
-```
+## Elaboration (⟦·⟧: Laurel derivations → GFGL derivations)
 
-`c = refl` ⇒ `c(V) = V`. Otherwise `c` is proof-relevant GFGL term
-structure (`from_int`, `Any..as_int!`, …).
-
-### GFGL producer derivations
-
-Each Laurel statement rule has a head statement and a continuation
-`ss`. Elaboration threads the continuation derivation directly: the
-elaboration of `D_k :: Γ ⊢_L ss` is a GFGL derivation `⟦D_k⟧` that
-occupies the `after`-slot (or body-slot) of the GFGL producer
-constructor. No duplication.
-
-All producer elaborations have the shape
-`⟦D⟧ :: Γ; g ⊢_p M ⇐ void & g`.
-
-#### [E-If]
+Elaboration is defined by four mutually recursive functions. Types
+and contexts are translated pointwise: `⟦A⟧ = eraseType(A)`, `⟦Γ⟧ = {
+(x : ⟦A⟧) | (x:A) ∈ Γ } ∪ { (l : ⟦A⟧ & e) | (l:A) ∈ Γ, l bound at
+ambient grade e }`.
 
 ```
- ⟦·⟧
-  D_c :: Γ ⊢_L c : bool
-  D_t :: Γ ⊢_L sst        D_f :: Γ ⊢_L ssf      D_k :: Γ ⊢_L ss
-  ─────────────────────────────────────────────────────────────── [L-If]
-  Γ ⊢_L (If c sst ssf) :: ss
-  ═══════════════════════════════════════════════════════════════════ ⇝
-  ⟦D_c⟧ :: Γ ⊢_v V ⇐ bool
-  ⟦D_t⟧ :: Γ; g ⊢_p M_t ⇐ void & g    ⟦D_f⟧ :: Γ; g ⊢_p M_f ⇐ void & g
-  ⟦D_k⟧ :: Γ; g ⊢_p M_k ⇐ void & g
-  ─────────────────────────────────────────────────────────────────── [G-If]
-  Γ; g ⊢_p ifThenElse V M_t M_f M_k ⇐ void & g
+⟦·⟧⇒ᵥ : (Γ ⊢_L e : A) → ∃V.    (⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧)
+⟦·⟧⇐ᵥ : (Γ ⊢_L e : A) → (B : LowType) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ B)
+⟦·⟧⇒ₚ : (Γ ⊢_L e : A) → ∃M,d.   (⟦Γ⟧ ⊢_p M ⇒ ⟦A⟧ & d)
+⟦·⟧⇐ₚ : (Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
 
-#### [E-While]
+All four read `procGrades[g]` for every callee `g`. Grade inference
+(see §Prerequisite above) runs first and provides this map.
+
+### How the functions interact
+
+`⟦·⟧⇐ₚ` drives elaboration at ambient grade `e` — initially
+`procGrades[f]` for the enclosing procedure, then `d \ e` inside the
+continuation of each bound effectful call. For each statement:
+
+- Sub-expressions are translated via `⟦·⟧⇐ᵥ` at their expected type.
+- The continuation is translated via `⟦·⟧⇐ₚ` at the same ambient
+  grade (or at `d \ e` if an effectful call is bound).
+- For assignments, `⟦·⟧⇒ₚ` determines if the RHS is a value or a
+  producer:
+  - `procGrades[callee] = pure` → delegate to `⟦·⟧⇒ᵥ`, use its
+    result as a value;
+  - `procGrades[callee] = d > pure` → producer subsumption fires:
+    `⟦·⟧⇒ₚ` produces a synthesis derivation, the GFGL producer
+    subsumption rule binds it via `effectfulCall`, and the
+    continuation is checked at `d \ e`.
+
+**The to-rule.** When a pure call `f(e₁,...,eₙ)` has an argument `eᵢ`
+whose callee has `procGrades[callee(eᵢ)] > pure`, that argument is
+ANF-lifted into an `effectfulCall` binding before the outer call.
+GFGL values cannot contain producers, so this lift is obligatory.
+Arguments are processed left-to-right (CBV order).
+
+### Clauses of `⟦·⟧⇒ᵥ`
 
 ```
- ⟦·⟧
-  D_c :: Γ ⊢_L c : bool
-  D_b :: Γ ⊢_L ssb                D_k :: Γ ⊢_L ss
-  ───────────────────────────────────────────────── [L-While]
-  Γ ⊢_L (While c ssb) :: ss
-  ═══════════════════════════════════════════════════════ ⇝
-  ⟦D_c⟧ :: Γ ⊢_v V ⇐ bool
-  ⟦D_b⟧ :: Γ; g ⊢_p M_b ⇐ void & g
-  ⟦D_k⟧ :: Γ; g ⊢_p M_k ⇐ void & g
-  ─────────────────────────────────────────── [G-While]
-  Γ; g ⊢_p whileLoop V M_b M_k ⇐ void & g
+─────────────────────────────────────────
+D :: Γ ⊢_L n : int
+        ↦   ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v litInt n ⇒ TInt
+
+(and analogously for litBool, litString)
+
+
+(x : A) ∈ Γ
+────────────────────────
+D :: Γ ⊢_L x : A
+        ↦   ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v var x ⇒ ⟦A⟧
+
+
+D₁ :: Γ ⊢_L e₁ : A₁   ...   Dₙ :: Γ ⊢_L eₙ : Aₙ
+──────────────────────────────────────────────────
+D :: Γ ⊢_L f(e₁,...,eₙ) : B       where procGrades[f] = pure
+
+        ↦
+
+⟦D₁⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V₁ ⇐ ⟦A₁⟧   ...   ⟦Dₙ⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
+─────────────────────────────────────────────────────────────────────
+⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v staticCall f [V₁,...,Vₙ] ⇒ ⟦B⟧
+
+
+D_obj :: Γ ⊢_L e : C       fields(C, f) = T
+────────────────────────────────────────────
+D :: Γ ⊢_L e.f : T
+
+        ↦
+
+⟦D_obj⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_obj ⇐ Composite
+───────────────────────────────────────────────────────────────────────
+⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v Box..tVal!(readField($heap, V_obj, $field.C.f)) ⇒ ⟦T⟧
+
+
+D :: Γ ⊢_L ?? : A       ↦   ⟦D⟧⇒ᵥ :: ⟦Γ⟧, $havoc_N ⊢_v staticCall $havoc_N [] ⇒ Any
+D :: Γ ⊢_L ? : A        ↦   ⟦D⟧⇒ᵥ :: ⟦Γ⟧, $hole_N  ⊢_v staticCall $hole_N  [] ⇒ Any
 ```
 
-#### [E-LabeledBlock], [E-Exit]
+### `⟦·⟧⇐ᵥ` (single clause: value mode switch)
 
 ```
- ⟦·⟧
-  D_b :: Γ ⊢_L ssb        D_k :: Γ ⊢_L ss
-  ───────────────────────────────────────── [L-Label]
-  Γ ⊢_L (LabeledBlock L ssb) :: ss
-  ═════════════════════════════════════════════ ⇝
-  ⟦D_b⟧ :: Γ; g ⊢_p M_b ⇐ void & g
-  ⟦D_k⟧ :: Γ; g ⊢_p M_k ⇐ void & g
-  ────────────────────────────────────────── [G-Label]
-  Γ; g ⊢_p labeledBlock L M_b M_k ⇐ void & g
-
-
- ⟦·⟧
-  ───────────────────────────── [L-Exit]
-  Γ ⊢_L (Exit L) :: ss
-  ═══════════════════════════════════ ⇝
-  ──────────────────────── [G-Exit]
-  Γ; g ⊢_p exit L ⇐ void & g
+⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ A       subsume(A, B) = c
+──────────────────────────────────────────────
+⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ B
 ```
 
-#### [E-Return]
+When `subsume` returns `refl`, `c` is the identity and no coercion is
+inserted. Otherwise `c` is proof-relevant GFGL term structure
+(`from_int`, `Any..as_int!`, …) — see `ARCHITECTURE.md` §Coercion
+Table.
+
+### Clauses of `⟦·⟧⇒ₚ`
 
 ```
- ⟦·⟧
-  D_e :: Γ ⊢_L e : returnType
-  ─────────────────────────────── [L-Return]
-  Γ ⊢_L (Return e) :: ss
-  ═══════════════════════════════════════ ⇝
-  ⟦D_e⟧ :: Γ ⊢_v V ⇐ returnType
-  ───────────────────────────────── [G-Return]
-  Γ; g ⊢_p returnValue V ⇐ void & g
+D₁ :: Γ ⊢_L e₁ : A₁   ...   Dₙ :: Γ ⊢_L eₙ : Aₙ
+──────────────────────────────────────────────────
+D :: Γ ⊢_L f(e₁,...,eₙ) : B       where procGrades[f] = d > pure
+
+        ↦
+
+⟦D₁⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V₁ ⇐ ⟦A₁⟧   ...   ⟦Dₙ⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v Vₙ ⇐ ⟦Aₙ⟧
+─────────────────────────────────────────────────────────────────────
+⟦D⟧⇒ₚ :: ⟦Γ⟧ ⊢_p f(V₁,...,Vₙ) ⇒ ⟦B⟧ & d
 ```
 
-#### [E-Assert]
+When `procGrades[f] = pure`, `⟦·⟧⇒ₚ` delegates to `⟦·⟧⇒ᵥ`.
+
+### Producer subsumption in the translation
+
+When `⟦·⟧⇐ₚ` at ambient grade `e` encounters an expression whose head
+is a call with `procGrades[g] = d > pure`, it calls `⟦·⟧⇒ₚ` to get
+the synthesis derivation, then applies the GFGL producer subsumption
+rule to bind it:
 
 ```
- ⟦·⟧
-  D_c :: Γ ⊢_L c : bool        D_k :: Γ ⊢_L ss
-  ───────────────────────────────────────────── [L-Assert]
-  Γ ⊢_L (Assert c) :: ss
-  ════════════════════════════════════════════════ ⇝
-  ⟦D_c⟧ :: Γ ⊢_v V ⇐ bool       ⟦D_k⟧ :: Γ; g ⊢_p M_k ⇐ void & g
-  ──────────────────────────────────────────────────────────────── [G-Assert]
-  Γ; g ⊢_p assert V M_k ⇐ void & g
+⟦D⟧⇒ₚ :: ⟦Γ⟧ ⊢_p g(V₁,...,Vₙ) ⇒ ⟦B⟧ & d        K :: Γ ⊢_L rest : A
+
+        ↦
+
+⟦K⟧⇐ₚ :: ⟦Γ⟧, x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d \ e)
+──────────────────────────────────────────────────────────────────────────────────────────
+⟦Γ⟧, x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
 ```
 
-#### [E-VarDecl], [E-VarDeclNoInit]
+The callee `g` and arguments `V₁,...,Vₙ` are the same as in the
+synthesis premise. The outputs `[x₁:T₁,...,xₖ:Tₖ]` are `g`'s declared
+outputs read from its signature in `typeEnv`. The continuation `M_k`
+is checked at the residual `d \ e`.
+
+### Clauses of `⟦·⟧⇐ₚ`
+
+All clauses below receive an ambient grade `e` (= `procGrades[f]` for
+the enclosing procedure `f`, or `d \ e'` from an enclosing
+`effectfulCall`).
 
 ```
- ⟦·⟧
-  D_e :: Γ ⊢_L e : A        D_k :: Γ, x:A ⊢_L ss
-  ───────────────────────────────────────────────── [L-VarDecl]
-  Γ ⊢_L (LocalVariable x A (some e)) :: ss
-  ═════════════════════════════════════════════════════ ⇝
-  ⟦D_e⟧ :: Γ ⊢_v V ⇐ A        ⟦D_k⟧ :: Γ, x:⌊A⌋; g ⊢_p M_k ⇐ void & g
-  ─────────────────────────────────────────────────────────────────── [G-VarDecl]
-  Γ, x:⌊A⌋; g ⊢_p varDecl x ⌊A⌋ V M_k ⇐ void & g
+D_c :: Γ ⊢_L c : bool    D_t :: Γ ⊢_L t : A    D_f :: Γ ⊢_L f : A    K :: Γ ⊢_L rest : A
+──────────────────────────────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (if c then t else f); rest : A
+
+        ↦
+
+⟦D_c⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ bool
+⟦D_t⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_t ⇐ ⟦A⟧ & e       ⟦D_f⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_f ⇐ ⟦A⟧ & e
+⟦K⟧⇐ₚ   :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+─────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p ifThenElse V M_t M_f M_k ⇐ ⟦A⟧ & e
 
 
- ⟦·⟧
-  D_k :: Γ, x:A ⊢_L ss
-  ───────────────────────────────────────────────── [L-VarDeclNoInit]
-  Γ ⊢_L (LocalVariable x A none) :: ss
-  ═════════════════════════════════════════════════════ ⇝
-  ⟦D_k⟧ :: Γ, x:⌊A⌋; g ⊢_p M_k ⇐ void & g
-  ─────────────────────────────────────────────────────────── [G-VarDecl]
-  Γ, x:⌊A⌋; g ⊢_p varDecl x ⌊A⌋ none M_k ⇐ void & g
+D_e :: Γ ⊢_L e : A
+───────────────────────────
+D :: Γ ⊢_L (return e) : A
+
+        ↦
+
+⟦D_e⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ ⟦A⟧
+───────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p returnValue V ⇐ ⟦A⟧ & e
+
+
+D_init :: Γ ⊢_L e : T       K :: Γ, x:T ⊢_L rest : A
+────────────────────────────────────────────────────
+D :: Γ ⊢_L (var x:T := e); rest : A
+
+        ↦
+
+⟦D_init⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ ⟦T⟧         ⟦K⟧⇐ₚ :: ⟦Γ⟧, x:⟦T⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧, x:⟦T⟧ ⊢_p varDecl x ⟦T⟧ V M_k ⇐ ⟦A⟧ & e
+
+
+D_c :: Γ ⊢_L c : bool       K :: Γ ⊢_L rest : A
+─────────────────────────────────────────────────
+D :: Γ ⊢_L (assert c); rest : A
+
+        ↦
+
+⟦D_c⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ bool         ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assert V M_k ⇐ ⟦A⟧ & e
+
+(assume is analogous)
+
+
+D_e :: Γ ⊢_L e : B        K :: Γ ⊢_L rest : A
+──────────────────────────────────────────────
+D :: Γ ⊢_L (x := e); rest : A
+
+        ↦
+
+If procGrades[callee(e)] = pure:
+
+    ⟦D_e⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ ⟦Γ(x)⟧        ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+    ────────────────────────────────────────────────────────────────────
+    ⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assign x V M_k ⇐ ⟦A⟧ & e
+
+If procGrades[callee(e)] = d > pure:
+
+    producer subsumption fires: bind via effectfulCall, apply the
+    result coercion c = subsume(B, Γ(x)), assign to x in the
+    continuation, check K at d\e.
+
+
+D_body :: Γ, l:A ⊢_L body : A       K :: Γ ⊢_L rest : A
+─────────────────────────────────────────────────────────
+D :: Γ ⊢_L {body}ₗ; rest : A
+
+        ↦
+
+⟦D_body⟧⇐ₚ :: ⟦Γ⟧, l:(⟦A⟧ & e) ⊢_p M_b ⇐ ⟦A⟧ & e    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+───────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p labeledBlock l M_b M_k ⇐ ⟦A⟧ & e
+
+    (the label binding l : A in Γ becomes l : ⟦A⟧ & e in ⟦Γ⟧;
+     exit l then reads the grade from the label binding)
+
+
+(l : A) ∈ Γ
+────────────────────────
+D :: Γ ⊢_L (exit l) : A
+
+        ↦
+
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p exit l ⇐ ⟦A⟧ & e
+
+    (the producer synthesis rule for exit reads
+     (l : ⟦A⟧ & e) from ⟦Γ⟧; ambient e matches the label's e)
 ```
 
-#### [E-AssignPure]
-
-Applicable when the Laurel [L-Assign] derivation elaborates an
-expression whose elaboration is a *value*, i.e. [E-PureCall] applies
-(or `e` is a literal / identifier / field read). Concretely: this is
-the branch where `synthExpr` returns `.value`.
-
-```
- ⟦·⟧
-  Γ(x) = .variable A      D_e :: Γ ⊢_L e : A
-  D_k :: Γ ⊢_L ss
-  ─────────────────────────────────────────── [L-Assign]
-  Γ ⊢_L (Assign [x] e) :: ss
-  ════════════════════════════════════════════════ ⇝ requires ⟦D_e⟧ is a value
-  ⟦D_e⟧ :: Γ ⊢_v V ⇐ A       ⟦D_k⟧ :: Γ; g ⊢_p M_k ⇐ void & g
-  ──────────────────────────────────────────────────────────── [G-Assign]
-  Γ; g ⊢_p assign x V M_k ⇐ void & g
-```
-
-#### [E-CallStmt]
-
-Statement-level effectful call (no assignment target). The elaboration
-dispatches on `subgrade(d, g)` to pick the convention witness `conv`,
-which in turn selects the GFGL rule variant.
-
-```
- ⟦·⟧
-  Γ(f) = .function (params=Aᵢ, ret=B)
-  Dᵢ :: Γ ⊢_L eᵢ : Aᵢ           D_k :: Γ ⊢_L ss
-  ────────────────────────────────────────────────── [L-CallStmt]
-  Γ ⊢_L (StaticCall f [e₁,…,eₙ]) :: ss
-  ══════════════════════════════════════════════════════ ⇝
-      requires G(f) = d, d ≠ 1, subgrade(d, g) = some conv,
-               outputs(f) = [y₁:C₁,…,yₖ:Cₖ]
-  ⟦Dᵢ⟧ :: Γ ⊢_v Vᵢ ⇐ Aᵢ              (each Vᵢ possibly from [E-Lift])
-  ⟦D_k⟧ :: Γ, y₁:⌊C₁⌋,…,yₖ:⌊Cₖ⌋; g ⊢_p M_k ⇐ void & g
-  ────────────────────────────────────────────────────── [G-EffectfulCall[conv]]
-  Γ; g ⊢_p effectfulCall[conv] f [Vᵢ] [yⱼ:⌊Cⱼ⌋] M_k ⇐ void & g
-```
-
-The convention witness `conv` determines whether `$heap` is prepended
-to the argument list; outputs always come from `outputs(f)` (see
-Invariant 2).
-
-If any `eᵢ` is itself a [L-Call] with `G(·) > 1`, its sub-derivation
-`Dᵢ` is not a value-position derivation — [E-PureCall] rejects it.
-Such `Dᵢ` triggers [E-Lift], which inserts an extra `effectfulCall`
-around everything that follows.
-
-#### [E-AssignCall]
-
-```
- ⟦·⟧
-  Γ(f) = .function (params=Aᵢ, ret=B)       Γ(x) = .variable U
-  Dᵢ :: Γ ⊢_L eᵢ : Aᵢ          D_k :: Γ ⊢_L ss
-  ───────────────────────────────────────────────────────── [L-AssignCall]
-  Γ ⊢_L (Assign [x] (StaticCall f [e₁,…,eₙ])) :: ss
-  ═════════════════════════════════════════════════════════════ ⇝
-      requires G(f) = d, d ≠ 1, subgrade(d, g) = some conv,
-               outputs(f) = [r:B, …], subsume(B, ⌊U⌋) = c
-  ⟦Dᵢ⟧ :: Γ ⊢_v Vᵢ ⇐ Aᵢ
-  ⟦D_k⟧ :: Γ, r:⌊B⌋, …; g ⊢_p M_k ⇐ void & g
-  ─────────────────────────────────────────────────────────────────── [G-EffectfulCallThenAssign]
-  Γ; g ⊢_p effectfulCall[conv] f [Vᵢ] [r:⌊B⌋, …]
-              (assign x c(r) M_k) ⇐ void & g
-```
-
-#### [E-Lift] (the FGCBV "to" rule, at argument position)
-
-An argument derivation `Dⱼ :: Γ ⊢_L eⱼ : Aⱼ` whose elaboration would
-require [E-PureCall] but whose callee has `G(·) > 1` cannot produce a
-GFGL value. Elaboration instead expands the enclosing producer
-derivation by inserting an `effectfulCall` that binds a fresh
-variable, and elaborates the remainder under the extended Γ.
-
-```
- [E-Lift]
-   Consider an enclosing elaboration whose GFGL conclusion has the form
-     Γ; g ⊢_p K(…Vⱼ…) ⇐ void & g
-   where Vⱼ is needed as the j-th argument of an outer construct, but
-   the Laurel sub-derivation Dⱼ has root [L-Call] with callee g′
-   satisfying G(g′) = d₁ ≠ 1.
-
-   Elaborate Dⱼ's arguments first:  ⟦Dⱼ,ᵢ⟧ :: Γ ⊢_v Wᵢ ⇐ A'ᵢ
-   Let outputs(g′) = [r:B₁,…]; choose subgrade(d₁, g) = some conv₁.
-
-   Then replace the enclosing elaboration's conclusion
-     Γ; g ⊢_p K(…Vⱼ…) ⇐ void & g
-   by
-     Γ; g ⊢_p effectfulCall[conv₁] g′ [Wᵢ] [r:⌊B₁⌋,…] K(…r…) ⇐ void & g
-   where the continuation K is re-elaborated under Γ, r:⌊B₁⌋, … with
-   Vⱼ replaced by (the coercion of) `r`.
-```
-
-This is the one case where the shape of the GFGL derivation is *not*
-a direct image of the Laurel derivation: the tree grows an extra
-node. The extra node is how GFGL expresses "evaluate `g′(…)` first,
-bind its result, then the outer operation". Laurel had no way to
-express this explicitly (Laurel permitted nested calls syntactically);
-GFGL insists on it.
-
-Implementationally, [E-Lift] is `checkArgsK`.
-
-#### [E-New]
-
-```
- ⟦·⟧
-  Γ(x) = .variable (UserDefined C)     D_k :: Γ ⊢_L ss
-  ────────────────────────────────────────────────────── [L-New]
-  Γ ⊢_L (Assign [x] (New C)) :: ss
-  ══════════════════════════════════════════════════════════ ⇝ requires heap ≤ g
-  ⟦D_k⟧ :: Γ, $h:Heap; g ⊢_p M_k ⇐ void & g
-  ─────────────────────────────────────────────────────────────────────────────── [G-New]
-  Γ, $h:Heap; g ⊢_p
-      varDecl $h Heap (increment $heap)
-        (assign x MkComposite(Heap..nextReference!($h), TypeTag_C) M_k)
-      ⇐ void & g
-```
-
-Side condition `heap ≤ g` is the grade check on the elaboration arrow.
-If it fails, the current attempt at grade `g` fails, and the
-coinductive pass bumps `g`.
-
-#### [E-FieldWrite]
-
-```
- ⟦·⟧
-  D_obj :: Γ ⊢_L obj : C           classFields(C) includes (f : A)
-  D_v   :: Γ ⊢_L v : A             D_k :: Γ ⊢_L ss
-  ──────────────────────────────────────────────────────────────── [L-FieldWrite]
-  Γ ⊢_L (Assign [FieldSelect obj f] v) :: ss
-  ════════════════════════════════════════════════════════════════════ ⇝
-      requires heap ≤ g, let Bconstr = boxConstructor(A)
-  ⟦D_obj⟧ :: Γ ⊢_v V_obj ⇐ Composite        ⟦D_v⟧ :: Γ ⊢_v V ⇐ A
-  ⟦D_k⟧ :: Γ, $h:Heap; g ⊢_p M_k ⇐ void & g
-  ─────────────────────────────────────────────────────────────────── [G-FieldWrite]
-  Γ, $h:Heap; g ⊢_p
-      varDecl $h Heap (updateField($heap, V_obj, C.f, Bconstr(V)))
-        M_k
-      ⇐ void & g
-```
-
-### Procedure entry
-
-```
- [E-Proc]
-  D_body :: Γ, params ⊢_L body
-  ──────────────────────────────────────────── [L-Proc]
-  procedure f(params) → returnType  { body }
-  ═════════════════════════════════════════════ ⇝
-      let g = discoverGrade(f)          (coinductive fixpoint, see below)
-      ⟦D_body⟧ :: Γ, params; g ⊢_p M ⇐ void & g
-  if g ∈ {heap, heapErr}, rewrite the signature:
-    inputs      := $heap_in :: inputs
-    outputs     := $heap :: outputs
-    body        := $heap := $heap_in; M
-```
-
-`discoverGrade(f)` is defined by the fixed-point procedure in
-ARCHITECTURE.md §Grade Inference: try grades `[pure, proc, err, heap,
-heapErr]` and take the smallest `g` at which `⟦D_body⟧` exists. "Does
-not exist" = some sub-clause's side condition failed (`subgrade`
-returns `none`, `heap ≤ g` fails, etc.). Because the grade lattice is
-finite and monotone, the fixpoint converges.
-
-### Subsumption table (reference)
-
-Reproduced from ARCHITECTURE.md for self-containment.
-
-```lean
-inductive CoercionResult where
-  | refl
-  | coerce (w : Md → FGLValue → FGLValue)
-  | unrelated
-
-def subsume (actual expected : LowType) : CoercionResult :=
-  if actual == expected then .refl else match actual, expected with
-  | .TInt, .TCore "Any"              => .coerce fromInt
-  | .TBool, .TCore "Any"             => .coerce fromBool
-  | .TString, .TCore "Any"           => .coerce fromStr
-  | .TFloat64, .TCore "Any"          => .coerce fromFloat
-  | .TCore "Composite", .TCore "Any" => .coerce fromComposite
-  | .TCore "ListAny", .TCore "Any"   => .coerce fromListAny
-  | .TCore "DictStrAny", .TCore "Any"=> .coerce fromDictStrAny
-  | .TVoid, .TCore "Any"             => .coerce fromNone
-  | .TCore "Any", .TBool             => .coerce (Any_to_bool)
-  | .TCore "Any", .TInt              => .coerce (Any..as_int!)
-  | .TCore "Any", .TString           => .coerce (Any..as_string!)
-  | .TCore "Any", .TFloat64          => .coerce (Any..as_float!)
-  | .TCore "Any", .TCore "Composite" => .coerce (Any..as_Composite!)
-  | _, _                             => .unrelated
-```
-
-### Subgrade table (reference)
-
-```lean
-def subgrade : Grade → Grade → Option ConventionWitness
-  | .pure,    _        => some .pureCall
-  | .proc,    .proc    => some .procCall
-  | .proc,    .err     => some .procCall
-  | .proc,    .heap    => some .procCall
-  | .proc,    .heapErr => some .procCall
-  | .err,     .err     => some .errorCall
-  | .err,     .heapErr => some .errorCall
-  | .heap,    .heap    => some .heapCall
-  | .heap,    .heapErr => some .heapCall
-  | .heapErr, .heapErr => some .heapErrorCall
-  | _,        _        => none
-```
-
-`subgrade` is the proof witness for `d ≤ g` in the call rules. A return
-of `none` at grade `g` fails the current checking attempt, which is the
-signal the coinductive pass uses to bump the grade.
+The remaining clauses (`while`, `assume`, field write, subscript
+assignment, `new`, expression-as-statement) follow the same
+structure: sub-expressions through `⟦·⟧⇐ᵥ`, the continuation through
+`⟦·⟧⇐ₚ` at the same ambient `e`, heap-touching operations gated on
+`heap ≤ e` via producer subsumption on the heap-threading calls.
 
 ---
 
@@ -696,88 +566,45 @@ The Translation pass has its own mapping in `TRANSLATION.md`.
 
 ### Laurel type system (candidate-derivation checking)
 
-The Laurel rules `[L-*]` are not implemented as an explicit pass in
-Lean; they are the implicit typing discipline that Translation
-targets and Elaboration relies on. They are realized by two facts:
+The Laurel rules above are not implemented as an explicit pass. They
+are the implicit typing discipline that Translation targets and
+Elaboration relies on:
 
 - Translation preserves the Laurel-AST invariants needed for each
-  `[L-X]`'s side conditions (e.g. `Γ(f) = .function sig` whenever a
+  Laurel rule's side conditions (e.g. `f : … → B ∈ Γ` whenever a
   `StaticCall f …` is emitted — see the Illegal-States-Unrepresentable
   principle in `ARCHITECTURE.md`).
 - Elaboration's dispatch on AST shape (`synthValue`, `synthExpr`,
-  `checkProducer`) pattern-matches exactly the same cases as `[L-X]`.
-  If an AST node does not match any `[L-X]`, elaboration falls
-  through to a `Hole` emission (matching `[L-Hole]`).
+  `checkProducer`) pattern-matches the same cases as the Laurel rules.
 
 ### Elaboration
 
-| Clause                 | Lean function                                     | File |
-|------------------------|---------------------------------------------------|------|
-| `Γ ⊢_v V ⇒ T`          | `synthValue`                                      | `Strata/Languages/FineGrainLaurel/Elaborate.lean` |
-| `Γ ⊢_v V ⇐ T`          | `checkValue`                                      | same |
-| `Γ; g ⊢_p M ⇐ void & g`| `checkProducer` (threads `ss` as continuation)    | same |
-| [E-LitInt]/[E-LitBool]/[E-LitStr] | `synthValue` leaf cases                | same |
-| [E-Var]                | `synthValue` (Identifier case)                    | same |
-| [E-PureCall]           | `synthValue` / `synthExpr` (StaticCall pure branch) | same |
-| [E-FieldRead]          | `synthValue` (FieldSelect case) + `boxDestructorName` | same |
-| [E-Hole]               | `synthValue` (Hole case)                          | same |
-| [E-Sub]                | `subsume` + `applySubsume`                        | same |
-| [E-If]                 | `checkProducer` (If case)                         | same |
-| [E-While]              | `checkProducer` (While case)                      | same |
-| [E-LabeledBlock]/[E-Exit] | `checkProducer` (LabeledBlock / Exit cases)    | same |
-| [E-Return]             | `checkProducer` (Return case)                     | same |
-| [E-Assert]             | `checkProducer` (Assert case)                     | same |
-| [E-VarDecl]/[E-VarDeclNoInit] | `checkProducer` (LocalVariable case) → `mkVarDecl` | same |
-| [E-AssignPure]         | `checkAssign` (pure branch)                       | same |
-| [E-CallStmt]           | `checkProducer` (StaticCall branch) → `mkGradedCall` | same |
-| [E-AssignCall]         | `checkAssign` (call branch) → `mkGradedCall` + inner `assign` | same |
-| [E-Lift]               | `checkArgsK`                                      | same |
-| [E-New]                | `checkAssign` (New case)                          | same |
-| [E-FieldWrite]         | `checkAssign` (FieldSelect target case)           | same |
-| [E-Proc]               | `fullElaborate` + `discoverGrades` + `tryGrades`  | same |
-| `subgrade(d, g)`       | `subgrade`                                        | same |
-| `subsume(T, U)`        | `subsume`                                         | same |
-| `G(f)` lookup          | reader read of `procGrades`                       | same |
+The implementation is in `Strata/Languages/FineGrainLaurel/Elaborate.lean`.
+
+| Formal object                      | Lean function                                  |
+|------------------------------------|------------------------------------------------|
+| `⟦·⟧⇒ᵥ : Γ ⊢_L e : A ↦ ⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧` | `synthValue`                             |
+| `⟦·⟧⇐ᵥ : Γ ⊢_L e : A ↦ ⟦Γ⟧ ⊢_v V ⇐ B`   | `checkValue`                             |
+| `⟦·⟧⇒ₚ : Γ ⊢_L e : A ↦ ⟦Γ⟧ ⊢_p M ⇒ ⟦A⟧ & d` | `synthExpr` (defunctionalized `SynthResult`) |
+| `⟦·⟧⇐ₚ : Γ ⊢_L S;rest : A ↦ ⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e` | `checkProducer` (threads `rest` as continuation) |
+| value mode switch `subsume(A, B) = c`   | `subsume` + `applySubsume`               |
+| producer subsumption (⇒ₚ → ⇐ₚ)         | `checkProducer` StaticCall/Assign branches via `mkGradedCall` |
+| to-rule (effectful argument to pure call) | `checkArgsK`                          |
+| grade lookup `procGrades[f]`           | reader read of `procGrades`              |
+| grade residual `d \ e`                 | `Grade.residual d e`                     |
+| grade inference (coinduction)          | `fullElaborate` + `discoverGrades` + `tryGrades` |
+| runtime grade from signature           | `gradeFromSignature`                     |
+| procedure signature rewriting (heap in/out) | inside `fullElaborate`              |
 
 ### Projection
 
-| Form                                     | Lean function                                  |
-|------------------------------------------|-------------------------------------------------|
-| GFGL value → Laurel expression           | `projectValue`                                  |
-| GFGL producer → Laurel statement list    | `projectProducer`                               |
-| Procedure body                           | `projectBody`                                   |
+Forgets the grading; trivial catamorphism `GFGL → Laurel`.
 
----
-
-## Invariants Maintained by the Rules
-
-1. **Elaboration is recursion on the Laurel derivation.** Every sub-
-   derivation of the input appears (possibly coerced, possibly with an
-   [E-Lift] node wrapped around the surrounding producer) as a sub-
-   derivation of the output. No Laurel sub-derivation is dropped or
-   duplicated (except that [E-Return]/[E-Exit] discard the dead
-   continuation, which is sound because control cannot reach it).
-
-2. **Outputs come from signatures, not grades.** Every rule that
-   produces an `effectfulCall` gets its output list from `outputs(f)`
-   — the callee's declared outputs — via `lookupProcOutputs`. The
-   grade only decides whether `$heap` is prepended to the args.
-
-3. **Laurel rules have no grade premises.** Grades appear only on the
-   elaboration arrow, never inside a Laurel derivation. This is what
-   makes the Laurel derivation "ill-typed in a benign way": it is
-   missing the effect information that elaboration supplies.
-
-4. **`Γ` grows only through binders.** Calls extend `Γ` with their
-   output variables; `LocalVariable` extends with `x`; `New` extends
-   with `$h`. No clause silently invents names without extending `Γ`.
-
-5. **[E-Lift] is the only clause that does not preserve tree shape.**
-   Every other clause maps `[L-X]` with sub-derivations `D₁,…,Dₖ`
-   to `[G-Y]` with sub-derivations `⟦D₁⟧,…,⟦Dₖ⟧` in the same order.
-   [E-Lift] inserts an extra `[G-EffectfulCall]` node. This is
-   unavoidable: Laurel admits `f(g(x))` as a single expression when
-   `g` is effectful; GFGL forces the nesting to be named.
+| Form                                     | Lean function        |
+|------------------------------------------|----------------------|
+| GFGL value → Laurel expression           | `projectValue`       |
+| GFGL producer → Laurel statement list    | `projectProducer`    |
+| Procedure body                           | `projectBody`        |
 
 ---
 

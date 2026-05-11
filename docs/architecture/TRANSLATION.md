@@ -43,8 +43,9 @@ statement block.
 | `f(…)` with `f ∉ Γ`                 | `Hole` (nondeterministic — args discarded)                                                       |
 | `recv.m(p₁,…,pₙ)`                   | `StaticCall (resolveMethodName recv m) [e_self, e₁,…,eₙ]`                                        |
 | `recv.f`                            | `FieldSelect e_obj f`                                                                            |
-| `Foo(p₁,…,pₙ)`  (class callee)      | handled at statement level — see `v = Foo(…)` in Statements                                      |
+| `Foo(p₁,…,pₙ)`  (class callee)      | handled at statement level — see `Foo(…)` in Statements                                          |
 | `f"…{p₁}…{pₙ}…"`                    | `StaticCall to_string_any [concat …]`                                                            |
+| `str(x)`                            | `to_string_any(x)`  (via `builtinMap`)                                                           |
 | `[p₁,…,pₙ]`                         | `from_ListAny (ListAny_cons e₁ … (ListAny_nil))`                                                 |
 | `{k₁:v₁,…,kₙ:vₙ}`                   | `from_DictStrAny (DictStrAny_cons K₁ V₁ … empty)`                                                |
 | `x[i]`                              | `Any_get(ex, ei)`                                                                                |
@@ -63,6 +64,7 @@ list.
 | `x += p`                                  | `Assign [x] (PAdd x v)`                                                                                              |
 | `a, b = rhs`                              | `tmp := e; a := Get(tmp, 0); b := Get(tmp, 1)`  (fresh `tmp`)                                                        |
 | `x[i] = v`                                | `Assign [x] (Any_sets (ListAny_cons ei ListAny_nil) x ev)`                                                           |
+| `x[i][j] = v`                             | `Assign [x] (Any_sets (ListAny_cons ei (ListAny_cons ej ListAny_nil)) x ev)`                                         |
 | `return p`                                | `LaurelResult := e; exit $body`                                                                                      |
 | `if cond: thn else: els`                  | `if ec then sst else ssf`                                                                                            |
 | `while cond: body`                        | `while ec do ssb`                                                                                                    |
@@ -72,7 +74,7 @@ list.
 | `with mgr as v: body`                     | `v := T@__enter__(em); ssb; T@__exit__(em)`  (`T = varType(mgr)`)                                                    |
 | `try: body except Eᵢ: handlerᵢ`           | `maybe_except : Error := default; label $try { ssb }; if isError(maybe_except, Eᵢ) then ssᵢ else …`  (fresh `$try`) |
 | `assert cond`                             | `Assert ec`                                                                                                          |
-| `v = Foo(p₁,…,pₙ)`  (class `Foo`)         | `Assign [tmp] (New C); StaticCall Foo@__init__ [tmp, e₁,…,eₙ]; Assign [v] tmp`  (fresh `tmp`)                        |
+| `Foo(p₁,…,pₙ)`  (class `Foo`)             | `Assign [tmp] (New Foo); Foo@__init__(tmp, e₁,…,eₙ)`  (fresh `tmp`; if the call appears as `v = Foo(…)`, the caller's `Assign` then stores `tmp` into `v`) |
 
 ## Module- and function-level declarations
 
@@ -97,6 +99,34 @@ Before emitting a function's `ssb`, the fold performs:
 - **error output declaration** — every procedure signature includes
   `maybe_except : Error` so that `try/except` handlers have a
   consistent output to bind.
+
+### Method FuncSigs
+
+Method FuncSigs stored in Γ include `self` with type `UserDefined className`:
+
+```
+MyClass@__init__ : (self: MyClass, param1: T1, ...) → Any
+```
+
+When Translation emits the procedure for a method, it strips `self`
+from the FuncSig params list and adds it back via the explicit
+`selfParam`. This avoids duplicating `self` in the procedure's input
+list.
+
+### Constructor FuncSigs in the prelude
+
+The datatype constructors used by Translation (and consumed later by
+Elaboration) must have `FuncSig` entries in `preludeSignatures` so
+that elaboration can check argument types at call boundaries:
+
+- `from_Slice : (int, OptionInt) → Any`
+- `OptSome : (int) → OptionInt`
+- `OptNone : () → OptionInt`
+- `Any_sets : (ListAny, Any, Any) → Any`
+- `BoxAny : (Any) → Box`  (for Any-typed fields)
+
+Without these entries, elaboration cannot insert the right coercions
+around Translation's output.
 
 ---
 
