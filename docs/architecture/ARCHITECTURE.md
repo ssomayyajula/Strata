@@ -378,15 +378,15 @@ D :: Γ ⊢_L (return e) : void
 D :: Γ ⊢_L (exit l) : void       ↦    ⟦D⟧ :: Γ ⊢_p exit l ⇐ void & e
 
 
-D_e :: Γ ⊢_L e : A    D_body :: Γ,x:A ⊢_L body
-─────────────────────────────────────────────────
-D :: Γ ⊢_L (var x:A := e; body) : void
+D_e :: Γ ⊢_L e : A    K :: Γ,x:A ⊢_L rest
+────────────────────────────────────────────
+D :: Γ ⊢_L (var x:A := e); rest : void
 
                               ↦
 
-⟦D_e⟧ :: Γ' ⊢_v V ⇐ eraseType(A)    ⟦D_body⟧ :: Γ',x:eraseType(A) ⊢_p M ⇐ void & e
-──────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧ :: Γ',x:eraseType(A) ⊢_p varDecl x (eraseType A) V M ⇐ void & e
+⟦D_e⟧ :: Γ' ⊢_v V ⇐ eraseType(A)    ⟦K⟧ :: Γ',x:eraseType(A) ⊢_p M_k ⇐ void & e
+───────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ',x:eraseType(A) ⊢_p varDecl x (eraseType A) V M_k ⇐ void & e
 
 
 D_c :: Γ ⊢_L c : bool    K :: Γ ⊢_L rest
@@ -422,15 +422,19 @@ D :: Γ ⊢_L (x := e); rest : void    where grade(e) = pure
 ⟦D⟧ :: Γ' ⊢_p assign x V M_k ⇐ void & e
 
 
-D :: Γ ⊢_L (x := f(args)); rest : void    where grade(f) = d > pure, d ≤ e
+D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ    K :: Γ ⊢_L rest
+─────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (x := f(e₁,...,eₙ)); rest : void    where grade(f) = d > pure, d ≤ e
 
                               ↦
 
-⟦Dᵢ⟧ :: Γ' ⊢_v Vᵢ ⇐ Aᵢ    ⟦K⟧ :: Γ',r:B ⊢_p assign x (subsume(r, Γ(x))) M_k ⇐ void & (d\e)
-──────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D₁⟧ :: Γ' ⊢_v V₁ ⇐ A₁  ...  ⟦Dₙ⟧ :: Γ' ⊢_v Vₙ ⇐ Aₙ    ⟦K⟧ :: Γ',r:B ⊢_p assign x (subsume(r, Γ(x))) M_k ⇐ void & (d\e)
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ⟦D⟧ :: Γ',r:B ⊢_p effectfulCall f [Vᵢ] [r:B] (assign x (subsume(r, Γ(x))) M_k) ⇐ void & e
 
 
+K :: Γ ⊢_L rest
+────────────────────────────────────────────
 D :: Γ ⊢_L (x := new C); rest : void    where heap ≤ e
 
                               ↦
@@ -440,6 +444,8 @@ D :: Γ ⊢_L (x := new C); rest : void    where heap ≤ e
 ⟦D⟧ :: Γ',$h:Heap ⊢_p varDecl $h Heap (increment $heap) (assign x (MkComposite ...) M_k) ⇐ void & e
 
 
+K :: Γ ⊢_L rest
+────────────────────────────────
 D :: Γ ⊢_L ??; rest : void
 
                               ↦
