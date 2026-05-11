@@ -520,31 +520,16 @@ on types (⟦A⟧ = eraseType(A)) and contexts (⟦Γ⟧ = { (x : ⟦A⟧) | (x:
 ⟦·⟧⇐ₚ : (Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
 
-#### Phase 1: Grade inference (coinduction on the call graph)
+These four functions need one piece of global information: the grade of every
+procedure in the program. This is computed first, then the functions run.
 
-Before any GFGL derivation is constructed, every procedure's grade must be
-known. Grades are discovered by coinduction:
+#### Grade inference
 
-```
-discoverGrades(program, Γ) → procGrades:
-  1. Initialize: procGrades[f] := ⊥ (pure) for all user procs f
-  2. For each proc f with body M and return type A:
-       Try ⟦M⟧⇐ₚ at grade g for g ∈ [pure, proc, err, heap, heapErr]
-       under the current procGrades assumption.
-       Set procGrades[f] := smallest g that succeeds.
-  3. If any grade changed, go to step 2.
-  4. Stable (no changes). Return procGrades.
-```
+Every callee's grade must be known before term production can begin, because
+the grade determines whether an expression is a value or a producer (which
+determines whether ⟦·⟧⇒ᵥ or ⟦·⟧⇒ₚ handles it).
 
-The translation functions are the oracle: ⟦M⟧⇐ₚ at grade g succeeds iff all
-operations in M have grade ≤ g. It fails when the residual `d\e` is undefined
-(a callee's grade exceeds the ambient grade).
-
-Convergence is guaranteed: the grade lattice has 5 elements and grades only
-increase. Mutual recursion works because the initial assumption (⊥) means
-the first iteration may fail, bump the grade, and stabilize on the next round.
-
-Runtime procedure grades are pre-computed from signatures (not by coinduction):
+Runtime procedure grades are read directly from their signatures:
 
 ```
 gradeFromSignature(proc) :=
@@ -555,71 +540,80 @@ gradeFromSignature(proc) :=
   else → proc
 ```
 
-Runtime grades enter procGrades as initial values before coinduction begins.
-
-#### Phase 2: Term production
-
-After grade inference, all grades are known and stable. Term production
-enters ⟦·⟧⇐ₚ on each user procedure body at the discovered grade:
+User procedure grades are discovered by coinduction. The idea: attempt
+⟦body⟧⇐ₚ at increasing grades until one succeeds. ⟦·⟧⇐ₚ fails (via an
+undefined residual) when the body contains a call whose grade exceeds the
+trial grade. The smallest grade that succeeds is the procedure's grade.
 
 ```
-⟦body⟧⇐ₚ at procGrades[f]  ::  ⟦Γ⟧,params ⊢_p M ⇐ ⟦returnType⟧ & e
+discoverGrades(program, Γ) → procGrades:
+  1. procGrades[f] := gradeFromSignature(f) for all runtime procs
+  2. procGrades[f] := pure for all user procs
+  3. For each user proc f with body M:
+       procGrades[f] := min { g | ⟦M⟧⇐ₚ at grade g succeeds }
+  4. Repeat step 3 until no grade changes.
 ```
 
-During term production, grade lookup is a pure read (HashMap). No mutation.
-No on-demand discovery. No boolean flags.
+Convergence: the lattice has 5 elements, grades only increase, so at most
+5 iterations. Mutual recursion works because procGrades is an assumption
+read during the trial — if too low, the trial fails, the grade bumps, and
+the next round succeeds.
 
-#### How the four functions call each other
+#### Term production
 
-⟦·⟧⇐ₚ is the main driver. For each Laurel statement, it:
+With procGrades known, term production elaborates each user procedure body
+by calling ⟦body⟧⇐ₚ at grade `procGrades[f]`. The grade is a pure read
+from procGrades throughout — never mutated during term production.
 
-1. Translates sub-expressions via ⟦·⟧⇐ᵥ (conditions → bool, values → target type)
-2. Recursively translates the continuation via ⟦·⟧⇐ₚ
-3. Assembles the GFGL producer checking derivation
-
-For assignments and expression-statements, ⟦·⟧⇐ₚ first calls ⟦·⟧⇒ₚ on the
-RHS to determine whether it's a value or effectful call:
-
-- **Value (grade = pure):** ⟦·⟧⇐ᵥ checks it against the target type.
-  The result is a GFGL value used directly.
-- **Effectful call (grade > pure):** Producer subsumption fires — the call
-  is bound via effectfulCall, extending the context with the callee's
-  outputs. The continuation is checked at the residual grade `d\e`.
-
-⟦·⟧⇐ᵥ = ⟦·⟧⇒ᵥ + subsumption. It synthesizes the value's type, then applies
-the subsumption coercion if the synthesized type doesn't match the target.
-
-The **to-rule** handles effectful arguments to pure calls: when ⟦·⟧⇒ₚ on
-an argument yields grade > pure, the argument is ANF-lifted into an
-effectfulCall binding BEFORE the outer call. Left-to-right, deterministic.
-Each lift nests one effectfulCall and extends the context.
-
-#### User/Runtime separation
-
-The elaborator must know the types of ALL callees (to insert coercions) but
-only elaborates USER procedure bodies (runtime is trusted).
+The elaborator also needs the types of all callees (user and runtime) to
+insert coercions at call boundaries. This is provided by the TypeEnv (from
+Resolution). The elaborator's environment is:
 
 ```
 ElabEnv:
-  typeEnv : TypeEnv           -- ALL signatures (user + runtime + prelude)
-  program : Laurel.Program    -- ONLY user procedures (bodies elaborated)
-  runtime : Laurel.Program    -- ONLY runtime procedures (never elaborated)
-  procGrades : HashMap        -- grades for ALL callees
+  typeEnv   : TypeEnv          -- signatures for all callees (user + runtime)
+  program   : Laurel.Program   -- user procedure bodies (to elaborate)
+  runtime   : Laurel.Program   -- runtime procedure bodies (never elaborated)
+  procGrades: HashMap          -- grades for all callees (computed above)
 ```
 
-Runtime procedure bodies are never inspected. Their grades are derived
-from their signatures via gradeFromSignature.
+After term production, each user procedure's signature is rewritten to match
+its grade's calling convention: heap-graded procedures gain a `$heap_in`
+input and `$heap` output; their bodies are prepended with `$heap := $heap_in`.
 
-#### Procedure signature rewriting
+#### How the functions interact
 
-After a procedure's grade is discovered, its signature is rewritten to
-match the calling convention:
+⟦·⟧⇐ₚ drives elaboration. For each Laurel statement it encounters:
 
-- Grade `heap`/`heapErr` → add `$heap_in` input + `$heap` output
-- Body prepended with `$heap := $heap_in`
-- Callers already pass heap (determined by grade during term production)
+1. Sub-expressions (conditions, RHS values) are translated via ⟦·⟧⇐ᵥ at
+   their expected types.
+2. The continuation (remaining statements) is translated via ⟦·⟧⇐ₚ at the
+   same or reduced grade.
+3. These are assembled into a GFGL producer checking derivation.
 
-#### Clauses of ⟦·⟧⇒ᵥ  (value synthesis)
+The key decision point is **assignments and expression-statements**: ⟦·⟧⇐ₚ
+calls ⟦·⟧⇒ₚ on the RHS, which looks up `procGrades[callee]`:
+
+- If `procGrades[callee] = pure`: the expression is a value. ⟦·⟧⇒ₚ
+  delegates to ⟦·⟧⇒ᵥ. The result is used directly via ⟦·⟧⇐ᵥ.
+- If `procGrades[callee] = d > pure`: the expression is a producer.
+  Producer subsumption fires: the call is bound via effectfulCall with
+  the callee's declared outputs, and the continuation is checked at
+  grade `d \ procGrades[f]` (the residual of the callee's grade in
+  the enclosing procedure's grade).
+
+⟦·⟧⇐ᵥ = ⟦·⟧⇒ᵥ followed by the GFGL value subsumption rule. It
+synthesizes the value's type, then applies the coercion from the
+subsumption table if the synthesized type doesn't match the expected type.
+
+**ANF lifting (the to-rule):** When translating a pure call f(e₁,...,eₙ)
+but argument eᵢ has `procGrades[eᵢ's callee] > pure`, that argument must
+be bound before the outer call (because GFGL values cannot contain
+producers). The argument is lifted into an effectfulCall binding that wraps
+the entire outer expression. Arguments are processed left-to-right (CBV
+evaluation order). Each lift extends the context and nests one effectfulCall.
+
+#### Clauses of ⟦·⟧⇒ᵥ
 
 ```
 D :: Γ ⊢_L n : int                   ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v litInt n ⇒ TInt
@@ -631,7 +625,7 @@ D :: Γ ⊢_L x : A                     ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v v
 
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ
 ──────────────────────────────────────────────────
-D :: Γ ⊢_L f(e₁,...,eₙ) : B    where grade(f) = pure
+D :: Γ ⊢_L f(e₁,...,eₙ) : B    where procGrades[f] = pure
 
         ↦
 
@@ -655,7 +649,7 @@ D :: Γ ⊢_L ?? : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧,$havoc_N ⊢_v stati
 D :: Γ ⊢_L ?  : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧,$hole_N ⊢_v staticCall $hole_N [] ⇒ Any
 ```
 
-#### ⟦·⟧⇐ᵥ  (value checking = ⟦·⟧⇒ᵥ + subsumption)
+#### ⟦·⟧⇐ᵥ
 
 ```
 ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ A    subsume(A, B) = c
@@ -663,15 +657,12 @@ D :: Γ ⊢_L ?  : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧,$hole_N ⊢_v static
 ⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ B
 ```
 
-The coercion c is proof-relevant — it becomes GFGL term structure
-(`from_int`, `Any..as_Composite!`, etc.).
-
-#### ⟦·⟧⇒ₚ  (producer synthesis)
+#### ⟦·⟧⇒ₚ
 
 ```
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ
 ──────────────────────────────────────────────────
-D :: Γ ⊢_L f(e₁,...,eₙ) : B    where grade(f) = d > pure
+D :: Γ ⊢_L f(e₁,...,eₙ) : B    where procGrades[f] = d > pure
 
         ↦
 
@@ -680,28 +671,30 @@ D :: Γ ⊢_L f(e₁,...,eₙ) : B    where grade(f) = d > pure
 ⟦D⟧⇒ₚ :: ⟦Γ⟧ ⊢_p f(V₁,...,Vₙ) ⇒ ⟦B⟧ & d
 ```
 
-When grade(f) = pure, ⟦·⟧⇒ₚ delegates to ⟦·⟧⇒ᵥ (the expression is a value).
+When procGrades[f] = pure, ⟦·⟧⇒ₚ delegates to ⟦·⟧⇒ᵥ.
 
-#### Producer subsumption (⟦·⟧⇒ₚ meets ⟦·⟧⇐ₚ)
+#### Producer subsumption
 
-When ⟦·⟧⇐ₚ encounters an expression with grade > pure, it uses ⟦·⟧⇒ₚ to
-synthesize, then applies producer subsumption to construct the effectfulCall:
+When ⟦·⟧⇐ₚ at ambient grade e encounters an expression with ⟦·⟧⇒ₚ grade d,
+it constructs the effectfulCall binding. The callee's declared outputs
+[x₁:T₁,...,xₖ:Tₖ] extend the context for the continuation, which is
+checked at the residual grade d\e:
 
 ```
-⟦D⟧⇒ₚ :: ⟦Γ⟧ ⊢_p f(Vᵢ) ⇒ ⟦B⟧ & d    K :: Γ ⊢_L rest : A
-─────────────────────────────────────────────────────────────
+⟦D⟧⇒ₚ :: ⟦Γ⟧ ⊢_p f(Vᵢ) ⇒ ⟦B⟧ & d    K :: Γ ⊢_L rest : A    ambient = e
+────────────────────────────────────────────────────────────────────────────────
 
         ↦
 
 ⟦K⟧⇐ₚ :: ⟦Γ⟧,x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d\e)
-────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────────
 ⟦Γ⟧,x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f [Vᵢ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
 ```
 
-Outputs [x₁:T₁,...,xₖ:Tₖ] from f's declared signature.
-Continuation checked at residual grade `d\e`.
+#### Clauses of ⟦·⟧⇐ₚ
 
-#### Clauses of ⟦·⟧⇐ₚ  (producer checking)
+All clauses receive the ambient grade e = procGrades[f] (or a residual
+thereof from an enclosing effectfulCall).
 
 ```
 D_c :: Γ ⊢_L c : bool    D_t :: Γ ⊢_L t : A    D_f :: Γ ⊢_L f : A    K :: Γ ⊢_L rest : A
@@ -754,15 +747,16 @@ D :: Γ ⊢_L (x := e); rest : A
 
         ↦
 
-If ⟦D_e⟧⇒ₚ is a value (grade = pure):
+If procGrades[callee(e)] = pure:
 
     ⟦D_e⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ ⟦Γ(x)⟧    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
     ────────────────────────────────────────────────────────────────────────
     ⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assign x V M_k ⇐ ⟦A⟧ & e
 
-If ⟦D_e⟧⇒ₚ has grade d > pure:
+If procGrades[callee(e)] = d > pure:
 
-    (producer subsumption: effectfulCall f [...] [outputs] (assign x (subsume(r, ⟦Γ(x)⟧)) ⟦K⟧⇐ₚ))
+    (producer subsumption at ambient e with continuation:
+     assign x (subsume(bound_result, ⟦Γ(x)⟧)) ⟦K⟧⇐ₚ)
 
 
 D_body :: Γ ⊢_L {s₁;...;sₙ} : A    K :: Γ ⊢_L rest : A
@@ -784,29 +778,9 @@ D :: Γ ⊢_L (exit l) : A    (l : ⟦A⟧ & e) ∈ ⟦Γ⟧
 ```
 
 The remaining clauses (while, assume, field write, subscript assignment,
-new, ternary desugar, expression-as-statement) follow the same pattern:
-sub-expressions via ⟦·⟧⇐ᵥ, continuation via ⟦·⟧⇐ₚ, assemble the GFGL
-producer checking derivation.
-
-#### Core interface requirements
-
-The Laurel→Core translator imposes constraints on the elaborated output:
-
-1. **function vs procedure:** `synthValue` only accepts grade = pure callees.
-   Grade > pure forces the call through the producer path (statement level).
-
-2. **Datatype constructors** (from_int, ListAny_cons, etc.) are expressions.
-   The elaborator treats them as pure functions (they have FuncSigs in the prelude).
-
-3. **Output arity:** effectfulCall outputs must match the callee's declared
-   output count exactly.
-
-4. **`__main__` metadata:** `__main__` must have sourceRangeToMd metadata
-   so Core generates VCs from its assertions.
-
-5. **No Holes in output:** Every Hole in the input is translated to a fresh
-   function declaration ($havoc_N or $hole_N). These are added to the output
-   program's function list.
+new, ternary desugar, expression-as-statement) follow the same structure:
+sub-expressions via ⟦·⟧⇐ᵥ, continuation via ⟦·⟧⇐ₚ at the same ambient
+grade e, assembled into the corresponding GFGL producer checking derivation.
 
 
 ## Projection
