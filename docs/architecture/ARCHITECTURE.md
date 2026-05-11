@@ -420,11 +420,11 @@ in the recursive call on continuation K.
 
 #### The four functions
 
-The translation is four mutually recursive functions. Each takes a Laurel
-typing derivation D — the context Γ, type A, and term structure are all
-inherited from D. The only additional input is the ambient grade e for
-⟦·⟧⇐ₚ (from the procedure's inferred grade, or the residual d\e after
-an effectfulCall).
+The translation is four mutually recursive functions.
+
+Synthesis takes Γ and a raw expression, discovers A, and produces a
+derivation at ⟦A⟧. Checking takes A and a grade as inputs, takes a
+Laurel derivation at that A, and produces a GFGL derivation at A & e.
 
 ```
 ⟦·⟧⇒ᵥ : (Γ : Ctx) → (e : StmtExpr) → ∃(A' : HighType)(V : FGLValue). (Γ ⊢_L e : A') → (⟦Γ⟧ ⊢_v V ⇒ ⟦A'⟧)
