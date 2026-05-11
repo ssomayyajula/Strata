@@ -439,10 +439,11 @@ monotone).
 
 #### Entry point
 
-With all grades known, term production elaborates each user procedure body:
+With all grades known, term production elaborates each user procedure
+`f(p₁:T₁,...,pₘ:Tₘ) → R` with body `B`. The entry point is:
 
 ```
-⟦body⟧⇐ₚ at grade procGrades[f]  ::  ⟦Γ⟧,params ⊢_p M ⇐ ⟦returnType⟧ & procGrades[f]
+⟦Γ,p₁:T₁,...,pₘ:Tₘ ⊢_L B : R⟧⇐ₚ at grade procGrades[f]
 ```
 
 #### How the functions interact
