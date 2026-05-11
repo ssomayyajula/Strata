@@ -417,10 +417,33 @@ induced translation on types (⟦A⟧ = eraseType(A)) and contexts
 ⟦·⟧⇐ₚ : (Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
 
-These functions need procGrades[f] for every callee f. Grade inference
-computes this before term production begins: runtime grades via
-gradeFromSignature, user grades via coinduction (attempt ⟦body⟧⇐ₚ at
-increasing grades until one succeeds; convergence in ≤5 iterations).
+#### Grade inference
+
+These functions need procGrades[g] for every callee g before they can run.
+Runtime grades are computed from signatures:
+
+```lean
+def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
+  let hasError := proc.outputs.any fun o => eraseType o.type.val == .TCore "Error"
+  let hasHeap := proc.inputs.any fun i => eraseType i.type.val == .TCore "Heap"
+  match hasHeap, hasError with
+  | true, true => .heapErr | true, false => .heap
+  | false, true => .err    | false, false => if proc.isFunctional then .pure else .proc
+```
+
+User grades are discovered by coinduction: attempt ⟦body⟧⇐ₚ at increasing
+grades until one succeeds (the residual d\e is undefined when a callee's
+grade exceeds the trial grade, causing failure). The smallest succeeding
+grade is the procedure's grade. Convergence in ≤5 iterations (finite lattice,
+monotone).
+
+#### Entry point
+
+With all grades known, term production elaborates each user procedure body:
+
+```
+⟦body⟧⇐ₚ at grade procGrades[f]  ::  ⟦Γ⟧,params ⊢_p M ⇐ ⟦returnType⟧ & procGrades[f]
+```
 
 #### How the functions interact
 
@@ -622,18 +645,6 @@ def subsume (actual expected : LowType) : CoercionResult :=
   | .TCore "Any", .TCore "Composite" => .coerce (fun md v => .staticCall md "Any..as_Composite!" [v])
   | _, _ => .unrelated
 ```
-
-### gradeFromSignature
-
-```lean
-def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
-  let hasError := proc.outputs.any fun o => eraseType o.type.val == .TCore "Error"
-  let hasHeap := proc.inputs.any fun i => eraseType i.type.val == .TCore "Heap"
-  match hasHeap, hasError with
-  | true, true => .heapErr | true, false => .heap
-  | false, true => .err    | false, false => if proc.isFunctional then .pure else .proc
-```
-
 
 
 ## Projection
