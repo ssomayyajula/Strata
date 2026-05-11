@@ -433,29 +433,34 @@ in the recursive call on continuation K.
 
 #### The four functions
 
+**Input:** a Laurel.Program (typed procedures with bodies).  
+**Output:** a GFGL.Program (same procedures with graded, effect-explicit bodies).
+
+The translation is four mutually recursive functions. Each takes a Laurel
+typing derivation D. The type A and context Γ are inherited from D — they
+are not separate inputs. The only additional inputs are:
+- ⟦·⟧⇐ᵥ receives a target type B (from the enclosing checking context)
+- ⟦·⟧⇐ₚ receives an ambient grade e (from the procedure's inferred grade,
+  or the residual d\e after an effectfulCall)
+
 ```
-⟦·⟧⇒ᵥ : (Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧)
-⟦·⟧⇐ᵥ : (Γ ⊢_L e : A) → (B : LowType) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ B)
-⟦·⟧⇒ₚ : (Γ ⊢_L e : A) → ∃M,d. (⟦Γ⟧ ⊢_p M ⇒ ⟦A⟧ & d)
-⟦·⟧⇐ₚ : (Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
+⟦·⟧⇒ᵥ : (D :: Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧)
+⟦·⟧⇐ᵥ : (D :: Γ ⊢_L e : A) → (B : LowType) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ B)
+⟦·⟧⇒ₚ : (D :: Γ ⊢_L f(e₁,...,eₙ) : A) → ∃M. (⟦Γ⟧ ⊢_p M ⇒ ⟦A⟧ & procGrades[f])
+⟦·⟧⇐ₚ : (D :: Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
 
-Mode discipline:
-- ⟦·⟧⇒ᵥ: input is a Laurel derivation. Output is a GFGL value and its synthesized type.
-- ⟦·⟧⇐ᵥ: inputs are a Laurel derivation AND a target type B. Output is a checked GFGL value.
-- ⟦·⟧⇒ₚ: input is a Laurel derivation of a call with grade > pure. Output is a GFGL producer, its type, and its grade.
-- ⟦·⟧⇐ₚ: inputs are a Laurel derivation of a statement-with-continuation AND an ambient grade e. Output is a checked GFGL producer.
-
-Each function's output mode is determined by its inputs — no backtracking.
-⟦·⟧⇒ₚ has exactly one clause (call with d > pure); inversion is trivial.
+⟦·⟧⇒ₚ has exactly one clause (call with grade > pure); inversion is trivial.
 
 #### Grade inference
 
-Elaboration has two passes.
+Elaboration proceeds in two passes over the program's procedure list.
 
 **Pass 1 — grade inference (coinduction over the call graph):**
 
-Runtime procedure grades are structural:
+Input: the Laurel program. Output: `procGrades : String → Grade`.
+
+Runtime procedure grades are read structurally from the signature:
 ```lean
 def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
   let hasError := proc.outputs.any fun o => eraseType o.type.val == .TCore "Error"
@@ -474,7 +479,10 @@ because the grade lattice is finite and the grades are monotone.
 
 **Pass 2 — term production:**
 
-With all grades known, elaborate each procedure body.
+Input: the Laurel program + procGrades. Output: the GFGL program.
+
+For each procedure, elaborate its body via ⟦body⟧⇐ₚ at the inferred grade.
+Pass 1 guarantees this succeeds (the grade was chosen to make it succeed).
 
 #### Entry point (per-procedure)
 
