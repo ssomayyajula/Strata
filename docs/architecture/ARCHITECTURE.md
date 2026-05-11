@@ -1,6 +1,5 @@
 # Python → Laurel Translation Architecture
 
----
 
 ## Overview
 
@@ -97,7 +96,6 @@ pattern matching on it gives you the data you need. There is no
 IS the check. `Option NameInfo` is the only interface.
 
 
----
 
 ## Resolution
 
@@ -138,7 +136,6 @@ annotation AST → `HighType`. Union types (`int | bool`, `Optional[X]`,
 decision is made in Resolution, not in Translation.
 
 
----
 
 
 ## Translation
@@ -169,7 +166,6 @@ error output declaration (`maybe_except: Error` in proc outputs).
 | `{k: v}` | `from_DictStrAny(DictStrAny_cons(k, v, DictStrAny_empty()))` |
 | `f"{expr}"` | `to_string_any(expr)` |
 
----
 
 
 ## Elaboration
@@ -632,7 +628,6 @@ def gradeFromSignature (proc : Laurel.Procedure) : Grade :=
   | false, true => .err    | false, false => if proc.isFunctional then .pure else .proc
 ```
 
----
 
 
 ## Projection
@@ -644,7 +639,6 @@ Trivial catamorphism. Forget grades. Map GFGL → Laurel:
 - `varDecl x T V body` → `[LocalVariable x T V; body]`
 - Values map to their Laurel equivalents directly.
 
----
 
 ## Python Construct Coverage
 
@@ -687,7 +681,6 @@ and what it does not support.
 - Chained comparisons (`a < b < c`)
 - Multiple assignment targets (`x = y = 5`)
 
----
 
 ## Known Tech Debt
 
@@ -701,7 +694,6 @@ grade > 1 and the coercion scheme changes.
 **Prelude data encodings:** Lists/dicts are recursive ADTs (`ListAny_cons`/`DictStrAny_cons`).
 Translation must emit these specific constructors.
 
----
 
 ## Current Status (2026-05-08)
 
@@ -738,7 +730,6 @@ that the solver needs more time to handle.
 - `__main__` has metadata (VCs generated from module-level asserts)
 - `gradeFromSignature` uses `isFunctional` (function vs procedure)
 
----
 
 ## Success Criteria
 
@@ -750,7 +741,6 @@ that the solver needs more time to handle.
 6. Implementation reads as transcription of the typing rules.
 
 
----
 
 
 ## Files
@@ -763,7 +753,6 @@ Pipeline.lean          -- Wire passes, CLI
 ```
 
 
----
 
 
 ## References
