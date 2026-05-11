@@ -1,27 +1,18 @@
-# Translation and Elaboration: Rules
+# Elaboration: Laurel → GFGL
 
 ---
 
 ## Purpose
 
-This document gives a single, coherent presentation of the rules that
-drive the two main passes of the pipeline:
+This document specifies the Elaboration pass: a partial map
+`⟦·⟧ : LaurelDeriv → GFGLDeriv` defined by recursion on Laurel typing
+derivations. The Translation pass that feeds this one (Python AST →
+Laurel AST) is specified in a sibling file, `TRANSLATION.md`; the
+prose overview of the whole pipeline is in `ARCHITECTURE.md`.
 
-- **Translation** — Python AST → Laurel AST (which, together with Γ,
-  gives a *candidate* Laurel typing derivation; see below).
-- **Elaboration** — Laurel typing derivation → GFGL typing derivation,
-  defined by recursion on the Laurel derivation.
-
-It is companion material to `ARCHITECTURE.md`. The prose overview and
-engineering principles live there; the rules live here.
-
-### The shape of the pipeline, precisely
+### The shape of this pass
 
 ```
-  Python AST
-     │
-     │   Translation (tree-transforming fold)
-     ▼
   Laurel AST  ──── checked against Laurel typing rules [L-*] ────▶  candidate Laurel derivation D
                                                                           │
                                                                           │   Elaboration ⟦·⟧
@@ -30,18 +21,17 @@ engineering principles live there; the rules live here.
                                                               GFGL derivation ⟦D⟧
 ```
 
-- **Translation** emits a Laurel AST. Every Laurel AST admits a
-  *candidate* typing derivation under Laurel's own rules, but this
-  derivation may be invalid (undefined names, bad types, effects where
-  a value is expected). If the candidate is invalid the pipeline
-  errors; if valid, we have a genuine Laurel derivation `D`.
-- **Elaboration** is a partial map `⟦·⟧ : LaurelDeriv → GFGLDeriv`
-  defined by recursion on the *Laurel derivation*, not on the
-  AST. Side conditions (grades `G(f)`, ambient `g`, `subsume`,
-  `subgrade`) live on the arrow, because they are elaboration-time
-  facts consulted to choose which GFGL rule to build with. The sub-
-  derivations of the input tree get elaborated to sub-derivations of
-  the output tree.
+- The Laurel AST coming out of Translation admits a *candidate*
+  typing derivation under Laurel's own rules, but this derivation may
+  be invalid (undefined names, bad types). If the candidate is
+  invalid the pipeline errors; if valid, we have a genuine Laurel
+  derivation `D`.
+- Elaboration is defined by recursion on `D`, not on the AST. Side
+  conditions (grades `G(f)`, ambient `g`, `subsume`, `subgrade`) live
+  on the elaboration arrow, because they are elaboration-time facts
+  consulted to choose which GFGL rule to build with. Sub-derivations
+  of the input tree get elaborated to sub-derivations of the output
+  tree.
 
 This is what "tree → tree" means here: a Laurel derivation with root
 rule `[L-X]` and sub-derivations `D₁,…,Dₖ` is mapped to a GFGL
@@ -64,14 +54,19 @@ derivation with root rule `[G-Y]` and sub-derivations `⟦D₁⟧,…,⟦Dₖ⟧
 - `D`, `D'`, `Dᵢ` — Laurel derivations; `⟦D⟧` — its elaboration.
 - `[L-X]` — Laurel typing rule. `[G-X]` — GFGL typing rule.
   `[E-X]` — elaboration clause mapping a Laurel rule to a GFGL rule.
-- `[T-X]` — translation rule (Python → Laurel AST).
 
 ### The judgments in play
 
+Translation is not a typing system — it is an AST-to-AST fold. Python
+has no static typing derivation, so there is no derivation-tree
+correspondence between Translation's input and output. The translation
+pass is presented below as a plain two-column desugaring table.
+
+Laurel and GFGL both have typing systems. Elaboration is the
+derivation-to-derivation map between them.
+
 | System       | Judgment                       | Reading                                                       |
 |--------------|--------------------------------|---------------------------------------------------------------|
-| Translation  | `Γ ⊢ p ↦ e`                    | Python expression `p` translates to Laurel expression `e`.    |
-| Translation  | `Γ ⊢ p ↦ ss`                   | Python statement `p` translates to Laurel statement list.     |
 | Laurel       | `Γ ⊢_L e : A`                  | Laurel expression `e` has type `A`.                           |
 | Laurel       | `Γ ⊢_L ss`                     | Laurel statement list is well-formed (in a body of type void).|
 | GFGL         | `Γ ⊢_v V ⇒ T`                  | GFGL value `V` synthesizes low type `T`.                      |
@@ -82,216 +77,6 @@ derivation with root rule `[G-Y]` and sub-derivations `⟦D₁⟧,…,⟦Dₖ⟧
 Checking a producer is always "at void" — procedures communicate
 results through declared outputs, not a return value in the FGCBV
 sense. The grade `g` is the object of checking.
-
----
-
-## Translation Rules (Python → Laurel AST)
-
-Translation is a deterministic fold. The rules below cover the cases
-that are more than a direct syntactic copy; trivial leaf cases
-(literals, identifiers) are elided. The output is a Laurel AST, not
-a derivation — the derivation is obtained by checking the AST against
-Laurel's rules (§Laurel Type System, below).
-
-### Expressions
-
-```
-                                                       [T-Lit]
-──────────────────────────────
-Γ ⊢ n : int   ↦   LiteralInt n
-
-                                                       [T-BinOp]
-Γ ⊢ p₁ ↦ e₁     Γ ⊢ p₂ ↦ e₂
-──────────────────────────────────────────────
-Γ ⊢ p₁ op p₂   ↦   StaticCall (opPrelude op) [e₁, e₂]
-
-
-                                                       [T-CallResolved]
-lookupName(f) = some (.function sig)     resolveKwargs(f, pos, kw) = args
-Γ ⊢ pᵢ ↦ eᵢ
-──────────────────────────────────────────────────────────────────────
-Γ ⊢ f(p₁,…,pₙ, kw=…)   ↦   StaticCall f args
-
-
-                                                       [T-CallUnresolved]
-lookupName(f) = none
-──────────────────────────────
-Γ ⊢ f(…)   ↦   Hole      (nondeterministic — args discarded)
-
-
-                                                       [T-MethodCall]
-resolveMethodName(recv, m) = qualified
-Γ ⊢ recv ↦ e_self       Γ ⊢ pᵢ ↦ eᵢ
-──────────────────────────────────────────────
-Γ ⊢ recv.m(p₁,…,pₙ)   ↦   StaticCall qualified [e_self, e₁,…,eₙ]
-
-
-                                                       [T-FieldRead]
-Γ ⊢ recv ↦ e_obj
-──────────────────────────────
-Γ ⊢ recv.f   ↦   FieldSelect e_obj f
-
-
-                                                       [T-FString]
-Γ ⊢ pᵢ ↦ eᵢ
-─────────────────────────────────────────────────────────────
-Γ ⊢ f"…{p₁}…{pₙ}…"   ↦   StaticCall to_string_any [concat …]
-
-
-                                                       [T-ListLit]
-Γ ⊢ pᵢ ↦ eᵢ
-──────────────────────────────────────────────────────────────────
-Γ ⊢ [p₁,…,pₙ]   ↦   from_ListAny (ListAny_cons e₁ … (ListAny_nil))
-
-
-                                                       [T-DictLit]
-Γ ⊢ kᵢ ↦ Kᵢ     Γ ⊢ vᵢ ↦ Vᵢ
-──────────────────────────────────────────────────────────────────
-Γ ⊢ {k₁:v₁,…}   ↦   from_DictStrAny (DictStrAny_cons K₁ V₁ … empty)
-
-
-                                                       [T-Subscript]
-Γ ⊢ x ↦ ex     Γ ⊢ i ↦ ei
-──────────────────────────────
-Γ ⊢ x[i]   ↦   Any_get(ex, ei)
-
-
-                                                       [T-Slice]
-Γ ⊢ start ↦ es     Γ ⊢ stop ↦ et
-─────────────────────────────────────────────────────────────────────
-Γ ⊢ x[start:stop]   ↦   Any_get(ex, from_Slice(Any..as_int!(es),
-                                                OptSome(Any..as_int!(et))))
-```
-
-### Statements
-
-```
-                                                       [T-Assign]
-Γ ⊢ p ↦ e
-──────────────────────────────
-Γ ⊢ (x = p)   ↦   [Assign [x] e]
-
-
-                                                       [T-AugAssign]
-Γ ⊢ p ↦ v
-──────────────────────────────
-Γ ⊢ (x += p)   ↦   [Assign [x] (PAdd x v)]
-
-
-                                                       [T-TupleAssign]
-Γ ⊢ rhs ↦ e    fresh tmp
-─────────────────────────────────────────────────────
-Γ ⊢ (a,b = rhs)   ↦   [tmp := e; a := Get(tmp,0); b := Get(tmp,1)]
-
-
-                                                       [T-SubscriptAssign]
-Γ ⊢ i ↦ ei     Γ ⊢ v ↦ ev
-─────────────────────────────────────────────────────────────────
-Γ ⊢ (x[i] = v)   ↦   [Assign [x] (Any_sets (cons ei nil) x ev)]
-
-
-                                                       [T-Return]
-Γ ⊢ p ↦ e
-────────────────────────────────────────────────────
-Γ ⊢ (return p)   ↦   [LaurelResult := e; exit $body]
-
-
-                                                       [T-If]
-Γ ⊢ cond ↦ ec     Γ ⊢ thn ↦ sst     Γ ⊢ els ↦ ssf
-──────────────────────────────────────────────────────────
-Γ ⊢ if cond: thn else: els   ↦   [if ec then sst else ssf]
-
-
-                                                       [T-While]
-Γ ⊢ cond ↦ ec     Γ ⊢ body ↦ ssb
-──────────────────────────────────────────
-Γ ⊢ while cond: body   ↦   [while ec do ssb]
-
-
-                                                       [T-For]
-fresh x        Γ ⊢ iter ↦ ei       Γ ⊢ body ↦ ssb     fresh $brk, $cont
-────────────────────────────────────────────────────────────────────────
-Γ ⊢ for x in iter: body   ↦   [label $brk {
-                                 label $cont {
-                                   x := Hole;
-                                   Assume (PIn x ei);
-                                   ssb
-                                 }
-                               }]
-
-
-                                                       [T-Break]
-currentBreakLabel() = $brk
-──────────────────────────
-Γ ⊢ break   ↦   [exit $brk]
-
-
-                                                       [T-Continue]
-currentContinueLabel() = $cont
-──────────────────────────
-Γ ⊢ continue   ↦   [exit $cont]
-
-
-                                                       [T-With]
-Γ ⊢ mgr ↦ em     T = varType(mgr)     Γ ⊢ body ↦ ssb
-───────────────────────────────────────────────────────────────────
-Γ ⊢ with mgr as v: body   ↦   [v := T@__enter__(em); ssb; T@__exit__(em)]
-
-
-                                                       [T-TryExcept]
-Γ ⊢ body ↦ ssb     Γ ⊢ handlerᵢ ↦ ssᵢ    fresh $try
-────────────────────────────────────────────────────────────────────
-Γ ⊢ try: body except Eᵢ: handlerᵢ
-   ↦ [maybe_except : Error := default;
-      label $try { ssb };
-      if isError(maybe_except, Eᵢ) then ssᵢ else …]
-
-
-                                                       [T-Assert]
-Γ ⊢ cond ↦ ec
-──────────────────────────────
-Γ ⊢ assert cond   ↦   [Assert ec]
-
-
-                                                       [T-NewObject]
-Γ ⊢ Foo ↦ class C     Γ ⊢ pᵢ ↦ eᵢ     fresh tmp
-───────────────────────────────────────────────────────────
-Γ ⊢ Foo(p₁,…,pₙ)   (at position v = …)
-   ↦ [Assign [tmp] (New C);
-      StaticCall Foo@__init__ [tmp, e₁,…,eₙ];
-      Assign [v] tmp]
-```
-
-### Module and Function Declarations
-
-```
-                                                       [T-FuncDef]
-Γ ⊢ params : (pᵢ : Tᵢ)          Γ ⊢ body ↦ ssb
-emit mutable param copies for pᵢ mutated in body
-emit scope declarations for names declared in body
-declare output `maybe_except : Error`
-─────────────────────────────────────────────────────────
-Γ ⊢ def f(params) → R: body
-   ↦ procedure f (pᵢ : Tᵢ) → (LaurelResult : R, maybe_except : Error)
-     { scopeDecls; paramCopies; ssb }
-
-
-                                                       [T-ClassDef]
-classFields(C) = (fᵢ : Tᵢ)     Γ ⊢ methodⱼ ↦ procⱼ
-──────────────────────────────────────────────────────────────
-Γ ⊢ class C: …
-   ↦ (typedef C { compositeFields = fᵢ : Tᵢ }, [proc₁,…,procₘ])
-       — methods emitted as top-level procs with `self : C` as first param
-
-
-                                                       [T-Module]
-collectNestedDefs(stmts) = nested     Γ ⊢ nested ↦ procs
-Γ ⊢ topLevel(stmts) ↦ ssMain
-───────────────────────────────────────────────────
-Γ ⊢ stmts
-   ↦ Program { staticProcedures = procs ++ [ __main__ { ssMain } ] }
-       — __main__ MUST carry sourceRangeToMd metadata
-```
 
 ---
 
@@ -907,50 +692,22 @@ signal the coinductive pass uses to bump the grade.
 
 ## Rule → Implementation Mapping
 
-### Translation
-
-| Rule              | Lean function                                   | File                              |
-|-------------------|-------------------------------------------------|-----------------------------------|
-| [T-Lit], [T-BinOp]| `translateExpr` leaf cases                      | `Strata/Languages/Python/Translation.lean` |
-| [T-CallResolved]  | `translateCall` → `resolveKwargs` + StaticCall  | same                              |
-| [T-CallUnresolved]| `translateCall` no-sig branch → `.Hole`         | same                              |
-| [T-MethodCall]    | `resolveMethodName` + `translateCall`           | same                              |
-| [T-FieldRead]     | `translateExpr` (Attribute in expression pos.)  | same                              |
-| [T-FString]       | `translateExpr` (JoinedStr case)                | same                              |
-| [T-ListLit]       | `translateExpr` (List case)                     | same                              |
-| [T-DictLit]       | `translateExpr` (Dict case)                     | same                              |
-| [T-Subscript]     | `translateExpr` (Subscript case)                | same                              |
-| [T-Slice]         | `translateExpr` + `from_Slice` constructor      | same                              |
-| [T-Assign]        | `translateAssignSingle`                         | same                              |
-| [T-AugAssign]     | `translateStmt` (AugAssign)                     | same                              |
-| [T-TupleAssign]   | `unpackTargets`                                 | same                              |
-| [T-SubscriptAssign] | `translateAssignSingle` (Subscript target)    | same                              |
-| [T-Return]        | `translateStmt` (Return case)                   | same                              |
-| [T-If]/[T-While]  | `translateStmt` (If/While cases)                | same                              |
-| [T-For]           | `translateStmt` (For case) + `pushLoopLabel`    | same                              |
-| [T-Break]/[T-Continue] | `currentBreakLabel` / `currentContinueLabel` | same                          |
-| [T-With]          | `translateStmt` (With case)                     | same                              |
-| [T-TryExcept]     | `translateTryExcept`                            | same                              |
-| [T-Assert]        | `translateStmt` (Assert case)                   | same                              |
-| [T-NewObject]     | `translateCall` (class-callee branch)           | same                              |
-| [T-FuncDef]       | `translateFunction` + `emitScopeDeclarations` + `emitMutableParamCopies` | same |
-| [T-ClassDef]      | `translateClass`                                | same                              |
-| [T-Module]        | `translateModule` + `collectNestedDefs`         | same                              |
+The Translation pass has its own mapping in `TRANSLATION.md`.
 
 ### Laurel type system (candidate-derivation checking)
 
 The Laurel rules `[L-*]` are not implemented as an explicit pass in
-Lean; they are the implicit typing discipline that Translation targets
-and Elaboration relies on. They are realized by two facts:
+Lean; they are the implicit typing discipline that Translation
+targets and Elaboration relies on. They are realized by two facts:
 
 - Translation preserves the Laurel-AST invariants needed for each
   `[L-X]`'s side conditions (e.g. `Γ(f) = .function sig` whenever a
   `StaticCall f …` is emitted — see the Illegal-States-Unrepresentable
-  principle in ARCHITECTURE.md).
+  principle in `ARCHITECTURE.md`).
 - Elaboration's dispatch on AST shape (`synthValue`, `synthExpr`,
   `checkProducer`) pattern-matches exactly the same cases as `[L-X]`.
-  If an AST node does not match any `[L-X]`, elaboration falls through
-  to a `Hole` emission (matching `[L-Hole]`).
+  If an AST node does not match any `[L-X]`, elaboration falls
+  through to a `Hole` emission (matching `[L-Hole]`).
 
 ### Elaboration
 
