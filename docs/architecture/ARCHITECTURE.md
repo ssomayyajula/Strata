@@ -427,10 +427,10 @@ inherited from D. The only additional input is the ambient grade e for
 an effectfulCall).
 
 ```
-⟦·⟧⇒ᵥ : (D :: Γ ⊢_L e : A) → ∃V,A. (⟦Γ⟧ ⊢_v V ⇒ A)
-⟦·⟧⇐ᵥ : (B : LowType) → (D :: Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ B)
-⟦·⟧⇒ₚ : (D :: Γ ⊢_L f(e₁,...,eₙ) : A) → ∃M,A,d. (⟦Γ⟧ ⊢_p M ⇒ A & d)
-⟦·⟧⇐ₚ : (A : LowType) → (e : Grade) → (D :: Γ ⊢_L S;rest : A') → ∃M. (⟦Γ⟧ ⊢_p M ⇐ A & e)
+⟦·⟧⇒ᵥ : ∃A. (Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧)
+⟦·⟧⇐ᵥ : (B : LowType) → ∃A. (Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ B)
+⟦·⟧⇒ₚ : ∃A. (Γ ⊢_L f(e₁,...,eₙ) : A) → ∃M,d. (⟦Γ⟧ ⊢_p M ⇒ ⟦A⟧ & d)
+⟦·⟧⇐ₚ : (A : LowType) → (e : Grade) → ∃A'. (Γ ⊢_L S;rest : A') → ∃M. (⟦Γ⟧ ⊢_p M ⇐ A & e)
 ```
 
 ⟦·⟧⇒ₚ has exactly one clause (call with grade > pure); inversion is trivial.
