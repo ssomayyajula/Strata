@@ -293,118 +293,193 @@ it must be bound first.
 ### The Translation  ⟦·⟧ : Laurel Derivations → GFGL Derivations
 
 Elaboration is a function ⟦·⟧ on typing derivations. Given a derivation
-`D :: Γ ⊢_L e : A`, it produces `⟦D⟧ :: Γ' ⊢_G ...` where Γ' ⊇ Γ.
+`D :: Γ ⊢_L e : A`, it produces a GFGL derivation `⟦D⟧ :: Γ' ⊢_G ...`
+where Γ' ⊇ Γ. The output derivation is **bidirectional**: values synthesize
+(⇒), producers check (⇐) against an ambient grade.
 
-GFGL has two syntactic categories: **values** (pure, no effects) and
-**producers** (effectful, sequenced). The translation maps each Laurel
-derivation to either a GFGL value or a GFGL producer depending on the
-grade of the outermost operation.
-
-The ambient grade `e` (from the enclosing procedure) is threaded through
-producer translation — it determines which calling conventions are permitted.
-
-#### ⟦·⟧ on values  (D :: Γ ⊢_L e : A  ↦  V :: Γ' ⊢_v V : eraseType(A))
+#### Value clauses (output: Γ' ⊢_v V ⇒ A)
 
 ```
-⟦Γ ⊢_L n : int⟧           = litInt n
-⟦Γ ⊢_L b : bool⟧          = litBool b
-⟦Γ ⊢_L s : string⟧        = litString s
-⟦Γ ⊢_L x : A⟧             = var x
+D :: Γ ⊢_L n : int                       ↦    ⟦D⟧ :: Γ ⊢_v litInt n ⇒ TInt
 
-⟦Γ ⊢_L f(e₁,...,eₙ) : B⟧  = staticCall f [subsume(⟦D₁⟧, param₁),...,subsume(⟦Dₙ⟧, paramₙ)]
-  where grade(f) = pure, Dᵢ :: Γ ⊢_L eᵢ : Aᵢ
+D :: Γ ⊢_L x : A                         ↦    ⟦D⟧ :: Γ ⊢_v var x ⇒ eraseType(A)
 
-⟦Γ ⊢_L e.f : A⟧           = Box..tVal!(readField($heap, subsume(⟦D_obj⟧, Composite), field))
-  where D_obj :: Γ ⊢_L e : C
 
-⟦Γ ⊢_L ?? : A⟧            = $havoc_N()        in Γ' = Γ, ($havoc_N : () → Any)
-⟦Γ ⊢_L ?  : A⟧            = $hole_N()         in Γ' = Γ, ($hole_N : () → Any)
+D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ
+──────────────────────────────────────────────────
+D :: Γ ⊢_L f(e₁,...,eₙ) : B    where grade(f) = pure
+
+                              ↦
+
+⟦D₁⟧ :: Γ' ⊢_v V₁ ⇐ A₁  ...  ⟦Dₙ⟧ :: Γ' ⊢_v Vₙ ⇐ Aₙ
+──────────────────────────────────────────────────────────
+⟦D⟧ :: Γ' ⊢_v staticCall f [V₁,...,Vₙ] ⇒ eraseType(B)
+
+
+D_obj :: Γ ⊢_L e : C    fields(C,f) = A
+────────────────────────────────────────
+D :: Γ ⊢_L e.f : A
+
+                              ↦
+
+⟦D_obj⟧ :: Γ' ⊢_v V_obj ⇒ T_obj
+─────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ' ⊢_v Box..tVal!(readField($heap, subsume(V_obj, Composite), field)) ⇒ eraseType(A)
+
+
+D :: Γ ⊢_L ?? : A      ↦    ⟦D⟧ :: Γ,$havoc_N ⊢_v $havoc_N() ⇒ Any
+D :: Γ ⊢_L ?  : A      ↦    ⟦D⟧ :: Γ,$hole_N ⊢_v $hole_N() ⇒ Any
 ```
 
-Subsumption: if ⟦D⟧ synthesizes type A but context expects B,
-apply `subsume(A, B) = c` to get `c(⟦D⟧)`.
-
-#### ⟦·⟧ on producers  (D :: Γ ⊢_L S : void  ↦  M :: Γ' ⊢_p M ⇐ void & e)
+**Subsumption (mode switch ⇒ to ⇐):**
 
 ```
-⟦Γ ⊢_L (if c then t else f); rest⟧
-  = ifThenElse (⟦D_c⟧ ⇐ bool) ⟦D_t⟧ ⟦D_f⟧ ⟦D_rest⟧
+⟦D⟧ :: Γ' ⊢_v V ⇒ A    subsume(A, B) = c
+───────────────────────────────────────────
+Γ' ⊢_v c(V) ⇐ B
+```
 
-⟦Γ ⊢_L (while c do body); rest⟧
-  = whileLoop (⟦D_c⟧ ⇐ bool) ⟦D_body⟧ ⟦D_rest⟧
+#### Producer clauses (output: Γ' ⊢_p M ⇐ void & e)
 
-⟦Γ ⊢_L (return e)⟧
-  = returnValue (⟦D_e⟧ ⇐ returnType)
+```
+D_c :: Γ ⊢_L c : bool    D_t :: Γ ⊢_L t    D_f :: Γ ⊢_L f    K :: Γ ⊢_L rest
+─────────────────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (if c then t else f); rest : void
 
-⟦Γ ⊢_L (exit l)⟧
-  = exit l
+                              ↦
 
-⟦Γ ⊢_L (var x:A := e; body)⟧
-  = varDecl x (eraseType A) ⟦D_e⟧ ⟦D_body⟧      in Γ' = Γ, x:eraseType(A)
+⟦D_c⟧ :: Γ' ⊢_v V ⇐ bool    ⟦D_t⟧ :: Γ' ⊢_p M_t ⇐ void & e    ⟦D_f⟧ :: Γ' ⊢_p M_f ⇐ void & e    ⟦K⟧ :: Γ' ⊢_p M_k ⇐ void & e
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ' ⊢_p ifThenElse V M_t M_f M_k ⇐ void & e
 
-⟦Γ ⊢_L (assert c); rest⟧
-  = assert (⟦D_c⟧ ⇐ bool) ⟦D_rest⟧
 
-⟦Γ ⊢_L (assume c); rest⟧
-  = assume (⟦D_c⟧ ⇐ bool) ⟦D_rest⟧
+D_c :: Γ ⊢_L c : bool    D_b :: Γ ⊢_L body    K :: Γ ⊢_L rest
+────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (while c do body); rest : void
 
-⟦Γ ⊢_L {s₁;...;sₙ}ₗ; rest⟧
-  = labeledBlock l ⟦D_body⟧ ⟦D_rest⟧             (labeled)
-  = ⟦D_s₁; ...; D_sₙ; D_rest⟧                   (unlabeled — flatten)
+                              ↦
 
-⟦Γ ⊢_L f(e₁,...,eₙ) : B; rest⟧  where grade(f) = d > pure, d ≤ e
-  = effectfulCall f [⟦Dᵢ⟧] outputs ⟦D_rest⟧
-    in Γ' = Γ, (x₁:T₁,...,xₖ:Tₖ)  [outputs from f's declared signature]
-    where args ANF-lifted by to-rule (see below)
+⟦D_c⟧ :: Γ' ⊢_v V ⇐ bool    ⟦D_b⟧ :: Γ' ⊢_p M_b ⇐ void & e    ⟦K⟧ :: Γ' ⊢_p M_k ⇐ void & e
+─────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ' ⊢_p whileLoop V M_b M_k ⇐ void & e
 
-⟦Γ ⊢_L (x := e); rest⟧  where ⟦D_e⟧ is a value
-  = assign x (subsume(⟦D_e⟧, Γ(x))) ⟦D_rest⟧
 
-⟦Γ ⊢_L (x := f(args)); rest⟧  where grade(f) = d > pure
-  = effectfulCall f [⟦Dᵢ⟧] outputs (assign x (subsume(result, Γ(x))) ⟦D_rest⟧)
+D_e :: Γ ⊢_L e : A
+───────────────────────────
+D :: Γ ⊢_L (return e) : void
 
-⟦Γ ⊢_L (x := if c then a else b); rest⟧
-  = ⟦Γ ⊢_L (if c then (x:=a) else (x:=b)); rest⟧    [desugar]
+                              ↦
 
-⟦Γ ⊢_L (x := new C); rest⟧  where heap ≤ e
-  = varDecl $heap_N Heap (increment $heap) (assign x (MkComposite ...) ⟦D_rest⟧)
-    in Γ' = Γ, $heap_N:Heap
+⟦D_e⟧ :: Γ' ⊢_v V ⇐ returnType
+────────────────────────────────
+⟦D⟧ :: Γ' ⊢_p returnValue V ⇐ A & e
 
-⟦Γ ⊢_L (obj.f := v); rest⟧  where heap ≤ e
-  = varDecl $heap_N Heap (updateField($heap, ⟦D_obj⟧, field, BoxT(⟦D_v⟧))) ⟦D_rest⟧
-    in Γ' = Γ, $heap_N:Heap
 
-⟦Γ ⊢_L (root[idx] := v); rest⟧
-  = assign root (Any_sets [⟦D_idx⟧] ⟦D_root⟧ ⟦D_v⟧) ⟦D_rest⟧
+D :: Γ ⊢_L (exit l) : void       ↦    ⟦D⟧ :: Γ ⊢_p exit l ⇐ void & e
 
-⟦Γ ⊢_L ??; rest⟧
-  = varDecl $havoc_N Any none ⟦D_rest⟧
-    in Γ' = Γ, ($havoc_N : () → Any)
 
-⟦Γ ⊢_L e; rest⟧  (expression-as-statement, grade(e) > pure)
-  = effectfulCall ... outputs ⟦D_rest⟧   [result discarded]
+D_e :: Γ ⊢_L e : A    D_body :: Γ,x:A ⊢_L body
+─────────────────────────────────────────────────
+D :: Γ ⊢_L (var x:A := e; body) : void
+
+                              ↦
+
+⟦D_e⟧ :: Γ' ⊢_v V ⇐ eraseType(A)    ⟦D_body⟧ :: Γ',x:eraseType(A) ⊢_p M ⇐ void & e
+──────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ',x:eraseType(A) ⊢_p varDecl x (eraseType A) V M ⇐ void & e
+
+
+D_c :: Γ ⊢_L c : bool    K :: Γ ⊢_L rest
+──────────────────────────────────────────
+D :: Γ ⊢_L (assert c); rest : void
+
+                              ↦
+
+⟦D_c⟧ :: Γ' ⊢_v V ⇐ bool    ⟦K⟧ :: Γ' ⊢_p M_k ⇐ void & e
+─────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ' ⊢_p assert V M_k ⇐ void & e
+
+
+D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ    K :: Γ ⊢_L rest
+─────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L f(e₁,...,eₙ); rest : void    where grade(f) = d > pure, d ≤ e
+
+                              ↦
+
+⟦D₁⟧ :: Γ' ⊢_v V₁ ⇐ A₁  ...  ⟦Dₙ⟧ :: Γ' ⊢_v Vₙ ⇐ Aₙ    ⟦K⟧ :: Γ',x:B ⊢_p M ⇐ void & (d\e)
+──────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ',x:B ⊢_p effectfulCall f [Vᵢ] [x:B] M ⇐ void & e
+
+
+D_e :: Γ ⊢_L e : A    K :: Γ ⊢_L rest
+───────────────────────────────────────
+D :: Γ ⊢_L (x := e); rest : void    where grade(e) = pure
+
+                              ↦
+
+⟦D_e⟧ :: Γ' ⊢_v V ⇐ eraseType(Γ(x))    ⟦K⟧ :: Γ' ⊢_p M_k ⇐ void & e
+────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ' ⊢_p assign x V M_k ⇐ void & e
+
+
+D :: Γ ⊢_L (x := f(args)); rest : void    where grade(f) = d > pure, d ≤ e
+
+                              ↦
+
+⟦Dᵢ⟧ :: Γ' ⊢_v Vᵢ ⇐ Aᵢ    ⟦K⟧ :: Γ',r:B ⊢_p assign x (subsume(r, Γ(x))) M_k ⇐ void & (d\e)
+──────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ',r:B ⊢_p effectfulCall f [Vᵢ] [r:B] (assign x (subsume(r, Γ(x))) M_k) ⇐ void & e
+
+
+D :: Γ ⊢_L (x := new C); rest : void    where heap ≤ e
+
+                              ↦
+
+⟦K⟧ :: Γ',$h:Heap ⊢_p M_k ⇐ void & e
+────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ',$h:Heap ⊢_p varDecl $h Heap (increment $heap) (assign x (MkComposite ...) M_k) ⇐ void & e
+
+
+D :: Γ ⊢_L ??; rest : void
+
+                              ↦
+
+⟦K⟧ :: Γ',$hv:Any ⊢_p M_k ⇐ void & e
+────────────────────────────────────────────────────
+⟦D⟧ :: Γ',$hv:Any ⊢_p varDecl $hv Any none M_k ⇐ void & e
 ```
 
 #### The to-rule (ANF lifting effectful arguments)
 
-When translating `f(e₁,...,eₙ)` where some eᵢ has grade > pure:
+When an argument eᵢ to a pure call has grade > pure, it is lifted:
 
 ```
-⟦Γ ⊢_L f(e₁,...,eₙ)⟧  where grade(eᵢ) = dᵢ > pure
-  = effectfulCall gᵢ [⟦Dᵢ_args⟧] outputsᵢ
-      (... effectfulCall f [V₁,...,Vₙ] outputs_f ⟦D_rest⟧ ...)
+D₁ :: Γ ⊢_L e₁ : A₁ (grade d₁ > pure)    D₂...Dₙ    K :: Γ ⊢_L rest
+────────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L f(e₁,...,eₙ); rest : void
+
+                              ↦
+
+⟦D₁⟧ args :: Γ' ⊢_v Wᵢ ⇐ ...    ⟦cont⟧ :: Γ',r₁:B₁ ⊢_p ... ⇐ void & (d₁\e)
+────────────────────────────────────────────────────────────────────────────────
+⟦D⟧ :: Γ',r₁:B₁ ⊢_p effectfulCall g₁ [Wᵢ] [r₁:B₁] ⟦cont⟧ ⇐ void & e
+  where ⟦cont⟧ uses r₁ in place of e₁, then processes remaining args
 ```
 
-Each effectful argument is bound before the outer call. Left-to-right,
-deterministic. The bound result replaces eᵢ in the argument list.
+Left-to-right, deterministic. Each lift nests an effectfulCall around the rest.
 
-#### Subsumption (embedded — not a separate clause)
+#### Subsumption (mode switch)
 
-Wherever ⟦D⟧ synthesizes type A but context needs B:
-`subsume(A, B) = c` applies c to the value: `c(⟦D⟧)`.
+Fires wherever synthesis (⇒) meets a checking context (⇐):
 
-The coercion `c : Md → FGLValue → FGLValue` is proof-relevant
-(becomes term structure: `from_int`, `Any..as_Composite!`, etc.).
+```
+⟦D⟧ :: Γ' ⊢_v V ⇒ A    subsume(A, B) = c
+───────────────────────────────────────────
+Γ' ⊢_v c(V) ⇐ B
+```
+
+The coercion `c : Md → FGLValue → FGLValue` is proof-relevant — it becomes
+GFGL term structure (`from_int`, `Any..as_Composite!`, etc.).
 
 
 ### Subsumption Table (Type Coercions)
