@@ -392,6 +392,7 @@ sequenced, carry a grade). Typing is bidirectional.
 ```
 Γ' ⊢_v V ⇒ A           value synthesis (output: type A)
 Γ' ⊢_v V ⇐ A           value checking (input: expected type A)
+Γ' ⊢_p M ⇒ A & d       producer synthesis (output: type A, grade d)
 Γ' ⊢_p M ⇐ A & e       producer checking (input: result type A, ambient grade e)
 ```
 
@@ -417,7 +418,32 @@ f : (A₁,...,Aₙ) → B ∈ Γ'    Γ' ⊢_v V₁ ⇐ A₁  ...  Γ' ⊢_v V�
 Γ' ⊢_v c(V) ⇐ B
 ```
 
-#### Producer rules
+#### Producer synthesis
+
+```
+f : (A₁,...,Aₙ) → B & d ∈ Γ'    Γ' ⊢_v V₁ ⇐ A₁  ...  Γ' ⊢_v Vₙ ⇐ Aₙ
+──────────────────────────────────────────────────────────────────────────
+Γ' ⊢_p f(V₁,...,Vₙ) ⇒ B & d
+```
+
+#### Producer subsumption (mode switch ⇒ₚ to ⇐ₚ)
+
+```
+Γ' ⊢_p M ⇒ B & d    subsume(B, A) = c    Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ A & (d\e)
+──────────────────────────────────────────────────────────────────────────────────────
+Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f [Vᵢ] [x₁:T₁,...,xₖ:Tₖ] (... c(xⱼ) ... M_k) ⇐ A & e
+```
+
+The synthesized producer M is bound via effectfulCall. The outputs
+[x₁:T₁,...,xₖ:Tₖ] come from f's declared signature. The type coercion c
+is applied to the relevant output in the continuation. The continuation
+M_k is checked at the residual grade `d\e`.
+
+This is analogous to value subsumption (⇒ᵥ to ⇐ᵥ) but at the producer level:
+it produces an effectfulCall node wrapping the synthesized call and binding
+its outputs for the continuation.
+
+#### Producer checking rules
 
 ```
 Γ' ⊢_v V ⇐ A
