@@ -446,23 +446,6 @@ With all grades known, term production elaborates each user procedure
 ⟦Γ,p₁:T₁,...,pₘ:Tₘ ⊢_L B : R⟧⇐ₚ at grade procGrades[f]
 ```
 
-#### How the functions interact
-
-⟦·⟧⇐ₚ drives elaboration at ambient grade e = procGrades[f]. For each
-statement it translates sub-expressions via ⟦·⟧⇐ᵥ, translates the
-continuation via ⟦·⟧⇐ₚ at the same grade, and assembles the GFGL producer.
-
-For assignments and expression-statements, ⟦·⟧⇐ₚ calls ⟦·⟧⇒ₚ on the RHS:
-- procGrades[callee] = pure → value. Delegate to ⟦·⟧⇒ᵥ, use via ⟦·⟧⇐ᵥ.
-- procGrades[callee] = d > pure → effectful. Producer subsumption fires:
-  by inversion on the synthesis, construct effectfulCall with the callee's
-  declared outputs. Continuation checked at residual d\e.
-
-The to-rule (ANF lifting): when a pure call has an argument with grade > pure,
-that argument is bound via effectfulCall before the outer call (because GFGL
-values cannot contain producers). Left-to-right (CBV evaluation order).
-
-⟦·⟧⇐ᵥ = ⟦·⟧⇒ᵥ followed by value subsumption.
 
 #### Clauses of ⟦·⟧⇒ᵥ
 
@@ -515,9 +498,6 @@ When procGrades[f] = pure, ⟦·⟧⇒ₚ delegates to ⟦·⟧⇒ᵥ.
 
 #### Producer subsumption in the translation
 
-When ⟦·⟧⇐ₚ at ambient grade e encounters a call with procGrades[g] = d > pure,
-it calls ⟦·⟧⇒ₚ to synthesize, then by inversion obtains g, V₁,...,Vₙ, ⟦B⟧, d.
-It constructs effectfulCall using g's declared outputs [x₁:T₁,...,xₖ:Tₖ]:
 
 ```
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ    K :: Γ ⊢_L rest : A
@@ -581,9 +561,9 @@ D :: Γ ⊢_L (assert c); rest : A
 ⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assert V M_k ⇐ ⟦A⟧ & e
 
 
-D_e :: Γ ⊢_L e : B    K :: Γ ⊢_L rest : A
-────────────────────────────────────────────
-D :: Γ ⊢_L (x := e); rest : A    where e is a value (procGrades[callee] = pure or e is not a call)
+D_e :: Γ ⊢_L e : B    K :: Γ ⊢_L rest : A    ⟦D_e⟧⇒ₚ = .value
+────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (x := e); rest : A
 
         ↦
 
@@ -592,9 +572,9 @@ D :: Γ ⊢_L (x := e); rest : A    where e is a value (procGrades[callee] = pur
 ⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assign x V M_k ⇐ ⟦A⟧ & e
 
 
-D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ    K :: Γ ⊢_L rest : A
-──────────────────────────────────────────────────────────────────────────
-D :: Γ ⊢_L (x := g(e₁,...,eₙ)); rest : A    where procGrades[g] = d > pure
+D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ    K :: Γ ⊢_L rest : A    procGrades[g] = d > pure
+──────────────────────────────────────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (x := g(e₁,...,eₙ)); rest : A
 
         ↦
 
@@ -623,8 +603,59 @@ D :: Γ ⊢_L (exit l) : A
 ⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p exit l ⇐ ⟦A⟧ & e
 ```
 
-The remaining clauses (while, assume, field write, subscript assignment,
-new, ternary desugar, expression-as-statement) follow the same structure.
+D_c :: Γ ⊢_L c : bool    D_b :: Γ ⊢_L body : A    K :: Γ ⊢_L rest : A
+────────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (while c do body); rest : A
+
+        ↦
+
+⟦D_c⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ bool    ⟦D_b⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_b ⇐ ⟦A⟧ & e    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+───────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p whileLoop V M_b M_k ⇐ ⟦A⟧ & e
+
+
+D_c :: Γ ⊢_L c : bool    K :: Γ ⊢_L rest : A
+──────────────────────────────────────────────
+D :: Γ ⊢_L (assume c); rest : A
+
+        ↦
+
+⟦D_c⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V ⇐ bool    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assume V M_k ⇐ ⟦A⟧ & e
+
+
+D_obj :: Γ ⊢_L obj : C    D_v :: Γ ⊢_L v : fieldType(C,f)    K :: Γ ⊢_L rest : A
+────────────────────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (obj.f := v); rest : A
+
+        ↦
+
+⟦D_obj⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_obj ⇐ Composite    ⟦D_v⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_val ⇐ ⟦fieldType(C,f)⟧    ⟦K⟧⇐ₚ :: ⟦Γ⟧,$h:Heap ⊢_p M_k ⇐ ⟦A⟧ & e
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧,$h:Heap ⊢_p varDecl $h Heap (updateField($heap, V_obj, $field.C.f, BoxT(V_val))) M_k ⇐ ⟦A⟧ & e
+
+
+D_r :: Γ ⊢_L root : Any    D_i :: Γ ⊢_L idx : Any    D_v :: Γ ⊢_L v : Any    K :: Γ ⊢_L rest : A
+────────────────────────────────────────────────────────────────────────────────────────────────────
+D :: Γ ⊢_L (root[idx] := v); rest : A
+
+        ↦
+
+⟦D_r⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_r ⇐ Any    ⟦D_i⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_i ⇐ Any    ⟦D_v⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v V_v ⇐ Any    ⟦K⟧⇐ₚ :: ⟦Γ⟧ ⊢_p M_k ⇐ ⟦A⟧ & e
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p assign root (staticCall Any_sets [V_i, V_r, V_v]) M_k ⇐ ⟦A⟧ & e
+
+
+K :: Γ ⊢_L rest : A
+────────────────────
+D :: Γ ⊢_L ??; rest : A
+
+        ↦
+
+⟦K⟧⇐ₚ :: ⟦Γ⟧,$hv:Any ⊢_p M_k ⇐ ⟦A⟧ & e
+────────────────────────────────────────────
+⟦D⟧⇐ₚ :: ⟦Γ⟧,$hv:Any ⊢_p varDecl $hv Any none M_k ⇐ ⟦A⟧ & e
 
 ### Subsumption Table
 
