@@ -338,7 +338,9 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
       pure (.staticCall md callee.text checkedArgs, .TCore "Any")
-  | .Hole _ _ => do let hv ← freshVar "havoc"; pure (.staticCall md hv [], .TCore "Any")
+  | .Hole deterministic _ => do
+    let hv ← freshVar (if deterministic then "hole" else "havoc")
+    pure (.staticCall md hv [], .TCore "Any")
   | _ => failure
 
 -- Γ ⊢_v V ⇐ A (value checking = synth + subsume)
@@ -471,7 +473,16 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (retTy : 
   -- return V
   | .Return valueOpt =>
     match valueOpt with
-    | some v => let cv ← checkValue v (.TCore "Any"); pure (.returnValue md cv)
+    | some v =>
+      let result ← synthExpr v
+      match result with
+      | .value val ty =>
+        let coerced := applySubsume val ty (eraseType retTy)
+        pure (.returnValue md coerced)
+      | .call callee checkedArgs callRetTy callGrade =>
+        guard (Grade.leq callGrade grade)
+        dispatchCall md callee checkedArgs callRetTy callGrade fun rv =>
+          pure (.returnValue md (applySubsume rv (eraseType callRetTy) (eraseType retTy)))
     | none => pure (.returnValue md (.fromNone md))
 
   -- exit label
@@ -536,7 +547,7 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (retTy : 
       modify fun s => { s with heapVar := some freshH }
       extendEnv freshH .THeap do
         let after ← elabRest rest retTy grade
-        pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.returnValue md obj))
+        pure (.varDecl md freshH (.TCore "Heap") (some newHeap) after)
     | none => failure
 
   | .Hole deterministic _ =>
@@ -797,7 +808,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
           | some o => o.type.val | none => .TCore "Any"
         match tryGrades proc.name.text procEnv bodyExpr retTy [.pure, .proc, .err, .heap, .heapErr] with
         | some g =>
-          let g := if proc.outputs.length > 1 then Grade.join g .err else g
+          let g := if proc.outputs.any (fun o => eraseType o.type.val == .TCore "Error") then Grade.join g .err else g
           if knownGrades[proc.name.text]? != some g then
             knownGrades := knownGrades.insert proc.name.text g
             changed := true
