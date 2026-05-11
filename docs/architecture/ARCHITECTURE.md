@@ -296,275 +296,340 @@ Elaboration is defined by four mutually recursive functions on Laurel
 typing derivations, one per mode of the bidirectional GFGL system:
 
 ```
-⟦·⟧⇒ᵥ : (D :: Γ ⊢_L e : A) → (Γ' ⊢_v V ⇒ A')          value synthesis
-⟦·⟧⇐ᵥ : (D :: Γ ⊢_L e : A) → B → (Γ' ⊢_v V ⇐ B)       value checking (B given)
-⟦·⟧⇒ₚ : (D :: Γ ⊢_L e : A) → SynthResult                 producer synthesis (defunctionalized)
-⟦·⟧⇐ₚ : (D :: Γ ⊢_L S : void, K :: Γ ⊢_L rest : void) → Grade → (Γ' ⊢_p M ⇐ void & e)
-                                                            producer checking (grade e given)
+⟦·⟧⇒ᵥ : (D :: Γ ⊢_L e : A) → (⟦D⟧⇒ᵥ :: Γ' ⊢_v V ⇒ A')           value synthesis
+⟦·⟧⇐ᵥ : (D :: Γ ⊢_L e : A, B) → (⟦D⟧⇐ᵥ :: Γ' ⊢_v V ⇐ B)         value checking
+⟦·⟧⇒ₚ : (D :: Γ ⊢_L e : A) → SynthResult                            producer synthesis
+⟦·⟧⇐ₚ : (D :: Γ ⊢_L S; rest : void, e) → (⟦D⟧⇐ₚ :: Γ' ⊢_p M ⇐ void & e)  producer checking
 ```
-
-The output context Γ' ⊇ Γ — elaboration may extend Γ with fresh names.
 
 #### ⟦·⟧⇒ᵥ  (value synthesis)
 
 ```
 D :: Γ ⊢_L n : int
-───────────────────────────────
-⟦D⟧⇒ᵥ  =  Γ ⊢_v litInt n ⇒ TInt
+
+        ↦
+
+⟦D⟧⇒ᵥ :: Γ ⊢_v litInt n ⇒ TInt
 
 
 D :: Γ ⊢_L b : bool
-───────────────────────────────
-⟦D⟧⇒ᵥ  =  Γ ⊢_v litBool b ⇒ TBool
+
+        ↦
+
+⟦D⟧⇒ᵥ :: Γ ⊢_v litBool b ⇒ TBool
 
 
 D :: Γ ⊢_L s : string
-───────────────────────────────
-⟦D⟧⇒ᵥ  =  Γ ⊢_v litString s ⇒ TString
+
+        ↦
+
+⟦D⟧⇒ᵥ :: Γ ⊢_v litString s ⇒ TString
 
 
 (x : A) ∈ Γ
 ─────────────────────
 D :: Γ ⊢_L x : A
-───────────────────────────────
-⟦D⟧⇒ᵥ  =  Γ ⊢_v var x ⇒ eraseType(A)
+
+        ↦
+
+⟦D⟧⇒ᵥ :: Γ ⊢_v var x ⇒ eraseType(A)
 
 
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ
 ──────────────────────────────────────────────────
 D :: Γ ⊢_L f(e₁,...,eₙ) : B    where grade(f) = pure
-─────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇒ᵥ  =  Γ' ⊢_v staticCall f [⟦D₁⟧⇐ᵥ(A₁), ..., ⟦Dₙ⟧⇐ᵥ(Aₙ)] ⇒ eraseType(B)
+
+        ↦
+
+⟦D₁⟧⇐ᵥ :: Γ' ⊢_v V₁ ⇐ A₁  ...  ⟦Dₙ⟧⇐ᵥ :: Γ' ⊢_v Vₙ ⇐ Aₙ
+────────────────────────────────────────────────────────────────
+⟦D⟧⇒ᵥ :: Γ' ⊢_v staticCall f [V₁,...,Vₙ] ⇒ eraseType(B)
 
 
-D_obj :: Γ ⊢_L e : C    fields(C,f) = A    heap ∈ Γ
-─────────────────────────────────────────────────────
+D_obj :: Γ ⊢_L e : C    fields(C,f) = A
+────────────────────────────────────────
 D :: Γ ⊢_L e.f : A
-─────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇒ᵥ  =  Γ' ⊢_v Box..tVal!(readField($heap, ⟦D_obj⟧⇐ᵥ(Composite), $field.C.f)) ⇒ eraseType(A)
+
+        ↦
+
+⟦D_obj⟧⇐ᵥ :: Γ' ⊢_v V_obj ⇐ Composite
+──────────────────────────────────────────────────────────────────────
+⟦D⟧⇒ᵥ :: Γ' ⊢_v Box..tVal!(readField($heap, V_obj, $field.C.f)) ⇒ eraseType(A)
 
 
 D :: Γ ⊢_L ?? : A
-───────────────────────────────────────────
-⟦D⟧⇒ᵥ  =  Γ,$havoc_N ⊢_v staticCall $havoc_N [] ⇒ Any
+
+        ↦
+
+⟦D⟧⇒ᵥ :: Γ,$havoc_N ⊢_v staticCall $havoc_N [] ⇒ Any
 
 
 D :: Γ ⊢_L ? : A
-───────────────────────────────────────────
-⟦D⟧⇒ᵥ  =  Γ,$hole_N ⊢_v staticCall $hole_N [] ⇒ Any
+
+        ↦
+
+⟦D⟧⇒ᵥ :: Γ,$hole_N ⊢_v staticCall $hole_N [] ⇒ Any
 ```
 
 #### ⟦·⟧⇐ᵥ  (value checking = synthesis + subsumption)
 
 ```
-⟦D⟧⇐ᵥ(B)  where  ⟦D⟧⇒ᵥ = (Γ' ⊢_v V ⇒ A)    subsume(A, eraseType(B)) = c
-─────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ᵥ(B)  =  Γ' ⊢_v c(V) ⇐ eraseType(B)
+⟦D⟧⇒ᵥ :: Γ' ⊢_v V ⇒ A    subsume(A, B) = c
+─────────────────────────────────────────────
+⟦D⟧⇐ᵥ :: Γ' ⊢_v c(V) ⇐ B
 
-If subsume(A, eraseType(B)) = refl:  ⟦D⟧⇐ᵥ(B)  =  ⟦D⟧⇒ᵥ  (no coercion needed)
+(If subsume(A, B) = refl, then ⟦D⟧⇐ᵥ = ⟦D⟧⇒ᵥ — no coercion.)
 ```
 
 #### ⟦·⟧⇒ₚ  (producer synthesis — defunctionalized)
-
-Returns a `SynthResult`, not a derivation directly. This is because
-the calling convention (which shapes the output derivation) depends on
-information not yet available at synthesis time (the ambient grade).
 
 ```
 inductive SynthResult where
   | value (V : FGLValue) (A : LowType)         -- grade = pure
   | call (callee args retTy : ...) (d : Grade)  -- grade > pure
+```
 
+```
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ
 ──────────────────────────────────────────────────
 D :: Γ ⊢_L f(e₁,...,eₙ) : B
 
-If grade(f) = pure:
-  ⟦D⟧⇒ₚ  =  .value (⟦D⟧⇒ᵥ).term (⟦D⟧⇒ᵥ).type
-
-If grade(f) = d > pure:
-  ⟦D⟧⇒ₚ  =  .call f [⟦D₁⟧⇐ᵥ(A₁),...,⟦Dₙ⟧⇐ᵥ(Aₙ)] (eraseType B) d
+If grade(f) = pure:   ⟦D⟧⇒ₚ = .value (⟦D⟧⇒ᵥ).V (⟦D⟧⇒ᵥ).A
+If grade(f) = d > pure:   ⟦D⟧⇒ₚ = .call f [⟦D₁⟧⇐ᵥ,...,⟦Dₙ⟧⇐ᵥ] (eraseType B) d
 ```
 
-#### Producer subsumption (⇒ₚ meets ⇐ₚ — the mode switch)
+#### Producer subsumption (⇒ₚ meets ⇐ₚ)
 
-When ⟦·⟧⇒ₚ yields `.call callee args retTy d` and the ambient grade is `e`
-with `d ≤ e`, the subgrading witness `subgrade(d, e)` determines the output:
+When ⟦D⟧⇒ₚ = `.call f args B d` and the ambient grade is `e` with `d ≤ e`:
 
 ```
-⟦D⟧⇒ₚ = .call f args B d    d ≤ e    subgrade(d,e) = conv    K :: Γ ⊢_L rest : void
-─────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇒ₚ = .call f args B d    subgrade(d,e) = conv    K :: Γ ⊢_L rest : void
+────────────────────────────────────────────────────────────────────────────
+
+        ↦
 
 conv = procCall:
-  Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f args [x₁:T₁,...,xₖ:Tₖ] ⟦K⟧⇐ₚ(d\e) ⇐ void & e
-  where [x₁:T₁,...,xₖ:Tₖ] = f's declared outputs
 
-conv = errorCall:
-  Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f args [x₁:T₁,...,xₖ:Tₖ] ⟦K⟧⇐ₚ(d\e) ⇐ void & e
-  where [x₁:T₁,...,xₖ:Tₖ] = f's declared outputs (includes error)
+    ⟦K⟧⇐ₚ :: Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ void & (d\e)
+    ────────────────────────────────────────────────────────────────────────────
+    Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f args [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ void & e
 
 conv = heapCall:
-  Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f ($heap::args) [x₁:T₁,...,xₖ:Tₖ] ⟦K⟧⇐ₚ(d\e) ⇐ void & e
-  where heap prepended to args, [x₁:T₁,...,xₖ:Tₖ] = f's declared outputs (includes $heap)
 
-conv = heapErrorCall:
-  Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f ($heap::args) [x₁:T₁,...,xₖ:Tₖ] ⟦K⟧⇐ₚ(d\e) ⇐ void & e
-  where heap prepended, outputs include both $heap and error
+    ⟦K⟧⇐ₚ :: Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ void & (d\e)
+    ────────────────────────────────────────────────────────────────────────────────────
+    Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f ($heap::args) [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ void & e
+
+(errorCall and heapErrorCall analogous — outputs come from f's declared signature.)
 ```
 
-The continuation ⟦K⟧⇐ₚ is checked at grade `d\e` (the residual).
-
 #### ⟦·⟧⇐ₚ  (producer checking)
-
-All clauses take as input: a derivation D, a continuation K :: Γ ⊢_L rest : void,
-and an ambient grade e. They produce Γ' ⊢_p M ⇐ void & e.
 
 ```
 D_c :: Γ ⊢_L c : bool    D_t :: Γ ⊢_L t : void    D_f :: Γ ⊢_L f : void    K :: Γ ⊢_L rest : void
 ─────────────────────────────────────────────────────────────────────────────────────────────────────
 D :: Γ ⊢_L (if c then t else f); rest : void
-──────────────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ' ⊢_p ifThenElse ⟦D_c⟧⇐ᵥ(bool) ⟦D_t⟧⇐ₚ(e) ⟦D_f⟧⇐ₚ(e) ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦D_c⟧⇐ᵥ :: Γ' ⊢_v V ⇐ bool    ⟦D_t⟧⇐ₚ :: Γ' ⊢_p M_t ⇐ void & e    ⟦D_f⟧⇐ₚ :: Γ' ⊢_p M_f ⇐ void & e    ⟦K⟧⇐ₚ :: Γ' ⊢_p M_k ⇐ void & e
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ' ⊢_p ifThenElse V M_t M_f M_k ⇐ void & e
 
 
 D_c :: Γ ⊢_L c : bool    D_b :: Γ ⊢_L body : void    K :: Γ ⊢_L rest : void
 ──────────────────────────────────────────────────────────────────────────────
 D :: Γ ⊢_L (while c do body); rest : void
-──────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ' ⊢_p whileLoop ⟦D_c⟧⇐ᵥ(bool) ⟦D_b⟧⇐ₚ(e) ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦D_c⟧⇐ᵥ :: Γ' ⊢_v V ⇐ bool    ⟦D_b⟧⇐ₚ :: Γ' ⊢_p M_b ⇐ void & e    ⟦K⟧⇐ₚ :: Γ' ⊢_p M_k ⇐ void & e
+─────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ' ⊢_p whileLoop V M_b M_k ⇐ void & e
 
 
 D_e :: Γ ⊢_L e : A
-───────────────────────────
+───────────────────
 D :: Γ ⊢_L (return e) : void
-─────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ' ⊢_p returnValue ⟦D_e⟧⇐ᵥ(returnType) ⇐ returnType & e
+
+        ↦
+
+⟦D_e⟧⇐ᵥ :: Γ' ⊢_v V ⇐ returnType
+───────────────────────────────────
+⟦D⟧⇐ₚ :: Γ' ⊢_p returnValue V ⇐ returnType & e
 
 
 D :: Γ ⊢_L (exit l) : void
-───────────────────────────
-⟦D⟧⇐ₚ(e) = Γ ⊢_p exit l ⇐ void & e
+
+        ↦
+
+⟦D⟧⇐ₚ :: Γ ⊢_p exit l ⇐ void & e
 
 
 D_init :: Γ ⊢_L e : A    K :: Γ,x:A ⊢_L rest : void
 ──────────────────────────────────────────────────────
 D :: Γ ⊢_L (var x:A := e); rest : void
-──────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ',x:eraseType(A) ⊢_p varDecl x (eraseType A) ⟦D_init⟧⇐ᵥ(A) ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦D_init⟧⇐ᵥ :: Γ' ⊢_v V ⇐ eraseType(A)    ⟦K⟧⇐ₚ :: Γ',x:eraseType(A) ⊢_p M_k ⇐ void & e
+──────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ',x:eraseType(A) ⊢_p varDecl x (eraseType A) V M_k ⇐ void & e
 
 
 D_c :: Γ ⊢_L c : bool    K :: Γ ⊢_L rest : void
 ──────────────────────────────────────────────────
 D :: Γ ⊢_L (assert c); rest : void
-────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ' ⊢_p assert ⟦D_c⟧⇐ᵥ(bool) ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦D_c⟧⇐ᵥ :: Γ' ⊢_v V ⇐ bool    ⟦K⟧⇐ₚ :: Γ' ⊢_p M_k ⇐ void & e
+──────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ' ⊢_p assert V M_k ⇐ void & e
 
 
 D_c :: Γ ⊢_L c : bool    K :: Γ ⊢_L rest : void
 ──────────────────────────────────────────────────
 D :: Γ ⊢_L (assume c); rest : void
-────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ' ⊢_p assume ⟦D_c⟧⇐ᵥ(bool) ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦D_c⟧⇐ᵥ :: Γ' ⊢_v V ⇐ bool    ⟦K⟧⇐ₚ :: Γ' ⊢_p M_k ⇐ void & e
+──────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ' ⊢_p assume V M_k ⇐ void & e
 
 
 D_body :: Γ ⊢_L {s₁;...;sₙ} : void    K :: Γ ⊢_L rest : void
 ───────────────────────────────────────────────────────────────
-D :: Γ ⊢_L {s₁;...;sₙ}ₗ; rest : void    (labeled with l)
-──────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ' ⊢_p labeledBlock l ⟦D_body⟧⇐ₚ(e) ⟦K⟧⇐ₚ(e) ⇐ void & e
+D :: Γ ⊢_L {s₁;...;sₙ}ₗ; rest : void    (labeled)
 
-D :: Γ ⊢_L {s₁;...;sₙ}; rest : void    (unlabeled)
-──────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = ⟦s₁;...;sₙ; rest⟧⇐ₚ(e)     [flatten into continuation]
+        ↦
+
+⟦D_body⟧⇐ₚ :: Γ' ⊢_p M_b ⇐ void & e    ⟦K⟧⇐ₚ :: Γ' ⊢_p M_k ⇐ void & e
+────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ' ⊢_p labeledBlock l M_b M_k ⇐ void & e
 
 
 D₁ :: Γ ⊢_L e₁ : A₁  ...  Dₙ :: Γ ⊢_L eₙ : Aₙ    K :: Γ ⊢_L rest : void
 ─────────────────────────────────────────────────────────────────────────────
-D :: Γ ⊢_L f(e₁,...,eₙ); rest : void    where ⟦D⟧⇒ₚ = .call f args B d
-─────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = apply producer subsumption (⟦D⟧⇒ₚ, K, e)    [see §Producer subsumption]
+D :: Γ ⊢_L f(e₁,...,eₙ); rest : void    where ⟦D⟧⇒ₚ = .call f args B d,  d ≤ e
+
+        ↦
+
+(apply producer subsumption with ⟦D⟧⇒ₚ, K, e — see §Producer subsumption above)
 
 
 D_e :: Γ ⊢_L e : A    K :: Γ ⊢_L rest : void
 ──────────────────────────────────────────────
 D :: Γ ⊢_L (x := e); rest : void    where ⟦D_e⟧⇒ₚ = .value V T
-──────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ' ⊢_p assign x (subsume(V, T, eraseType(Γ(x)))) ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦D_e⟧⇐ᵥ :: Γ' ⊢_v V ⇐ eraseType(Γ(x))    ⟦K⟧⇐ₚ :: Γ' ⊢_p M_k ⇐ void & e
+──────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ' ⊢_p assign x V M_k ⇐ void & e
 
 
 D_e :: Γ ⊢_L e : A    K :: Γ ⊢_L rest : void
 ──────────────────────────────────────────────
 D :: Γ ⊢_L (x := e); rest : void    where ⟦D_e⟧⇒ₚ = .call f args B d,  d ≤ e
-──────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = apply producer subsumption (⟦D_e⟧⇒ₚ, K', e)
-  where K' extends K with: assign x (subsume(result, eraseType(Γ(x)))) in continuation
+
+        ↦
+
+(apply producer subsumption with ⟦D_e⟧⇒ₚ, K' = (assign x (subsume(r, Γ(x))) ⟦K⟧⇐ₚ), e)
 
 
+D_c :: Γ ⊢_L c : bool    D_a :: Γ ⊢_L a : A    D_b :: Γ ⊢_L b : A    K :: Γ ⊢_L rest : void
+────────────────────────────────────────────────────────────────────────────────────────────────
 D :: Γ ⊢_L (x := if c then a else b); rest : void
-────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = ⟦(if c then (x:=a) else (x:=b)); rest⟧⇐ₚ(e)    [desugar, then re-enter ⟦·⟧⇐ₚ]
+
+        ↦
+
+⟦(if c then (x:=a) else (x:=b)); rest⟧⇐ₚ    [desugar — re-enter ⟦·⟧⇐ₚ on desugared form]
 
 
 K :: Γ ⊢_L rest : void
-────────────────────────────────────────
+───────────────────────────────────────
 D :: Γ ⊢_L (x := new C); rest : void    where heap ≤ e
-──────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ',$h:Heap ⊢_p varDecl $h Heap (increment $heap) (assign x (MkComposite ...) ⟦K⟧⇐ₚ(e)) ⇐ void & e
+
+        ↦
+
+⟦K⟧⇐ₚ :: Γ',$h:Heap ⊢_p M_k ⇐ void & e
+──────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ',$h:Heap ⊢_p varDecl $h Heap (increment $heap) (assign x (MkComposite ...) M_k) ⇐ void & e
 
 
 D_obj :: Γ ⊢_L obj : C    D_v :: Γ ⊢_L v : fieldType(C,f)    K :: Γ ⊢_L rest : void
 ──────────────────────────────────────────────────────────────────────────────────────
 D :: Γ ⊢_L (obj.f := v); rest : void    where heap ≤ e
-──────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ',$h:Heap ⊢_p varDecl $h Heap (updateField($heap, ⟦D_obj⟧⇐ᵥ(Composite), $field.C.f, BoxT(⟦D_v⟧⇐ᵥ(fieldType)))) ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦D_obj⟧⇐ᵥ :: Γ' ⊢_v V_obj ⇐ Composite    ⟦D_v⟧⇐ᵥ :: Γ' ⊢_v V_val ⇐ fieldType    ⟦K⟧⇐ₚ :: Γ',$h:Heap ⊢_p M_k ⇐ void & e
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ',$h:Heap ⊢_p varDecl $h Heap (updateField($heap, V_obj, $field.C.f, BoxT(V_val))) M_k ⇐ void & e
 
 
 D_r :: Γ ⊢_L root : Any    D_i :: Γ ⊢_L idx : Any    D_v :: Γ ⊢_L v : Any    K :: Γ ⊢_L rest : void
 ───────────────────────────────────────────────────────────────────────────────────────────────────────
 D :: Γ ⊢_L (root[idx] := v); rest : void
-────────────────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ' ⊢_p assign root (staticCall Any_sets [⟦D_i⟧⇐ᵥ(Any), ⟦D_r⟧⇐ᵥ(Any), ⟦D_v⟧⇐ᵥ(Any)]) ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦D_r⟧⇐ᵥ :: Γ' ⊢_v V_r ⇐ Any    ⟦D_i⟧⇐ᵥ :: Γ' ⊢_v V_i ⇐ Any    ⟦D_v⟧⇐ᵥ :: Γ' ⊢_v V_v ⇐ Any    ⟦K⟧⇐ₚ :: Γ' ⊢_p M_k ⇐ void & e
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ' ⊢_p assign root (staticCall Any_sets [V_i, V_r, V_v]) M_k ⇐ void & e
 
 
 K :: Γ ⊢_L rest : void
-────────────────────────────────
+───────────────────────
 D :: Γ ⊢_L ??; rest : void
-─────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = Γ',$hv:Any ⊢_p varDecl $hv Any none ⟦K⟧⇐ₚ(e) ⇐ void & e
+
+        ↦
+
+⟦K⟧⇐ₚ :: Γ',$hv:Any ⊢_p M_k ⇐ void & e
+──────────────────────────────────────────────────────
+⟦D⟧⇐ₚ :: Γ',$hv:Any ⊢_p varDecl $hv Any none M_k ⇐ void & e
 
 
 D_e :: Γ ⊢_L e : A    K :: Γ ⊢_L rest : void
 ──────────────────────────────────────────────
-D :: Γ ⊢_L e; rest : void    (expression-as-statement)    where ⟦D_e⟧⇒ₚ = .call f args B d
-──────────────────────────────────────────────────────────────────────────────────────────────
-⟦D⟧⇐ₚ(e) = apply producer subsumption (⟦D_e⟧⇒ₚ, K, e)    [result discarded]
+D :: Γ ⊢_L e; rest : void    (expr-as-stmt)    where ⟦D_e⟧⇒ₚ = .call f args B d,  d ≤ e
+
+        ↦
+
+(apply producer subsumption with ⟦D_e⟧⇒ₚ, K, e — result discarded)
 ```
 
 #### The to-rule (ANF lifting effectful arguments)
 
-When ⟦·⟧⇐ᵥ is called on an argument whose ⟦·⟧⇒ₚ yields `.call`:
+When translating a pure call `f(e₁,...,eₙ)` via ⟦·⟧⇒ᵥ but argument eᵢ
+has ⟦Dᵢ⟧⇒ₚ = `.call gᵢ argsᵢ Bᵢ dᵢ` with dᵢ > pure:
 
 ```
-D_arg :: Γ ⊢_L eᵢ : Aᵢ    where ⟦D_arg⟧⇒ₚ = .call g args_g Bᵢ dᵢ,  dᵢ ≤ e
-────────────────────────────────────────────────────────────────────────────────
-The argument is lifted: apply producer subsumption to bind g's result,
-then use the bound variable rᵢ in place of eᵢ in the outer call's args.
+Dᵢ :: Γ ⊢_L eᵢ : Aᵢ    where ⟦Dᵢ⟧⇒ₚ = .call gᵢ argsᵢ Bᵢ dᵢ,  dᵢ ≤ e
 
-Concretely: the outer call is wrapped in effectfulCall g args_g outputs (fun rᵢ → ...)
-and rᵢ (of type Bᵢ) replaces eᵢ in the argument list. Left-to-right, deterministic.
-Each lift nests one more effectfulCall around the continuation.
+        ↦
+
+⟦Dᵢ_args⟧⇐ᵥ :: Γ' ⊢_v Wⱼ ⇐ ...    ⟦cont⟧⇐ₚ :: Γ',rᵢ:Bᵢ ⊢_p ... ⇐ void & (dᵢ\e)
+───────────────────────────────────────────────────────────────────────────────────────
+Γ',rᵢ:Bᵢ ⊢_p effectfulCall gᵢ argsᵢ [rᵢ:Bᵢ] ⟦cont⟧⇐ₚ ⇐ void & e
 ```
 
-#### Subsumption (value: ⇒ᵥ to ⇐ᵥ)
+The bound variable rᵢ replaces eᵢ in the outer call's argument list.
+Left-to-right, deterministic. Each lift nests one effectfulCall.
+
+#### Subsumption (value mode switch: ⇒ᵥ to ⇐ᵥ)
 
 ```
-⟦D⟧⇒ᵥ = (Γ' ⊢_v V ⇒ A)    subsume(A, B) = c
-────────────────────────────────────────────────
-⟦D⟧⇐ᵥ(B) = Γ' ⊢_v c(V) ⇐ B
-
-subsume(A, B) = refl  →  no coercion (identity)
-subsume(A, B) = coerce c  →  c : Md → FGLValue → FGLValue (proof-relevant)
+⟦D⟧⇒ᵥ :: Γ' ⊢_v V ⇒ A    subsume(A, B) = c
+─────────────────────────────────────────────
+⟦D⟧⇐ᵥ :: Γ' ⊢_v c(V) ⇐ B
 ```
+
+The coercion `c : Md → FGLValue → FGLValue` is proof-relevant — it produces
+GFGL term structure (`from_int`, `Any..as_Composite!`, etc.).
+
 
 ### Subsumption Table (Type Coercions)
 
