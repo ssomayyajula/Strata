@@ -356,6 +356,20 @@ continuation at the residual grade:
 [x₁:T₁,...,xₖ:Tₖ] are f's declared outputs. c coerces the relevant
 output in the continuation. K is checked at residual d\e.
 
+The grade d determines the calling convention (what args are prepended,
+what outputs are declared):
+
+```
+subgrade(pure, _)    = value (no effectfulCall — handled by ⟦·⟧⇒ᵥ)
+subgrade(proc, e)    = effectfulCall f args f.outputs K
+subgrade(err, e)     = effectfulCall f args f.outputs K
+subgrade(heap, e)    = effectfulCall f ($heap::args) f.outputs K
+subgrade(heapErr, e) = effectfulCall f ($heap::args) f.outputs K
+```
+
+The outputs always come from f's declared signature. The grade only
+determines whether $heap is prepended to the argument list.
+
 #### Producer checking rules
 
 ```
@@ -601,7 +615,7 @@ D :: Γ ⊢_L (exit l) : A
         ↦
 
 ⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p exit l ⇐ ⟦A⟧ & e
-```
+
 
 D_c :: Γ ⊢_L c : bool    D_b :: Γ ⊢_L body : A    K :: Γ ⊢_L rest : A
 ────────────────────────────────────────────────────────────────────────
