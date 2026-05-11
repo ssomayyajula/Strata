@@ -290,166 +290,122 @@ level, Core emits as `.call`). A runtime procedure like `datetime_now()`
 has no error or heap effects but CANNOT appear inside an expression —
 it must be bound first.
 
-### Judgments
+### The Translation  ⟦·⟧ : Laurel Derivations → GFGL Derivations
+
+Elaboration is a function ⟦·⟧ on typing derivations. Given a derivation
+`D :: Γ ⊢_L e : A`, it produces `⟦D⟧ :: Γ' ⊢_G ...` where Γ' ⊇ Γ.
+
+GFGL has two syntactic categories: **values** (pure, no effects) and
+**producers** (effectful, sequenced). The translation maps each Laurel
+derivation to either a GFGL value or a GFGL producer depending on the
+grade of the outermost operation.
+
+The ambient grade `e` (from the enclosing procedure) is threaded through
+producer translation — it determines which calling conventions are permitted.
+
+#### ⟦·⟧ on values  (D :: Γ ⊢_L e : A  ↦  V :: Γ' ⊢_v V : eraseType(A))
 
 ```
-Γ ⊢_v V ⇒ A                 value synthesis (no grade)
-Γ ⊢_v V ⇐ A                 value checking (no grade)
-Γ ⊢_p M ⇒ A & e             producer synthesis (type + grade output)
-Γ ⊢_p M ⇐ A & e             producer checking (type + grade input)
+⟦Γ ⊢_L n : int⟧           = litInt n
+⟦Γ ⊢_L b : bool⟧          = litBool b
+⟦Γ ⊢_L s : string⟧        = litString s
+⟦Γ ⊢_L x : A⟧             = var x
+
+⟦Γ ⊢_L f(e₁,...,eₙ) : B⟧  = staticCall f [subsume(⟦D₁⟧, param₁),...,subsume(⟦Dₙ⟧, paramₙ)]
+  where grade(f) = pure, Dᵢ :: Γ ⊢_L eᵢ : Aᵢ
+
+⟦Γ ⊢_L e.f : A⟧           = Box..tVal!(readField($heap, subsume(⟦D_obj⟧, Composite), field))
+  where D_obj :: Γ ⊢_L e : C
+
+⟦Γ ⊢_L ?? : A⟧            = $havoc_N()        in Γ' = Γ, ($havoc_N : () → Any)
+⟦Γ ⊢_L ?  : A⟧            = $hole_N()         in Γ' = Γ, ($hole_N : () → Any)
 ```
 
-Grade mode agrees with type mode.
+Subsumption: if ⟦D⟧ synthesizes type A but context expects B,
+apply `subsume(A, B) = c` to get `c(⟦D⟧)`.
 
-### Value Rules
-
-```
-───────────────
-Γ ⊢_v n ⇒ int
-
-(x : A) ∈ Γ
-───────────────
-Γ ⊢_v x ⇒ A
-
-f : (A₁,...,Aₙ) → B    grade(f) = 1    vᵢ ⇐ Aᵢ
-──────────────────────────────────────────────────
-Γ ⊢_v f(v₁,...,vₙ) ⇒ B
-
-Γ ⊢_v V ⇒ A    subsume(A, B) = c
-──────────────────────────────────
-Γ ⊢_v c(V) ⇐ B
-```
-
-### Producer Synthesis
+#### ⟦·⟧ on producers  (D :: Γ ⊢_L S : void  ↦  M :: Γ' ⊢_p M ⇐ void & e)
 
 ```
-f : (A₁,...,Aₙ) → B    grade(f) = d (from procGrades)    d > 1    vᵢ ⇐ Aᵢ
-────────────────────────────────────────────────────────────────────────────────
-Γ ⊢_p f(v₁,...,vₙ) ⇒ B & d
+⟦Γ ⊢_L (if c then t else f); rest⟧
+  = ifThenElse (⟦D_c⟧ ⇐ bool) ⟦D_t⟧ ⟦D_f⟧ ⟦D_rest⟧
 
-───────────────────────────
-Γ ⊢_p (new C) ⇒ Composite & heap
+⟦Γ ⊢_L (while c do body); rest⟧
+  = whileLoop (⟦D_c⟧ ⇐ bool) ⟦D_body⟧ ⟦D_rest⟧
 
-Γ ⊢_v V ⇐ Γ(x)
-───────────────────────────
-Γ ⊢_p (x := V) ⇒ TVoid & 1
+⟦Γ ⊢_L (return e)⟧
+  = returnValue (⟦D_e⟧ ⇐ returnType)
 
-Γ ⊢_v V ⇐ bool
-───────────────────────────
-Γ ⊢_p (assert V) ⇒ TVoid & 1
+⟦Γ ⊢_L (exit l)⟧
+  = exit l
 
-Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇒ TVoid & e
-─────────────────────────────────────────
-Γ ⊢_p (while V do M) ⇒ TVoid & e
+⟦Γ ⊢_L (var x:A := e; body)⟧
+  = varDecl x (eraseType A) ⟦D_e⟧ ⟦D_body⟧      in Γ' = Γ, x:eraseType(A)
 
-Γ ⊢_v V ⇐ bool
-───────────────────────────
-Γ ⊢_p (assume V) ⇒ TVoid & 1
+⟦Γ ⊢_L (assert c); rest⟧
+  = assert (⟦D_c⟧ ⇐ bool) ⟦D_rest⟧
 
-───────────────────────────
-Γ ⊢_p (exit label) ⇒ TVoid & 1
+⟦Γ ⊢_L (assume c); rest⟧
+  = assume (⟦D_c⟧ ⇐ bool) ⟦D_rest⟧
 
-Γ ⊢_p M ⇐ A & e
-───────────────────────────────────────────
-Γ ⊢_p (labeledBlock label M after) ⇐ A & e
-  where after is elaborated ONCE as continuation after the block
+⟦Γ ⊢_L {s₁;...;sₙ}ₗ; rest⟧
+  = labeledBlock l ⟦D_body⟧ ⟦D_rest⟧             (labeled)
+  = ⟦D_s₁; ...; D_sₙ; D_rest⟧                   (unlabeled — flatten)
 
-Γ ⊢_p M ⇒ B & d    Γ ⊢_p (x := M) ⇐ A & e
-  -- Assignment with effectful RHS: desugar via to-rule
-  -- x := f(args) where grade(f) > 1 →
-  --   f(args) to tmp. x := tmp; rest
+⟦Γ ⊢_L f(e₁,...,eₙ) : B; rest⟧  where grade(f) = d > pure, d ≤ e
+  = effectfulCall f [⟦Dᵢ⟧] outputs ⟦D_rest⟧
+    in Γ' = Γ, (x₁:T₁,...,xₖ:Tₖ)  [outputs from f's declared signature]
+    where args ANF-lifted by to-rule (see below)
+
+⟦Γ ⊢_L (x := e); rest⟧  where ⟦D_e⟧ is a value
+  = assign x (subsume(⟦D_e⟧, Γ(x))) ⟦D_rest⟧
+
+⟦Γ ⊢_L (x := f(args)); rest⟧  where grade(f) = d > pure
+  = effectfulCall f [⟦Dᵢ⟧] outputs (assign x (subsume(result, Γ(x))) ⟦D_rest⟧)
+
+⟦Γ ⊢_L (x := if c then a else b); rest⟧
+  = ⟦Γ ⊢_L (if c then (x:=a) else (x:=b)); rest⟧    [desugar]
+
+⟦Γ ⊢_L (x := new C); rest⟧  where heap ≤ e
+  = varDecl $heap_N Heap (increment $heap) (assign x (MkComposite ...) ⟦D_rest⟧)
+    in Γ' = Γ, $heap_N:Heap
+
+⟦Γ ⊢_L (obj.f := v); rest⟧  where heap ≤ e
+  = varDecl $heap_N Heap (updateField($heap, ⟦D_obj⟧, field, BoxT(⟦D_v⟧))) ⟦D_rest⟧
+    in Γ' = Γ, $heap_N:Heap
+
+⟦Γ ⊢_L (root[idx] := v); rest⟧
+  = assign root (Any_sets [⟦D_idx⟧] ⟦D_root⟧ ⟦D_v⟧) ⟦D_rest⟧
+
+⟦Γ ⊢_L ??; rest⟧
+  = varDecl $havoc_N Any none ⟦D_rest⟧
+    in Γ' = Γ, ($havoc_N : () → Any)
+
+⟦Γ ⊢_L e; rest⟧  (expression-as-statement, grade(e) > pure)
+  = effectfulCall ... outputs ⟦D_rest⟧   [result discarded]
 ```
 
-### Assignment Rules (Derived from the To-Rule)
+#### The to-rule (ANF lifting effectful arguments)
 
-Assignments are NOT a separate judgment — they are producers handled
-by `checkProducer`. The RHS determines the structure:
-
-```
--- Pure RHS: value assignment
-Γ ⊢_v V ⇐ Γ(x)
-───────────────────────────
-Γ ⊢_p (x := V; rest) ⇐ A & e    ~~>  assign x V (elabRest rest)
-
--- Effectful RHS: to-rule (ANF-lift)
-grade(f) = d > 1    vᵢ ⇐ Aᵢ
-────────────────────────────────────────────────────────────
-Γ ⊢_p (x := f(args); rest) ⇐ A & e
-  ~~>  mkSmartConstructor f args retTy d (fun rv => assign x (coerce rv) (elabRest rest))
-
--- IfThenElse RHS (ternary): desugar to statement-level if
-Γ ⊢_p (x := if c then a else b; rest) ⇐ A & e
-  ~~>  checkProducer (if c then x:=a else x:=b) rest grade
-
--- Block RHS (class instantiation): desugar
-Γ ⊢_p (x := Block[stmts; last]; rest) ⇐ A & e
-  ~~>  checkProducer (Block[stmts; x:=last]) rest grade
-
--- New RHS: heap effect + coercion to target type
-Γ ⊢_p (x := new C; rest) ⇐ A & e    where grade(heap) ≤ e
-  ~~>  varDecl heap (increment $heap)
-       assign x (coerce (MkComposite ...) targetTy)
-       elabRest rest
-
--- FieldSelect RHS (heap read): Box protocol
-Γ ⊢_p (x := obj.field; rest) ⇐ A & e    where grade(heap) ≤ e
-  ~~>  assign x (Box..tVal!(readField($heap, obj, ClassName.fieldName)))
-       elabRest rest
-
--- Field write target:
-Γ ⊢_p (obj.field := v; rest) ⇐ A & e    where grade(heap) ≤ e
-  ~~>  varDecl heap (updateField($heap, obj, fieldName, BoxT(v)))
-       elabRest rest
-
--- Subscript assignment target:
-Γ ⊢_p (root[i₁][i₂]... := v; rest) ⇐ A & e
-  ~~>  assign root (Any_sets(ListAny[i₁,i₂,...], root, v))
-       elabRest rest
-```
-
-### Producer Checking
+When translating `f(e₁,...,eₙ)` where some eᵢ has grade > pure:
 
 ```
--- If/then/else: branches elaborate standalone, rest goes in `after`
-Γ ⊢_v V ⇐ bool    Γ ⊢_p M ⇐ A & e    Γ ⊢_p N ⇐ A & e    Γ ⊢_p K ⇐ A & e
-──────────────────────────────────────────────────────────────────────────────
-Γ ⊢_p (ifThenElse V M N K) ⇐ A & e
-  where K = elabRest(rest) elaborated ONCE (not duplicated into branches)
-
-Γ ⊢_v V ⇐ T    Γ, x:T ⊢_p body ⇐ A & e
-──────────────────────────────────────────
-Γ ⊢_p (var x:T := V; body) ⇐ A & e
-
-Γ ⊢_p M ⇒ B & d    Γ, x:B ⊢_p N ⇐ A & (d \ e)
-──────────────────────────────────────────────────
-Γ ⊢_p (M to x. N) ⇐ A & e
-
-Γ ⊢_v V ⇐ A
-───────────────────────────
-Γ ⊢_p (return V) ⇐ A & e
+⟦Γ ⊢_L f(e₁,...,eₙ)⟧  where grade(eᵢ) = dᵢ > pure
+  = effectfulCall gᵢ [⟦Dᵢ_args⟧] outputsᵢ
+      (... effectfulCall f [V₁,...,Vₙ] outputs_f ⟦D_rest⟧ ...)
 ```
 
-Mode check for `M to x. N ⇐ A & e`:
-- `A & e`: input (from check context)
-- Synth M → get `B & d` (now `d` is known)
-- Compute `d \ e` (residual — both `d` and `e` known, computable)
-- Check N against `A & (d \ e)` (all inputs determined)
+Each effectful argument is bound before the outer call. Left-to-right,
+deterministic. The bound result replaces eᵢ in the argument list.
 
-The residuated monoid makes this mode-correct: given the whole grade `e` and
-the prefix grade `d`, the continuation grade `d \ e` is uniquely determined.
+#### Subsumption (embedded — not a separate clause)
 
-### Subsumption (synth meets check)
+Wherever ⟦D⟧ synthesizes type A but context needs B:
+`subsume(A, B) = c` applies c to the value: `c(⟦D⟧)`.
 
-```
-Γ ⊢_p M ⇒ A & d    subsume(A, B) = c    subgrade(d, e) = conv
-────────────────────────────────────────────────────────────────
-Γ ⊢_p conv(M, fun rv => return c(rv)) ⇐ B & e
-```
+The coercion `c : Md → FGLValue → FGLValue` is proof-relevant
+(becomes term structure: `from_int`, `Any..as_Composite!`, etc.).
 
-The output term applies BOTH witnesses:
-- `conv` wraps M in the correct binding form (effectfulCall with appropriate outputs)
-- `c` coerces the bound result value inside the continuation
-- `rv` is HOAS-bound (fresh name + extendEnv)
 
 ### Subsumption Table (Type Coercions)
 

@@ -338,7 +338,7 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
       pure (.staticCall md callee.text checkedArgs, .TCore "Any")
-  | .Hole _ _ => pure (.var md "_hole", .TCore "Any")
+  | .Hole _ _ => do let hv ← freshVar "havoc"; pure (.staticCall md hv [], .TCore "Any")
   | _ => failure
 
 -- Γ ⊢_v V ⇐ A (value checking = synth + subsume)
@@ -732,7 +732,7 @@ partial def projectValue : FGLValue → StmtExprMd
   | .litInt md n => mkLaurel md (.LiteralInt n)
   | .litBool md b => mkLaurel md (.LiteralBool b)
   | .litString md s => mkLaurel md (.LiteralString s)
-  | .var md "_hole" => mkLaurel md (.Hole)
+  | .var md "_hole" => mkLaurel md (.Identifier (Identifier.mk "_hole" none))
   | .var md name => mkLaurel md (.Identifier (Identifier.mk name none))
   | .fromInt md v => mkLaurel md (.StaticCall (Identifier.mk "from_int" none) [projectValue v])
   | .fromStr md v => mkLaurel md (.StaticCall (Identifier.mk "from_str" none) [projectValue v])
@@ -759,7 +759,7 @@ partial def projectProducer : FGLProducer → List StmtExprMd
   | .assume md cond body => [mkLaurel md (.Assume (projectValue cond))] ++ projectProducer body
   | .effectfulCall md callee args outputs body =>
     let call := mkLaurel md (.StaticCall (Identifier.mk callee none) (args.map projectValue))
-    let decls := outputs.map fun (n, ty) => mkLaurel md (.LocalVariable (Identifier.mk n none) (mkHighTypeMd md (liftType ty)) (some (mkLaurel md (.Hole))))
+    let decls := outputs.map fun (n, ty) => mkLaurel md (.LocalVariable (Identifier.mk n none) (mkHighTypeMd md (liftType ty)) none)
     let targets := outputs.map fun (n, _) => mkLaurel md (.Identifier (Identifier.mk n none))
     decls ++ [mkLaurel md (.Assign targets call)] ++ projectProducer body
   | .exit md label => [mkLaurel md (.Exit label)]
