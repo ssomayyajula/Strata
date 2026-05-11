@@ -610,12 +610,12 @@ D :: Γ ⊢_L ?  : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v staticCall $ho
 #### ⟦·⟧⇐ᵥ
 
 ```
-⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ B    B ≤ A ↦ c
-────────────────────────────────────────
-⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ A
+⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ B    B ≤ ⟦A⟧ ↦ c
+──────────────────────────────────────────
+⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ ⟦A⟧
 ```
 
-A is the input (checking target). B is discovered by synthesis.
+A : HighType is the input. B : LowType is discovered by synthesis.
 
 #### ⟦·⟧⇒ₚ
 
