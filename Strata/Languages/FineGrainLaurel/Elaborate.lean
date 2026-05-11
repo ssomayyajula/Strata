@@ -535,20 +535,8 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (retTy : 
       pure (.labeledBlock md l blockProd after)
     | none => elabRest (stmts ++ rest) retTy grade
 
-  -- New C (heap effect)
-  | .New classId =>
-    guard (Grade.leq .heap grade)
-    match (← get).heapVar with
-    | some hv =>
-      let ref := FGLValue.staticCall md "Heap..nextReference!" [.var md hv]
-      let newHeap := FGLValue.staticCall md "increment" [.var md hv]
-      let obj := FGLValue.staticCall md "MkComposite" [ref, .staticCall md (classId.text ++ "_TypeTag") []]
-      let freshH ← freshVar "heap"
-      modify fun s => { s with heapVar := some freshH }
-      extendEnv freshH .THeap do
-        let after ← elabRest rest retTy grade
-        pure (.varDecl md freshH (.TCore "Heap") (some newHeap) after)
-    | none => failure
+  -- New C standalone: not permitted (breaks producer synthesis inversion)
+  | .New _ => failure
 
   | .Hole deterministic _ =>
     if deterministic then do
