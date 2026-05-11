@@ -292,7 +292,7 @@ it must be bound first.
 
 ### Laurel Type System (Source)
 
-Laurel is an unsorted, implicitly-effectful CBV language. One judgment:
+Laurel is an impure CBV language. One judgment:
 
 ```
 Γ ⊢_L e : A
