@@ -608,16 +608,11 @@ D :: Γ ⊢_L ?  : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v staticCall $ho
 
 #### ⟦·⟧⇐ᵥ
 
-Synthesize via ⟦·⟧⇒ᵥ, then apply subsumption to the target type ⟦A⟧:
-
 ```
-⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧    ⟦A⟧ ≤ ⟦T⟧ ↦ c
-─────────────────────────────────────────────────
-⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ ⟦T⟧
+⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ A    A ≤ B ↦ c
+────────────────────────────────────────
+⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ B
 ```
-
-Here T is the type expected by the enclosing context (parameter type
-in a call, variable type in an assignment). When ⟦A⟧ = ⟦T⟧, c = id.
 
 #### ⟦·⟧⇒ₚ
 
