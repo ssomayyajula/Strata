@@ -545,7 +545,7 @@ If neither A ≤ B nor A = B: undefined.
 
 ```
 outputs(g)    = declared outputs of g after signature rewriting
-resultIdx(d)  = 1 if d ∈ {proc, err}; 2 if d ∈ {heap, heapErr}
+resultIdx(d)  = 0 if d ∈ {proc, err}; 1 if d ∈ {heap, heapErr}
 $field.C.f    = zero-arity Field datatype constructor (one per class field)
 boxCtor(T)    = boxConstructorName(T)  (e.g. BoxInt, BoxComposite, BoxAny)
 ```
@@ -609,10 +609,12 @@ D :: Γ ⊢_L ?  : A       ↦    ⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v staticCall $ho
 #### ⟦·⟧⇐ᵥ
 
 ```
-⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧    ⟦A⟧ ≤ ⟦B⟧ ↦ c
-───────────────────────────────────────────────
-⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ ⟦B⟧
+⟦D⟧⇒ᵥ :: ⟦Γ⟧ ⊢_v V ⇒ B    B ≤ A ↦ c
+────────────────────────────────────────
+⟦D⟧⇐ᵥ :: ⟦Γ⟧ ⊢_v c(V) ⇐ A
 ```
+
+A is the input (checking target). B is discovered by synthesis.
 
 #### ⟦·⟧⇒ₚ
 
