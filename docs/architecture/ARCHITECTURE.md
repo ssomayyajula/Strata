@@ -423,15 +423,15 @@ in the recursive call on continuation K.
 The translation is four mutually recursive functions.
 
 Synthesis takes Γ and a raw expression, discovers A', and produces a
-GFGL derivation at ⟦A'⟧. Value checking takes A and a Laurel derivation
-at A, and produces a GFGL value checked at A. Producer checking
-additionally takes a grade e.
+GFGL derivation at ⟦A'⟧. Value checking takes A : HighType and a Laurel
+derivation at A, and produces a GFGL value checked at ⟦A⟧. Producer
+checking additionally takes a grade e.
 
 ```
 ⟦·⟧⇒ᵥ : (Γ : Ctx) → (e : StmtExpr) → ∃(A' : HighType)(V : FGLValue). (Γ ⊢_L e : A') → (⟦Γ⟧ ⊢_v V ⇒ ⟦A'⟧)
-⟦·⟧⇐ᵥ : (A : LowType) → (Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ A)
+⟦·⟧⇐ᵥ : (A : HighType) → (Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ ⟦A⟧)
 ⟦·⟧⇒ₚ : (Γ : Ctx) → (e : StmtExpr) → ∃(A' : HighType)(M : FGLProducer)(d : Grade). (Γ ⊢_L e : A') → (⟦Γ⟧ ⊢_p M ⇒ ⟦A'⟧ & d)
-⟦·⟧⇐ₚ : (A : LowType) → (e : Grade) → (Γ ⊢_L S;rest : A) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ A & e)
+⟦·⟧⇐ₚ : (A : HighType) → (e : Grade) → (Γ ⊢_L S;rest : A) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
 
 ⟦·⟧⇒ₚ has exactly one clause (call with grade > pure); inversion is trivial.
