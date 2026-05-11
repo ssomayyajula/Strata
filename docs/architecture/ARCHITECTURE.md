@@ -175,6 +175,51 @@ convention so the variable is in scope for try/except assignment).
 
 **Does NOT:** cast insertion, literal wrapping, effect determination.
 
+### Desugarings
+
+| Python | Laurel |
+|---|---|
+| `x = expr` | `Assign [x] expr` |
+| `a, b = rhs` | `tmp := rhs; a := Get(tmp,0); b := Get(tmp,1)` |
+| `x += v` | `Assign [x] (PAdd x v)` |
+| `x[i] = v` | `Assign [x] (Any_sets(ListAny_cons(i, ListAny_nil()), x, v))` |
+| `x[i][j] = v` | `Assign [x] (Any_sets(ListAny_cons(i, ListAny_cons(j, ListAny_nil())), x, v))` |
+| `x[start:stop]` | `Any_get(x, from_Slice(Any..as_int!(start), OptSome(Any..as_int!(stop))))` |
+| `x[start:]` | `Any_get(x, from_Slice(Any..as_int!(start), OptNone()))` |
+| `return e` | `LaurelResult := e; exit $body` |
+| `Foo(args)` (class) | `Assign [tmp] (New Foo); Foo@__init__(tmp, args)` |
+| `with mgr as v: body` | `v := Type@__enter__(mgr); body; Type@__exit__(mgr)` |
+| `for x in iter: body` | `x := Hole; Assume(PIn(x, iter)); body` (labeled blocks for break/continue) |
+| `[a, b, c]` | `from_ListAny(ListAny_cons(a, ListAny_cons(b, ListAny_cons(c, ListAny_nil()))))` |
+| `{k: v}` | `from_DictStrAny(DictStrAny_cons(k, v, DictStrAny_empty()))` |
+| `f"{expr}"` | `to_string_any(expr)` |
+| `str(x)` | `to_string_any(x)` (via builtinMap) |
+
+### Method FuncSigs
+
+Method FuncSigs include `self` with type `UserDefined className`:
+```
+MyClass@__init__ : (self: MyClass, param1: T1, ...) → Any
+```
+Translation strips self from the FuncSig params when building the proc's
+input list (to avoid duplicate self with the explicit selfParam it adds).
+
+### __main__ Metadata
+
+`__main__` MUST have `sourceRangeToMd filePath default` metadata so Core
+classifies it as a user proc and generates VCs. Without it: vacuous passes.
+
+### Constructor FuncSigs in Prelude
+
+Datatype constructors used by Translation/Elaboration must have FuncSigs
+in `preludeSignatures` so the elaborator can check args at correct types:
+- `from_Slice : (int, OptionInt) → Any`
+- `OptSome : (int) → OptionInt`
+- `OptNone : () → OptionInt`
+- `Any_sets : (ListAny, Any, Any) → Any`
+- `BoxAny : (Any) → Box` (for Any-typed fields)
+
+
 ---
 
 ## Elaboration
@@ -298,10 +343,8 @@ Laurel is an impure CBV language. One judgment:
 Γ ⊢_L e : A
 ```
 
-There is no distinction between expressions and statements — both are `StmtExpr`
-and both carry type A. For expressions, A is their value type. For statement
-sequences, A is the return type of the enclosing procedure (threaded through
-the continuation).
+The context Γ carries variable bindings `(x : A)` and label bindings
+`(l : A)`. Labels are bound by labeled blocks and looked up by exit.
 
 ```
 ─────────────────            ─────────────────            ─────────────────
@@ -352,13 +395,19 @@ C ∈ classes(Γ)
 Γ ⊢_L (while c do body); rest : A
 
 
+Γ,l:A ⊢_L body : A    Γ ⊢_L rest : A
+────────────────────────────────────────
+Γ ⊢_L {body}ₗ; rest : A
+
+
+(l : A) ∈ Γ
+─────────────────────
+Γ ⊢_L (exit l) : A
+
+
 Γ ⊢_L e : A
 ─────────────────────
 Γ ⊢_L (return e) : A
-
-
-─────────────────────
-Γ ⊢_L (exit l) : A
 
 
 Γ ⊢_L c : bool    Γ ⊢_L rest : A
@@ -381,17 +430,11 @@ C ∈ classes(Γ)
 Γ ⊢_L (root[idx] := v); rest : A
 ```
 
-Note: effects are invisible. `f(e₁,...,eₙ)` has the same typing rule regardless
-of whether f is pure or effectful. The grade system exists only in GFGL.
-
 ### GFGL Type System (Target — Bidirectional, Graded)
 
-GFGL has two sorts: **values** (pure, no effects) and **producers** (effectful,
-sequenced, carry a grade). Typing is bidirectional.
-
-The context Γ' carries:
-- **Variables** `(x : A)` — looked up by value synthesis
-- **Labels** `(l : A & e)` — looked up by producer synthesis
+GFGL has two sorts: **values** (pure) and **producers** (effectful, graded).
+Typing is bidirectional. The context carries variable bindings `(x : A)` and
+label bindings `(l : A & e)`.
 
 ```
 Γ' ⊢_v V ⇒ A           value synthesis
@@ -435,20 +478,19 @@ f : (A₁,...,Aₙ) → B & d ∈ Γ'    Γ' ⊢_v V₁ ⇐ A₁  ...  Γ' ⊢_v
 Γ' ⊢_p f(V₁,...,Vₙ) ⇒ B & d
 ```
 
-`exit l` synthesizes by looking up label `l` in the context (labels are
-to producers what variables are to values).
-
 #### Producer subsumption (mode switch ⇒ₚ to ⇐ₚ)
 
 ```
-Γ' ⊢_p M ⇒ B & d    subsume(B, A) = c    Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ A & (d\e)
-──────────────────────────────────────────────────────────────────────────────────────
-Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f [Vᵢ] [x₁:T₁,...,xₖ:Tₖ] (c(xⱼ); M_k) ⇐ A & e
+Γ' ⊢_p M ⇒ B & d    subsume(B, A) = c
+Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p K ⇐ A & (d\e)
+────────────────────────────────────────────────────────────────────────
+Γ' ⊢_p effectfulCall M [x₁:T₁,...,xₖ:Tₖ] (c(xⱼ); K) ⇐ A & e
 ```
 
-The synthesized producer is bound via effectfulCall. Outputs come from
-f's declared signature. Coercion c applied to the result in the continuation.
-Continuation checked at residual `d\e`.
+The synthesized producer M is bound: its outputs [x₁:T₁,...,xₖ:Tₖ]
+(from the callee's declared signature) extend the context for K.
+The coercion c is applied to the relevant output. K is checked at
+the residual grade d\e.
 
 #### Producer checking rules
 
@@ -462,50 +504,47 @@ Continuation checked at residual `d\e`.
 Γ' ⊢_p returnValue V ⇐ A & e
 
 
-Γ' ⊢_v V ⇐ Γ'(x)    Γ' ⊢_p M_k ⇐ A & e
-───────────────────────────────────────────
-Γ' ⊢_p assign x V M_k ⇐ A & e
+Γ' ⊢_v V ⇐ Γ'(x)    Γ' ⊢_p K ⇐ A & e
+────────────────────────────────────────
+Γ' ⊢_p assign x V K ⇐ A & e
 
 
-Γ' ⊢_v V ⇐ T    Γ',x:T ⊢_p M_k ⇐ A & e
-───────────────────────────────────────────
-Γ',x:T ⊢_p varDecl x T V M_k ⇐ A & e
+Γ' ⊢_v V ⇐ T    Γ',x:T ⊢_p K ⇐ A & e
+────────────────────────────────────────
+Γ',x:T ⊢_p varDecl x T V K ⇐ A & e
 
 
-Γ' ⊢_v V ⇐ bool    Γ' ⊢_p M_t ⇐ A & e    Γ' ⊢_p M_f ⇐ A & e    Γ' ⊢_p M_k ⇐ A & e
+Γ' ⊢_v V ⇐ bool    Γ' ⊢_p M_t ⇐ A & e    Γ' ⊢_p M_f ⇐ A & e    Γ' ⊢_p K ⇐ A & e
 ─────────────────────────────────────────────────────────────────────────────────────────
-Γ' ⊢_p ifThenElse V M_t M_f M_k ⇐ A & e
+Γ' ⊢_p ifThenElse V M_t M_f K ⇐ A & e
 
 
-Γ' ⊢_v V ⇐ bool    Γ' ⊢_p M_b ⇐ A & e    Γ' ⊢_p M_k ⇐ A & e
+Γ' ⊢_v V ⇐ bool    Γ' ⊢_p M_b ⇐ A & e    Γ' ⊢_p K ⇐ A & e
 ─────────────────────────────────────────────────────────────────
-Γ' ⊢_p whileLoop V M_b M_k ⇐ A & e
+Γ' ⊢_p whileLoop V M_b K ⇐ A & e
 
 
-Γ' ⊢_v V ⇐ bool    Γ' ⊢_p M_k ⇐ A & e
+Γ' ⊢_v V ⇐ bool    Γ' ⊢_p K ⇐ A & e
 ─────────────────────────────────────────
-Γ' ⊢_p assert V M_k ⇐ A & e
+Γ' ⊢_p assert V K ⇐ A & e
 
 
-Γ' ⊢_v V ⇐ bool    Γ' ⊢_p M_k ⇐ A & e
+Γ' ⊢_v V ⇐ bool    Γ' ⊢_p K ⇐ A & e
 ─────────────────────────────────────────
-Γ' ⊢_p assume V M_k ⇐ A & e
+Γ' ⊢_p assume V K ⇐ A & e
 
 
-Γ',l:(A & e) ⊢_p M_b ⇐ A & e    Γ' ⊢_p M_k ⇐ A & e
+Γ',l:(A & e) ⊢_p M_b ⇐ A & e    Γ' ⊢_p K ⇐ A & e
 ───────────────────────────────────────────────────────
-Γ' ⊢_p labeledBlock l M_b M_k ⇐ A & e
+Γ' ⊢_p labeledBlock l M_b K ⇐ A & e
 
 
 f : (A₁,...,Aₙ) → [x₁:T₁,...,xₖ:Tₖ] & d ∈ Γ'
 Γ' ⊢_v V₁ ⇐ A₁  ...  Γ' ⊢_v Vₙ ⇐ Aₙ
-Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ A & (d\e)
+Γ',x₁:T₁,...,xₖ:Tₖ ⊢_p K ⇐ A & (d\e)
 ────────────────────────────────────────────────────────────────
-Γ' ⊢_p effectfulCall f [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ A & e
+Γ' ⊢_p effectfulCall f [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] K ⇐ A & e
 ```
-
-Note: `labeledBlock l M_b M_k` binds label l in the context for M_b — so
-`exit l` in the body can synthesize. M_k is checked in the outer context.
 
 ### Elaboration (⟦·⟧ : Laurel Derivations → GFGL Derivations)
 
@@ -520,98 +559,35 @@ on types (⟦A⟧ = eraseType(A)) and contexts (⟦Γ⟧ = { (x : ⟦A⟧) | (x:
 ⟦·⟧⇐ₚ : (Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
 
-These four functions need one piece of global information: the grade of every
-procedure in the program. This is computed first, then the functions run.
+These functions need procGrades[g] for every callee g. This is computed
+by grade inference before term production begins.
 
 #### Grade inference
 
-Every callee's grade must be known before term production can begin, because
-the grade determines whether an expression is a value or a producer (which
-determines whether ⟦·⟧⇒ᵥ or ⟦·⟧⇒ₚ handles it).
-
-Runtime procedure grades are read directly from their signatures:
-
-```
-gradeFromSignature(proc) :=
-  if proc has Error output and Heap input → heapErr
-  if proc has Heap input → heap
-  if proc has Error output → err
-  if proc.isFunctional → pure
-  else → proc
-```
-
-User procedure grades are discovered by coinduction. The idea: attempt
-⟦body⟧⇐ₚ at increasing grades until one succeeds. ⟦·⟧⇐ₚ fails (via an
-undefined residual) when the body contains a call whose grade exceeds the
-trial grade. The smallest grade that succeeds is the procedure's grade.
-
-```
-discoverGrades(program, Γ) → procGrades:
-  1. procGrades[f] := gradeFromSignature(f) for all runtime procs
-  2. procGrades[f] := pure for all user procs
-  3. For each user proc f with body M:
-       procGrades[f] := min { g | ⟦M⟧⇐ₚ at grade g succeeds }
-  4. Repeat step 3 until no grade changes.
-```
-
-Convergence: the lattice has 5 elements, grades only increase, so at most
-5 iterations. Mutual recursion works because procGrades is an assumption
-read during the trial — if too low, the trial fails, the grade bumps, and
-the next round succeeds.
-
-#### Term production
-
-With procGrades known, term production elaborates each user procedure body
-by calling ⟦body⟧⇐ₚ at grade `procGrades[f]`. The grade is a pure read
-from procGrades throughout — never mutated during term production.
-
-The elaborator also needs the types of all callees (user and runtime) to
-insert coercions at call boundaries. This is provided by the TypeEnv (from
-Resolution). The elaborator's environment is:
-
-```
-ElabEnv:
-  typeEnv   : TypeEnv          -- signatures for all callees (user + runtime)
-  program   : Laurel.Program   -- user procedure bodies (to elaborate)
-  runtime   : Laurel.Program   -- runtime procedure bodies (never elaborated)
-  procGrades: HashMap          -- grades for all callees (computed above)
-```
-
-After term production, each user procedure's signature is rewritten to match
-its grade's calling convention: heap-graded procedures gain a `$heap_in`
-input and `$heap` output; their bodies are prepended with `$heap := $heap_in`.
+Runtime grades are read from signatures via gradeFromSignature.
+User grades are discovered by coinduction: attempt ⟦body⟧⇐ₚ at increasing
+grades until one succeeds (the residual d\e is undefined when a callee's
+grade d exceeds the trial grade e, causing failure). The smallest succeeding
+grade is the procedure's grade. The lattice has 5 elements so convergence
+takes at most 5 iterations.
 
 #### How the functions interact
 
-⟦·⟧⇐ₚ drives elaboration. For each Laurel statement it encounters:
+⟦·⟧⇐ₚ drives elaboration at ambient grade e = procGrades[f] (or a residual
+from an enclosing effectfulCall). For each statement:
 
-1. Sub-expressions (conditions, RHS values) are translated via ⟦·⟧⇐ᵥ at
-   their expected types.
-2. The continuation (remaining statements) is translated via ⟦·⟧⇐ₚ at the
-   same or reduced grade.
-3. These are assembled into a GFGL producer checking derivation.
+- Sub-expressions are translated via ⟦·⟧⇐ᵥ at their expected type.
+- The continuation is translated via ⟦·⟧⇐ₚ at the same ambient grade.
+- For assignments, ⟦·⟧⇒ₚ determines if the RHS is a value or producer:
+  - procGrades[callee] = pure → delegate to ⟦·⟧⇒ᵥ, use result as value.
+  - procGrades[callee] = d > pure → producer subsumption fires:
+    ⟦·⟧⇒ₚ produces a synthesis derivation, which is bound via effectfulCall.
+    The continuation is checked at grade d\e.
 
-The key decision point is **assignments and expression-statements**: ⟦·⟧⇐ₚ
-calls ⟦·⟧⇒ₚ on the RHS, which looks up `procGrades[callee]`:
-
-- If `procGrades[callee] = pure`: the expression is a value. ⟦·⟧⇒ₚ
-  delegates to ⟦·⟧⇒ᵥ. The result is used directly via ⟦·⟧⇐ᵥ.
-- If `procGrades[callee] = d > pure`: the expression is a producer.
-  Producer subsumption fires: the call is bound via effectfulCall with
-  the callee's declared outputs, and the continuation is checked at
-  grade `d \ procGrades[f]` (the residual of the callee's grade in
-  the enclosing procedure's grade).
-
-⟦·⟧⇐ᵥ = ⟦·⟧⇒ᵥ followed by the GFGL value subsumption rule. It
-synthesizes the value's type, then applies the coercion from the
-subsumption table if the synthesized type doesn't match the expected type.
-
-**ANF lifting (the to-rule):** When translating a pure call f(e₁,...,eₙ)
-but argument eᵢ has `procGrades[eᵢ's callee] > pure`, that argument must
-be bound before the outer call (because GFGL values cannot contain
-producers). The argument is lifted into an effectfulCall binding that wraps
-the entire outer expression. Arguments are processed left-to-right (CBV
-evaluation order). Each lift extends the context and nests one effectfulCall.
+The to-rule: when a pure call f(e₁,...,eₙ) has an argument eᵢ with
+procGrades[callee(eᵢ)] > pure, that argument is ANF-lifted into an
+effectfulCall binding before the outer call. This is because GFGL values
+cannot contain producers. Arguments are processed left-to-right (CBV order).
 
 #### Clauses of ⟦·⟧⇒ᵥ
 
@@ -673,28 +649,31 @@ D :: Γ ⊢_L f(e₁,...,eₙ) : B    where procGrades[f] = d > pure
 
 When procGrades[f] = pure, ⟦·⟧⇒ₚ delegates to ⟦·⟧⇒ᵥ.
 
-#### Producer subsumption
+#### Producer subsumption in the translation
 
-When ⟦·⟧⇐ₚ at ambient grade e encounters an expression with ⟦·⟧⇒ₚ grade d,
-it constructs the effectfulCall binding. The callee's declared outputs
-[x₁:T₁,...,xₖ:Tₖ] extend the context for the continuation, which is
-checked at the residual grade d\e:
+When ⟦·⟧⇐ₚ at ambient grade e encounters a call with procGrades[g] = d > pure,
+it calls ⟦·⟧⇒ₚ to get the synthesis derivation, then applies the GFGL producer
+subsumption rule to bind it:
 
 ```
-⟦D⟧⇒ₚ :: ⟦Γ⟧ ⊢_p f(Vᵢ) ⇒ ⟦B⟧ & d    K :: Γ ⊢_L rest : A    ambient = e
-────────────────────────────────────────────────────────────────────────────────
+⟦D⟧⇒ₚ :: ⟦Γ⟧ ⊢_p g(V₁,...,Vₙ) ⇒ ⟦B⟧ & d    K :: Γ ⊢_L rest : A
+──────────────────────────────────────────────────────────────────────
 
         ↦
 
 ⟦K⟧⇐ₚ :: ⟦Γ⟧,x₁:T₁,...,xₖ:Tₖ ⊢_p M_k ⇐ ⟦A⟧ & (d\e)
-────────────────────────────────────────────────────────────────────────────────────
-⟦Γ⟧,x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall f [Vᵢ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
+────────────────────────────────────────────────────────────────────────────────────────────
+⟦Γ⟧,x₁:T₁,...,xₖ:Tₖ ⊢_p effectfulCall g [V₁,...,Vₙ] [x₁:T₁,...,xₖ:Tₖ] M_k ⇐ ⟦A⟧ & e
 ```
+
+The `g` in the effectfulCall is the same callee from the synthesis premise.
+The outputs [x₁:T₁,...,xₖ:Tₖ] are g's declared outputs (from its signature
+in typeEnv). The continuation M_k is checked at grade d\e (the residual).
 
 #### Clauses of ⟦·⟧⇐ₚ
 
-All clauses receive the ambient grade e = procGrades[f] (or a residual
-thereof from an enclosing effectfulCall).
+All clauses receive ambient grade e (= procGrades[f] for the enclosing
+procedure, or d\e from an enclosing effectfulCall).
 
 ```
 D_c :: Γ ⊢_L c : bool    D_t :: Γ ⊢_L t : A    D_f :: Γ ⊢_L f : A    K :: Γ ⊢_L rest : A
@@ -755,13 +734,12 @@ If procGrades[callee(e)] = pure:
 
 If procGrades[callee(e)] = d > pure:
 
-    (producer subsumption at ambient e with continuation:
-     assign x (subsume(bound_result, ⟦Γ(x)⟧)) ⟦K⟧⇐ₚ)
+    (producer subsumption: bind via effectfulCall, assign result to x in continuation)
 
 
-D_body :: Γ ⊢_L {s₁;...;sₙ} : A    K :: Γ ⊢_L rest : A
-──────────────────────────────────────────────────────────
-D :: Γ ⊢_L {s₁;...;sₙ}ₗ; rest : A    (labeled)
+D_body :: Γ,l:A ⊢_L body : A    K :: Γ ⊢_L rest : A
+──────────────────────────────────────────────────────
+D :: Γ ⊢_L {body}ₗ; rest : A
 
         ↦
 
@@ -770,17 +748,17 @@ D :: Γ ⊢_L {s₁;...;sₙ}ₗ; rest : A    (labeled)
 ⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p labeledBlock l M_b M_k ⇐ ⟦A⟧ & e
 
 
-D :: Γ ⊢_L (exit l) : A    (l : ⟦A⟧ & e) ∈ ⟦Γ⟧
+(l : A) ∈ Γ
+─────────────────────
+D :: Γ ⊢_L (exit l) : A
 
         ↦
 
-⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p exit l ⇐ ⟦A⟧ & e    (via producer synthesis: look up l)
+⟦D⟧⇐ₚ :: ⟦Γ⟧ ⊢_p exit l ⇐ ⟦A⟧ & e    (via producer synthesis: (l : ⟦A⟧ & e) ∈ ⟦Γ⟧)
 ```
 
 The remaining clauses (while, assume, field write, subscript assignment,
-new, ternary desugar, expression-as-statement) follow the same structure:
-sub-expressions via ⟦·⟧⇐ᵥ, continuation via ⟦·⟧⇐ₚ at the same ambient
-grade e, assembled into the corresponding GFGL producer checking derivation.
+new, ternary desugar, expression-as-statement) follow the same structure.
 
 
 ## Projection
@@ -815,51 +793,6 @@ because each GFGL term carries its own. Coercions inserted by subsumption inheri
 
 ---
 
-## Translation Desugarings
-
-| Python | Laurel |
-|---|---|
-| `x = expr` | `Assign [x] expr` |
-| `a, b = rhs` | `tmp := rhs; a := Get(tmp,0); b := Get(tmp,1)` |
-| `x += v` | `Assign [x] (PAdd x v)` |
-| `x[i] = v` | `Assign [x] (Any_sets(ListAny_cons(i, ListAny_nil()), x, v))` |
-| `x[i][j] = v` | `Assign [x] (Any_sets(ListAny_cons(i, ListAny_cons(j, ListAny_nil())), x, v))` |
-| `x[start:stop]` | `Any_get(x, from_Slice(Any..as_int!(start), OptSome(Any..as_int!(stop))))` |
-| `x[start:]` | `Any_get(x, from_Slice(Any..as_int!(start), OptNone()))` |
-| `return e` | `LaurelResult := e; exit $body` |
-| `Foo(args)` (class) | `Assign [tmp] (New Foo); Foo@__init__(tmp, args)` |
-| `with mgr as v: body` | `v := Type@__enter__(mgr); body; Type@__exit__(mgr)` |
-| `for x in iter: body` | `x := Hole; Assume(PIn(x, iter)); body` (labeled blocks for break/continue) |
-| `[a, b, c]` | `from_ListAny(ListAny_cons(a, ListAny_cons(b, ListAny_cons(c, ListAny_nil()))))` |
-| `{k: v}` | `from_DictStrAny(DictStrAny_cons(k, v, DictStrAny_empty()))` |
-| `f"{expr}"` | `to_string_any(expr)` |
-| `str(x)` | `to_string_any(x)` (via builtinMap) |
-
-### Method FuncSigs
-
-Method FuncSigs include `self` with type `UserDefined className`:
-```
-MyClass@__init__ : (self: MyClass, param1: T1, ...) → Any
-```
-Translation strips self from the FuncSig params when building the proc's
-input list (to avoid duplicate self with the explicit selfParam it adds).
-
-### __main__ Metadata
-
-`__main__` MUST have `sourceRangeToMd filePath default` metadata so Core
-classifies it as a user proc and generates VCs. Without it: vacuous passes.
-
-### Constructor FuncSigs in Prelude
-
-Datatype constructors used by Translation/Elaboration must have FuncSigs
-in `preludeSignatures` so the elaborator can check args at correct types:
-- `from_Slice : (int, OptionInt) → Any`
-- `OptSome : (int) → OptionInt`
-- `OptNone : () → OptionInt`
-- `Any_sets : (ListAny, Any, Any) → Any`
-- `BoxAny : (Any) → Box` (for Any-typed fields)
-
----
 
 ## Python Construct Coverage
 
