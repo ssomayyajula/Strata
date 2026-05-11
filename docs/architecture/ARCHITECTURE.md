@@ -437,18 +437,21 @@ in the recursive call on continuation K.
 **Output:** a GFGL.Program (same procedures with graded, effect-explicit bodies).
 
 The translation is four mutually recursive functions. Each takes a Laurel
-typing derivation D. The type A and context Γ are inherited from D — they
-are not separate inputs. The only additional inputs are:
-- ⟦·⟧⇐ᵥ receives a target type B (from the enclosing checking context)
-- ⟦·⟧⇐ₚ receives an ambient grade e (from the procedure's inferred grade,
-  or the residual d\e after an effectfulCall)
+typing derivation D — the context Γ, type A, and term structure are all
+inherited from D. The only additional input is the ambient grade e for
+⟦·⟧⇐ₚ (from the procedure's inferred grade, or the residual d\e after
+an effectfulCall).
 
 ```
 ⟦·⟧⇒ᵥ : (D :: Γ ⊢_L e : A) → ∃V. (⟦Γ⟧ ⊢_v V ⇒ ⟦A⟧)
-⟦·⟧⇐ᵥ : (D :: Γ ⊢_L e : A) → (B : LowType) → ∃V. (⟦Γ⟧ ⊢_v V ⇐ B)
+⟦·⟧⇐ᵥ = ⟦·⟧⇒ᵥ composed with subsumption (target ⟦T⟧ from enclosing derivation)
 ⟦·⟧⇒ₚ : (D :: Γ ⊢_L f(e₁,...,eₙ) : A) → ∃M. (⟦Γ⟧ ⊢_p M ⇒ ⟦A⟧ & procGrades[f])
 ⟦·⟧⇐ₚ : (D :: Γ ⊢_L S;rest : A) → (e : Grade) → ∃M. (⟦Γ⟧ ⊢_p M ⇐ ⟦A⟧ & e)
 ```
+
+⟦·⟧⇐ᵥ is not an independent function — it synthesizes via ⟦·⟧⇒ᵥ then
+applies `subsume(⟦A⟧, ⟦T⟧)` where T is the type the enclosing Laurel
+derivation expects at that position (parameter type, assignment target type).
 
 ⟦·⟧⇒ₚ has exactly one clause (call with grade > pure); inversion is trivial.
 
