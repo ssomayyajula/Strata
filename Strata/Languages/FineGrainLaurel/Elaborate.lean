@@ -410,7 +410,7 @@ partial def lookupProcOutputs (callee : String) : ElabM (List (String × HighTyp
 
 -- Dispatch smart constructor based on grade
 -- Architecture §"Subgrading Witness"
-private partial def dispatchCall (md : Md) (callee : String) (args : List FGLValue) (retTy : HighType)
+private partial def dispatchCall (md : Md) (callee : String) (args : List FGLValue)
     (callGrade : Grade) (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
   match callGrade with
   | .pure => body (FGLValue.staticCall md callee args)
@@ -429,9 +429,9 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
       let result ← synthExpr arg
       match result with
       | .value val _ => go rest [] (val :: acc)
-      | .call callee checkedArgs retTy callGrade =>
+      | .call callee checkedArgs _retTy callGrade =>
         guard (Grade.leq callGrade grade)
-        dispatchCall arg.md callee checkedArgs retTy callGrade fun rv => go rest [] (rv :: acc)
+        dispatchCall arg.md callee checkedArgs callGrade fun rv => go rest [] (rv :: acc)
     | arg :: rest, pty :: ptysRest, acc => do
       let result ← synthExpr arg
       match result with
@@ -440,7 +440,7 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
         go rest ptysRest (coerced :: acc)
       | .call callee checkedArgs retTy callGrade =>
         guard (Grade.leq callGrade grade)
-        dispatchCall arg.md callee checkedArgs retTy callGrade fun rv =>
+        dispatchCall arg.md callee checkedArgs callGrade fun rv =>
           go rest ptysRest (applySubsume rv (eraseType retTy) (eraseType pty) :: acc)
   go args paramTypes []
 
@@ -481,7 +481,7 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (retTy : 
         pure (.returnValue md coerced)
       | .call callee checkedArgs callRetTy callGrade =>
         guard (Grade.leq callGrade grade)
-        dispatchCall md callee checkedArgs callRetTy callGrade fun rv =>
+        dispatchCall md callee checkedArgs callGrade fun rv =>
           pure (.returnValue md (applySubsume rv (eraseType callRetTy) (eraseType retTy)))
     | none => pure (.returnValue md (.fromNone md))
 
@@ -524,7 +524,7 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (retTy : 
     checkArgsK args params grade fun checkedArgs => do
       match callGrade with
       | .pure => elabRest rest retTy grade
-      | _ => dispatchCall md callee.text checkedArgs retTy callGrade fun _rv => elabRest rest retTy grade
+      | _ => dispatchCall md callee.text checkedArgs callGrade fun _rv => elabRest rest retTy grade
 
   -- Block (labeled or unlabeled)
   | .Block stmts label =>
@@ -664,7 +664,7 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
           let coerced := applySubsume cv (eraseType retHty) (eraseType targetTy)
           assignOrDecl coerced
         | _ =>
-          dispatchCall md callee.text checkedArgs retHty callGrade fun rv => do
+          dispatchCall md callee.text checkedArgs callGrade fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
     -- FieldSelect RHS (heap read)
