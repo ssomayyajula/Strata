@@ -889,14 +889,14 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
   let holeProcs := allHoles.map fun (name, deterministic, inputs) =>
     let params := inputs.map fun (pName, pType) =>
       ({ name := Identifier.mk pName none, type := ⟨pType, #[]⟩ } : Laurel.Parameter)
-    let outputParam : Laurel.Parameter := { name := Identifier.mk "result" none, type := ⟨.TCore "Any", #[]⟩ }
+    let outputParam : Laurel.Parameter := { name := Identifier.mk "result" none, type := ⟨.UserDefined (Identifier.mk "Any" none), #[]⟩ }
     { name := Identifier.mk name none
       inputs := if deterministic then params else []
       outputs := [outputParam]
       preconditions := []
       determinism := if deterministic then .deterministic none else .nondeterministic
       decreases := none
-      isFunctional := deterministic
+      isFunctional := true
       body := .Opaque [] none []
       md := #[] : Laurel.Procedure }
   let result := if hasHeap then
