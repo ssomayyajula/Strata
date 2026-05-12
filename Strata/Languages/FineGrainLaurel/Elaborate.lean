@@ -471,7 +471,16 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (retTy : 
   -- return V
   | .Return valueOpt =>
     match valueOpt with
-    | some v => let cv ← checkValue v (.TCore "Any"); pure (.returnValue md cv)
+    | some v =>
+      let result ← synthExpr v
+      match result with
+      | .value val ty =>
+        let coerced := applySubsume val ty (eraseType retTy)
+        pure (.returnValue md coerced)
+      | .call callee checkedArgs callRetTy callGrade =>
+        guard (Grade.leq callGrade grade)
+        dispatchCall md callee checkedArgs callGrade fun rv =>
+          pure (.returnValue md (applySubsume rv (eraseType callRetTy) (eraseType retTy)))
     | none => pure (.returnValue md (.fromNone md))
 
   -- exit label
