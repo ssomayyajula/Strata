@@ -51,6 +51,7 @@ inductive NameInfo where
   | variable (ty : PythonType)
   | module_ (name : Identifier)
   | unresolved
+  | none
   deriving Inhabited
 
 structure ResolvedAnn where
@@ -59,7 +60,7 @@ structure ResolvedAnn where
   deriving Inhabited
 
 instance : Inhabited ResolvedAnn where
-  default := { sr := .none, info := .unresolved }
+  default := { sr := .none, info := .none }
 
 abbrev ResolvedPythonStmt := Python.stmt ResolvedAnn
 abbrev ResolvedPythonExpr := Python.expr ResolvedAnn
@@ -384,12 +385,22 @@ def builtinContext : Ctx :=
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- The Fold: resolve
+--
+-- Threads Ctx as accumulator. Declarations extend it. References look up from it.
+-- Produces the resolved AST where every node carries its NameInfo.
 -- ═══════════════════════════════════════════════════════════════════════════════
 
--- TODO: implement the full fold
--- Stub: annotates all nodes with .unresolved
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- The Fold: resolve
+--
+-- Threads Ctx as accumulator. Declarations extend it. References look up from it.
+-- Produces the resolved AST where every node carries its NameInfo.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+private def ann0 : ResolvedAnn := { sr := .none, info := .none }
+
 def resolve (stmts : PythonProgram) : ResolvedPythonProgram :=
-  stmts.map fun _stmt => sorry
+  sorry
 
 end -- public section
 end Strata.Python.Resolution
