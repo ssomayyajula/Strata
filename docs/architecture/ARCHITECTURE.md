@@ -900,30 +900,26 @@ outputs (`LaurelResult`, `maybe_except`) before elaboration. Necessary because T
 assigns to output variables. Architecture's entry point description only mentions params.
 
 
-## Current Status (2026-05-08)
+## Current Status (2026-05-11)
 
 ### Parity with the Current Pipeline
 
-The question is not "how many tests pass" but "are we replicating the current
-pipeline's results?" On the 46 CI tests with expected outputs:
+On the full test suite (`diff_test.sh compare` using `pyAnalyzeV2`):
 
-- **42/46 tests:** New pipeline replicates the current pipeline's result
-  (same RESULT line — both pass, or both inconclusive)
-- **3/46 tests:** Current pipeline passes, new pipeline is inconclusive
-  (solver can't prove VCs that the current encoding allows — encoding quality
-  gap in try/except and module-level code, not a correctness issue)
-- **1/46 tests:** New pipeline passes where current was inconclusive
-  (test_multiple_except: 8 real VCs proven — genuine improvement)
+- **63/69 tests:** Same result category (pass/inconclusive) as old pipeline
+- **4/69 tests:** Old passes, new inconclusive (`test_datetime`,
+  `test_dict_operations`, `test_timedelta_expr`, `test_try_except_scoping`)
+  — encoding quality gap, not crashes
+- **2/69 tests:** Old passes, new internal_error (`test_foo_client_folder`,
+  `test_invalid_client_type`) — missing `Any_type_to_Any` runtime function
+- **1/69 tests:** New passes where old was inconclusive (improvement)
 
-Zero crashes on the 46 CI tests. Two non-CI tests (`test_foo_client_folder`,
-`test_invalid_client_type`) crash due to a missing runtime function
-(`Any_type_to_Any` — the Python `type()` builtin is not yet in the prelude).
-The current pipeline is verified intact and serves as the comparison baseline.
+Zero crashes from elaboration on any test. The 2 internal_errors are from
+a missing prelude function (`type()` builtin not yet supported).
 
-The 3 encoding gaps are in tests with nested try/except (`test_try_except_scoping`)
-and module-level code that calls runtime procedures (`test_datetime`,
-`test_dict_operations`). These produce correct but more complex VC structure
-that the solver needs more time to handle.
+The 4 encoding gaps are in tests with try/except scoping, module-level
+runtime calls, and datetime operations — the new pipeline produces correct
+but more complex VC structure that the solver needs more time to handle.
 
 ### Key Implementation Decisions
 
