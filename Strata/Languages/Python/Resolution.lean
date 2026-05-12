@@ -122,7 +122,7 @@ partial def collectLocalsFromExpr (target : PythonExpr) : List Identifier :=
   | .FormattedValue _ _ _ _ => []
   | .JoinedStr _ _ => []
   | .Lambda _ _ _ => []
-  | .NamedExpr _ _ _ => []
+  | .NamedExpr _ target _ => collectLocalsFromExpr target
   | .Slice _ _ _ _ => []
   | .TemplateStr _ _ => []
   | .Interpolation _ _ _ _ _ => []
@@ -139,11 +139,13 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
   | .If _ _ bodyStmts elseStmts =>
       bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
       elseStmts.val.toList.flatMap collectLocalsFromStmt
-  | .For _ target _ bodyStmts _ _ =>
+  | .For _ target _ bodyStmts orelse _ =>
       let targetNames := (collectLocalsFromExpr target).map fun n => (n, annotationToPythonType none)
-      targetNames ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
-  | .While _ _ bodyStmts _ =>
-      bodyStmts.val.toList.flatMap collectLocalsFromStmt
+      targetNames ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
+      orelse.val.toList.flatMap collectLocalsFromStmt
+  | .While _ _ bodyStmts orelse =>
+      bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
+      orelse.val.toList.flatMap collectLocalsFromStmt
   | .Try _ bodyStmts handlers orelse finalbody =>
       let handlerLocals := handlers.val.toList.flatMap fun h =>
         match h with
@@ -184,9 +186,10 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
             | some varExpr => (collectLocalsFromExpr varExpr).map fun n => (n, annotationToPythonType none)
             | none => []
       itemVars ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
-  | .AsyncFor _ target _ bodyStmts _ _ =>
+  | .AsyncFor _ target _ bodyStmts orelse _ =>
       let targetNames := (collectLocalsFromExpr target).map fun n => (n, annotationToPythonType none)
-      targetNames ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
+      targetNames ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
+      orelse.val.toList.flatMap collectLocalsFromStmt
   | .Match _ _ cases =>
       cases.val.toList.flatMap fun c =>
         match c with
