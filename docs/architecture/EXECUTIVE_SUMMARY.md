@@ -2,28 +2,34 @@
 
 ## The Ask
 
-The Python front-end has endemic tool errors from ad-hoc type coercion and
-8 implicitly-ordered lowering passes with no shared specification. A written
-architecture (`ARCHITECTURE.md`, 1000+ lines) now exists that specifies
-coercion insertion, effect classification, and calling conventions — providing
-a single source of truth for the front-end's semantics.
+The Python front-end has endemic tool errors that resist individual fixes.
+This is not the fault of any particular set of contributors — the problem is
+structural: without a written architecture, each fix generates code that
+interacts unpredictably with 8 lowering passes, creating a positive feedback
+loop where the pipeline's actual behavior diverges further from the intended
+one with each change.
+
+A written architecture (`ARCHITECTURE.md`, 1000+ lines) now exists that
+specifies coercion insertion, effect classification, and calling conventions
+— providing a single check on this divergence.
 
 **Can we commit to developing the Python front-end against this architecture?
 If so, what is the strategy for collaborative development driven by the spec?**
 
-The architecture is designed to be the synchronization point between contributors:
-code that follows the spec is correct by construction, deviations are identifiable
-by inspection, and design disagreements are resolvable by reference to the document
-rather than implicit mental models.
+The architecture is designed to be the synchronization point between
+contributors: code that follows the spec is correct by construction,
+deviations are identifiable by inspection, and design disagreements are
+resolvable by reference to the document rather than implicit mental models.
 
 ---
 
 ## Background
 
 The existing pipeline (2100 lines of translation + 8 lowering passes) has no
-written specification. Contributors operate under different mental models of
-when coercions should fire, how effects compose, and what constitutes valid
-intermediate output. This leads to:
+written specification. Without an architectural check on the volume of code
+generated for fixes, contributors necessarily operate under different mental
+models of when coercions should fire, how effects compose, and what
+constitutes valid intermediate output. This leads to:
 
 - **Multiple competing PRs for the same bug** (4 open/merged PRs for Issue #882,
   each with a different coercion heuristic, none grounded in a shared rule)
