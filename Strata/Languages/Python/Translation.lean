@@ -6,7 +6,7 @@ module
 
 public import Strata.Languages.Laurel.Laurel
 public import Strata.Languages.Python.PythonDialect
-public import Strata.Languages.Python.NameResolution
+public import Strata.Languages.Python.Resolution
 import Strata.DDM.Util.SourceRange
 
 /-!

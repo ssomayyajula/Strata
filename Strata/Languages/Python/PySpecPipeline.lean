@@ -15,7 +15,7 @@ import Strata.Languages.Python.Specs
 import Strata.Languages.Python.Specs.DDM
 import Strata.Languages.Python.Specs.IdentifyOverloads
 import Strata.Languages.Python.Specs.ToLaurel
-import Strata.Languages.Python.NameResolution
+import Strata.Languages.Python.Resolution
 import Strata.Languages.Python.Translation
 import Strata.Languages.FineGrainLaurel.Elaborate
 import Strata.Util.DecideProp
