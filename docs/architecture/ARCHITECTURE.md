@@ -47,7 +47,7 @@ def elaborate : Laurel.Program → Laurel.Program
 Array (Python.stmt SourceRange)    (raw, unscoped)
   ↓ [Resolution: scope resolution, fold with growing context]
 Array (Python.stmt ResolvedAnn)    (scoped, every node annotated with its meaning)
-  ↓ [Translation: catamorphism over resolved AST]
+  ↓ [Translation: fold over resolved AST]
 Laurel.Program                     (impure CBV, effects implicit)
   ↓ [Elaboration: graded bidirectional typing, total]
 Laurel.Program                     (effects explicit via calling conventions)
@@ -63,7 +63,7 @@ annotated with its resolution from the current context. The output is the
 same AST with `ResolvedAnn` on every node — the scoping derivation for
 the Python program.
 
-**Translation** is a catamorphism over the resolved AST. It reads the
+**Translation** is a fold over the resolved AST. It reads the
 annotation on each node and emits the corresponding Laurel construct.
 No name resolution — that was done by Resolution. At call sites,
 Translation uses the FuncSig from the annotation to match args to params
@@ -107,7 +107,7 @@ structure ResolvedAnn where
 |---|---|
 | Representation invariants | Runtime checks, dead branches |
 | Proof-relevant elimination | Boolean blindness |
-| Catamorphisms | Traversal choices |
+| Folds | Traversal choices |
 | Correct by construction | Post-hoc rewrites |
 | Separation of concerns | Decisions in wrong place |
 | Monad carries context | Ad-hoc parameter passing |
@@ -189,7 +189,7 @@ don't carry a FuncSig — there's nothing to emit from.
 def translate : Array (Python.stmt ResolvedAnn) → Laurel.Program
 ```
 
-A catamorphism over the resolved Python AST. One case per constructor.
+A fold over the resolved Python AST. One case per constructor.
 Deterministic. No lookups — reads resolution from node annotations.
 
 **Does:** desugar Python surface syntax into Laurel: object construction
@@ -999,7 +999,7 @@ rewrite of all three passes (see plan):
 
 ```
 NameResolution.lean    -- Scope resolution: Python AST → Resolved AST
-Translation.lean       -- Catamorphism: Resolved AST → Laurel
+Translation.lean       -- Fold: Resolved AST → Laurel
 Elaborate.lean         -- Graded bidirectional elaboration: Laurel → GFGL → Laurel
 Pipeline.lean          -- Wire passes, CLI
 ```
