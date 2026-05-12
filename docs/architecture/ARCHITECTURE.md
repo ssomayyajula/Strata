@@ -175,6 +175,9 @@ what it refers to. Translation reads this directly — no lookups needed.
 - Determine effects (Elaboration does that)
 - Translate types to Laurel (Translation does that)
 
+**Known incompleteness:** Match case pattern bindings are not yet extracted
+as function locals. Requires walking `Python.pattern` inductive.
+
 **Contract with Translation:** The resolved AST IS the interface. Every
 call site carries `.function sig` or is `.unresolved` (→ Hole). Translation
 cannot emit `StaticCall` for an unresolved name because unresolved nodes
