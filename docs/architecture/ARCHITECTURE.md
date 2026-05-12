@@ -488,9 +488,9 @@ grade(f) ∈ {pure, proc}:
   (no rewriting)
 ```
 
-Elaboration begins:
+Elaboration begins (Γ extended with both inputs and outputs):
 ```
-⟦Γ,p₁:T₁,...,pₘ:Tₘ ⊢_L B : R⟧⇐ₚ at grade e
+⟦Γ,p₁:T₁,...,pₘ:Tₘ,LaurelResult:R,maybe_except:Error ⊢_L B : R⟧⇐ₚ at grade e
 ```
 
 #### Subgrading
@@ -884,6 +884,20 @@ grade > 1 and the coercion scheme changes.
 
 **Prelude data encodings:** Lists/dicts are recursive ADTs (`ListAny_cons`/`DictStrAny_cons`).
 Translation must emit these specific constructors.
+
+**Multi-output forces err grade:** Translation declares `maybe_except : Error` on every
+procedure. The `outputs.length > 1` heuristic in grade inference therefore always fires,
+joining every user proc's grade with err. Architecturally, grade should come purely from
+coinduction. In practice, Translation's output format forces err as minimum.
+
+**Hole declarations collected post-hoc:** Architecture says `$hole_N` must be in Γ for
+the staticCall rule. Implementation emits the staticCall without the function in Γ (using
+the unknown-callee fallback) and collects hole names for declaration in the output program
+afterward — same pattern as box constructors.
+
+**Entry point extends env with outputs:** `fullElaborate` extends Γ with both inputs AND
+outputs (`LaurelResult`, `maybe_except`) before elaboration. Necessary because Translation
+assigns to output variables. Architecture's entry point description only mentions params.
 
 
 ## Current Status (2026-05-08)
