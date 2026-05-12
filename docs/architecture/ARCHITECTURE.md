@@ -38,7 +38,7 @@ information is available to make a deterministic choice.
 ```lean
 def resolve   : Array (Python.stmt SourceRange) → Array (Python.stmt ResolvedAnn)
 def translate : Array (Python.stmt ResolvedAnn) → Laurel.Program
-def elaborate : Laurel.Program → Laurel.Program
+def elaborate : Laurel.Program → GFGL.Program
 ```
 
 ### Diagram
@@ -50,7 +50,9 @@ Array (Python.stmt ResolvedAnn)    (scoped, every node annotated with its meanin
   ↓ [Translation: catamorphism, no lookups]
 Laurel.Program                     (impure CBV, effects implicit)
   ↓ [Elaboration: graded bidirectional typing, total]
-Laurel.Program                     (effects explicit via calling conventions)
+GFGL.Program                       (effects explicit via grades)
+  ↓ [Projection: forget grading, trivial catamorphism]
+Laurel.Program                     (effects in calling conventions)
   ↓ [Core translation (existing, unchanged)]
 Core
 ```
@@ -65,8 +67,10 @@ node — the scoping derivation for the Python program.
 
 **Translation** is a catamorphism over the resolved AST. It reads the
 annotation on each node and emits the corresponding Laurel construct.
-No lookups, no name resolution, no arg matching — all of that was done
-by Resolution. If a node is `.unresolved`, Translation emits `Hole`.
+No name resolution — that was done by Resolution. At call sites,
+Translation uses the FuncSig from the annotation to match args to params
+(positional + kwargs → param order). If a node is `.unresolved`,
+Translation emits `Hole`.
 
 **Elaboration** takes the Laurel program and transforms it: inserting
 coercions (governed by the subtyping table), threading heap state
@@ -171,8 +175,6 @@ what it refers to. Translation reads this directly — no lookups needed.
 **Resolution does NOT:**
 - Determine effects (Elaboration does that)
 - Translate types to Laurel (Translation does that)
-- Match args to params (the FuncSig in the annotation gives Translation
-  enough information to do this mechanically)
 
 **Contract with Translation:** The resolved AST IS the interface. Every
 call site carries `.function sig` or is `.unresolved` (→ Hole). Translation
@@ -334,7 +336,7 @@ Left residual (d \ e):
   heapErr \ heapErr = pure
 ```
 
-### Translation on types (⟦·⟧ : HighType → LowType)
+### Elaboration's type translation (⟦·⟧ : HighType → LowType)
 
 ```lean
 def ⟦·⟧ : HighType → LowType
@@ -952,30 +954,25 @@ outputs (`LaurelResult`, `maybe_except`) before elaboration. Necessary because T
 assigns to output variables. Architecture's entry point description only mentions params.
 
 
-## Current Status (2026-05-11)
+## Current Status (2026-05-12)
 
 ### Parity with the Current Pipeline
 
-On the full test suite (`diff_test.sh compare` using `pyAnalyzeV2`):
+On the 54 in-tree CI tests (`diff_test.sh compare` using `pyAnalyzeV2`):
 
 - **52/54 tests:** Same result category (pass/inconclusive) as old pipeline
-- **2/54 tests:** Regressions (→ internal_error):
-  - `test_foo_client_folder`, `test_invalid_client_type` — missing `Any_type_to_Any`
-    runtime function (Python `type()` builtin) + `$field.__name__` generated for
-    non-class attribute access (elaboration should havoc, not generate bogus Field)
-- **3/54 tests:** pass → inconclusive (encoding quality gap in try/except, datetime)
+- **2/54 tests:** internal_error (`test_foo_client_folder`, `test_invalid_client_type`)
+  — missing runtime function + field resolution on non-class receivers
+- **3/54 tests:** pass → inconclusive (encoding quality gaps)
 - **1/54 tests:** inconclusive → pass (improvement)
 
-Zero crashes from elaboration itself. The 2 remaining issues are in downstream
-Core type-checking, caused by missing runtime declarations and field resolution
-on non-class receivers.
+### Architectural issues pending rewrite
 
-Zero crashes from elaboration on any test. The 2 internal_errors are from
-a missing prelude function (`type()` builtin not yet supported).
-
-The 4 encoding gaps are in tests with try/except scoping, module-level
-runtime calls, and datetime operations — the new pipeline produces correct
-but more complex VC structure that the solver needs more time to handle.
+The implementation has fundamental architectural violations requiring a
+rewrite of all three passes (see plan):
+- Resolution uses imperative loops, string-based builtinMap, no resolved AST
+- Translation does name resolution and kwargs matching (should be Resolution's job)
+- Elaboration uses Option monad with failure (should be total)
 
 ### Key Implementation Decisions
 
@@ -1003,9 +1000,9 @@ but more complex VC structure that the solver needs more time to handle.
 ## Files
 
 ```
-NameResolution.lean    -- Build Γ
-Translation.lean       -- Fold over AST → Laurel
-Elaborate.lean         -- Graded bidirectional elaboration
+NameResolution.lean    -- Scope resolution: Python AST → Resolved AST
+Translation.lean       -- Catamorphism: Resolved AST → Laurel
+Elaborate.lean         -- Graded bidirectional elaboration: Laurel → GFGL → Laurel
 Pipeline.lean          -- Wire passes, CLI
 ```
 
