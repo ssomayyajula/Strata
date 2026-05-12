@@ -3,16 +3,18 @@
 ## The Ask
 
 The Python front-end has endemic tool errors from ad-hoc type coercion and
-8 implicitly-ordered lowering passes with no shared specification. A new
-pipeline (`pyAnalyzeV2`) replaces these with a single architecture-governed
-elaboration pass — currently at 52/54 test parity with the old pipeline.
+8 implicitly-ordered lowering passes with no shared specification. A written
+architecture (`ARCHITECTURE.md`, 1000+ lines) now exists that specifies
+coercion insertion, effect classification, and calling conventions — providing
+a single source of truth for the front-end's semantics.
 
-**Should we continue development of `pyAnalyzeV2` as the path forward?**
+**Can we commit to developing the Python front-end against this architecture?
+If so, what is the strategy for collaborative development driven by the spec?**
 
-The current pipeline remains operational as the production path. The new
-architecture (`ARCHITECTURE.md`, 1000+ lines) provides a written specification
-for coercion, effect, and calling convention decisions — enabling traceable
-changes and spec-based PR review.
+The architecture is designed to be the synchronization point between contributors:
+code that follows the spec is correct by construction, deviations are identifiable
+by inspection, and design disagreements are resolvable by reference to the document
+rather than implicit mental models.
 
 ---
 
