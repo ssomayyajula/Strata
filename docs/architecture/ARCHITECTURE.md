@@ -32,20 +32,69 @@ information is available to make a deterministic choice.
 
 ## The Pipeline
 
+### Type signatures
+
+```lean
+def resolve   : Array (Python.stmt SourceRange) → Array (Python.stmt ResolvedAnn)
+def translate : Array (Python.stmt ResolvedAnn) → Laurel.Program
+def elaborate : Laurel.Program → Laurel.Program
 ```
-Python AST + library stubs
-  ↓ [Resolution: build Γ]
-Γ : TypeEnv
-  +
-Python AST (user code)
-  ↓ [Translation: fold over AST, type-directed via Γ]
-e : Laurel.Program (impure CBV — precisely-typed, effects implicit)
-  ↓ [Elaboration: impure CBV → Graded FGCBV, coinductive grade inference]
-e' : GFGL.Program (Graded Fine-Grain Laurel — effects explicit via grades)
-  ↓ [Projection: forget grading, trivial cata]
-Laurel.Program (ready for Core)
-  ↓ [Core translation]
+
+### Diagram
+
+```
+Array (Python.stmt SourceRange)    (raw, unscoped)
+  ↓ [Resolution: scope resolution, fold with growing context]
+Array (Python.stmt ResolvedAnn)    (scoped, every node annotated with its meaning)
+  ↓ [Translation: catamorphism, no lookups]
+Laurel.Program                     (impure CBV, effects implicit)
+  ↓ [Elaboration: graded bidirectional typing, total]
+Laurel.Program                     (effects explicit via calling conventions)
+  ↓ [Core translation (existing, unchanged)]
 Core
+```
+
+### What each pass does
+
+**Resolution** is a fold over the Python AST that threads a growing context
+(state monad at top level, reader within bodies). Each declaration extends
+the context; each reference is annotated with its resolution from the
+current context. The output is the same AST with `ResolvedAnn` on every
+node — the scoping derivation for the Python program.
+
+**Translation** is a catamorphism over the resolved AST. It reads the
+annotation on each node and emits the corresponding Laurel construct.
+No lookups, no name resolution, no arg matching — all of that was done
+by Resolution. If a node is `.unresolved`, Translation emits `Hole`.
+
+**Elaboration** takes the Laurel program and transforms it: inserting
+coercions (governed by the subtyping table), threading heap state
+(governed by grades), and binding effectful subexpressions at statement
+level (governed by the to-rule). It is total — every Laurel construct
+produces output. Grade inference is by coinduction on the call graph.
+
+### Intermediate types
+
+```lean
+abbrev Identifier := String
+abbrev PythonType := Python.expr SourceRange
+
+structure FuncSig where
+  params : Std.HashMap Identifier PythonType
+  defaults : Std.HashMap Identifier (Python.expr SourceRange)
+  returnType : PythonType
+  locals : Std.HashMap Identifier PythonType
+
+inductive NameInfo where
+  | class_ (name : Identifier) (fields : Std.HashMap Identifier PythonType)
+  | function (sig : FuncSig)
+  | variable (ty : PythonType)
+  | module_ (name : Identifier)
+  | unresolved
+
+structure ResolvedAnn where
+  sr : SourceRange
+  info : NameInfo
 ```
 
 
@@ -66,74 +115,68 @@ Core
 ### Illegal States Unrepresentable
 
 **Resolution → Translation contract:** Translation CANNOT emit a `StaticCall`
-to a name that is not in Γ. This is enforced representationally:
-
-```lean
--- Resolution produces resolved names, not strings
-structure ResolvedCall where
-  sig : FuncSig            -- proof that the callee exists in Γ
-  resolvedArgs : List StmtExprMd  -- args already matched to params
-
--- Translation's StaticCall takes a ResolvedCall, not an Identifier
--- If lookupName returns none → emit Hole (undefined = nondeterministic)
--- There is NO path that produces StaticCall with an unresolved name
-```
+to a name that is not in Γ. Enforced by the resolved AST representation:
+call sites carry `.function sig` in their annotation. Unresolvable calls
+carry `.unresolved` and Translation emits Hole. There is no constructor
+that represents "StaticCall to an unresolved name."
 
 This eliminates an entire class of bugs:
 - Undefined function calls (→ Core "not found" errors)
-- Arity mismatches (args checked against sig at construction time)
+- Arity mismatches (sig in annotation determines param count)
 - Type-level module resolution failures silently producing garbage names
 
-**No strings for types:** Types flow through the pipeline as `HighType`
-values, never as strings. `extractTypeStr` + `pythonTypeToLaurel` is
-ABOLISHED. Type annotations go directly from Python AST → `HighType`
-via `Resolution.annotationToHighType`. Union types that can't be
-represented → `.TCore "Any"` (handled in Resolution, not Translation).
+**Types are Python annotation expressions:** Types flow through Resolution
+as `PythonType := Python.expr SourceRange` — the actual annotation from the
+source. Translation maps them to `HighType` when emitting Laurel. No string
+intermediate (`extractTypeStr` is abolished).
 
 **No boolean blindness in Resolution:** `NameInfo` is an inductive —
 pattern matching on it gives you the data you need. There is no
-`isResolved : String → Bool` followed by a separate lookup. The lookup
-IS the check. `Option NameInfo` is the only interface.
+`isResolved : String → Bool` followed by a separate lookup. The annotation
+IS the resolution.
 
 
 
 ## Resolution
 
-**Input:** Python AST + stubs  
-**Output:** `TypeEnv` (= Γ)
-
 ```lean
-structure FuncSig where
-  name : String
-  params : List (String × HighType)
-  defaults : List (Option StmtExprMd)
-  returnType : HighType
-  hasKwargs : Bool
-
-structure TypeEnv where
-  names : Std.HashMap String NameInfo
-  classFields : Std.HashMap String (List (String × HighType))
-  overloadTable : Std.HashMap String (Std.HashMap String String)
-  builtinMap : Std.HashMap String String
-
-inductive NameInfo where
-  | class_ (name : String) (fields : List (String × HighType))
-  | function (sig : FuncSig)
-  | variable (ty : HighType)
-  | module_ (fullName : String)
+def resolve : Array (Python.stmt SourceRange) → Array (Python.stmt ResolvedAnn)
 ```
 
-Resolution does NOT determine effects. Effects are inferred by elaboration.
+**Input:** Raw Python AST (`Python.stmt SourceRange`).  
+**Output:** Resolved Python AST (`Python.stmt ResolvedAnn`).
 
-**Contract with Translation:** Every name Translation wants to call MUST be
-in `TypeEnv.names`. Translation looks up names via `Option NameInfo`. If the
-lookup returns `none`, Translation emits `Hole` (nondeterministic havoc).
-There is no code path that produces `StaticCall` for an unresolved name.
+Resolution is a fold over the Python AST that threads a growing context.
+At the top level (module scope), each declaration extends the context:
 
-**No strings for types:** `annotationToHighType` goes directly from Python
-annotation AST → `HighType`. Union types (`int | bool`, `Optional[X]`,
-`List[X]`) that can't be precisely represented → `.TCore "Any"`. This
-decision is made in Resolution, not in Translation.
+- `def f(...)` → extends context with `f : .function sig`
+- `class C` → extends context with `C : .class_`, methods as `.function`
+- `import M` → extends context with `M : .module_`
+- `x : T = ...` → extends context with `x : .variable T`
+- Python builtins (from stubs) → extend context with `.function sig`
+
+At each reference (name use, call site, attribute access), the node is
+annotated with the resolution from the current context. Unresolvable
+references are annotated `.unresolved`.
+
+Within a function body, the context is extended with:
+- Parameters (from the function signature)
+- Locals (Python's scoping rule: any assignment target anywhere in
+  the body is function-local)
+
+The output AST is the scoping derivation: every node carries proof of
+what it refers to. Translation reads this directly — no lookups needed.
+
+**Resolution does NOT:**
+- Determine effects (Elaboration does that)
+- Translate types to Laurel (Translation does that)
+- Match args to params (the FuncSig in the annotation gives Translation
+  enough information to do this mechanically)
+
+**Contract with Translation:** The resolved AST IS the interface. Every
+call site carries `.function sig` or is `.unresolved` (→ Hole). Translation
+cannot emit `StaticCall` for an unresolved name because unresolved nodes
+don't carry a FuncSig — there's nothing to emit from.
 
 
 
