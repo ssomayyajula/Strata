@@ -906,15 +906,17 @@ assigns to output variables. Architecture's entry point description only mention
 
 On the full test suite (`diff_test.sh compare` using `pyAnalyzeV2`):
 
-- **45/54 tests:** Same result category (pass/inconclusive) as old pipeline
-- **9/54 tests:** Regressions (→ internal_error or timeout):
-  - Class field tests (`test_class_field_any/init/use`, `test_class_methods`,
-    `test_class_with_methods`, `test_composite_return`) — hole declarations
-    emitted with wrong type representation (`Core(Any)` vs `Any`)
-  - `test_with_statement`, `test_with_void_enter` — same root cause
-  - `test_foo_client_folder` — timeout (missing `Any_type_to_Any` + field resolution)
-- **3/54 tests:** pass → inconclusive (encoding quality gap)
+- **52/54 tests:** Same result category (pass/inconclusive) as old pipeline
+- **2/54 tests:** Regressions (→ internal_error):
+  - `test_foo_client_folder`, `test_invalid_client_type` — missing `Any_type_to_Any`
+    runtime function (Python `type()` builtin) + `$field.__name__` generated for
+    non-class attribute access (elaboration should havoc, not generate bogus Field)
+- **3/54 tests:** pass → inconclusive (encoding quality gap in try/except, datetime)
 - **1/54 tests:** inconclusive → pass (improvement)
+
+Zero crashes from elaboration itself. The 2 remaining issues are in downstream
+Core type-checking, caused by missing runtime declarations and field resolution
+on non-class receivers.
 
 Zero crashes from elaboration on any test. The 2 internal_errors are from
 a missing prelude function (`type()` builtin not yet supported).
