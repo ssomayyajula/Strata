@@ -223,9 +223,7 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
   | .Nonlocal _ _ => []
   | .Expr _ _ => []
   | .TypeAlias _ nameExpr _ _ =>
-      match nameExpr with
-      | .Name _ n _ => [(n.val, annotationToPythonType none)]
-      | _ => []
+      (collectLocalsFromExpr nameExpr).map fun n => (n, annotationToPythonType none)
 
 def computeLocals (body : PythonProgram) (paramNames : List Identifier)
     : List (Identifier × PythonType) :=
