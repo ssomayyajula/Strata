@@ -275,16 +275,12 @@ reference to the spec.
 
 ---
 
-## The New Architecture
+## The Architecture
 
-The new pipeline is governed by a formal specification
-(`ARCHITECTURE.md`, 1000+ lines) that defines:
-
-- A **subsumption table** specifying all type coercions and when they fire
-- A **grade monoid** `{pure, proc, err, heap, heapErr}` classifying effects
-- **Calling conventions** derived from grades (which outputs to bind, whether to pass heap)
-- **Typing rules** for every Laurel construct (bidirectional: synthesize types bottom-up, check top-down)
-- **Engineering invariants** (illegal states unrepresentable, metadata by construction)
+The specification (`ARCHITECTURE.md`) governs the front-end pipeline from
+Python AST to Core. It is prescriptive — determining exactly when coercions
+fire, how effects compose, and what calling conventions to use — so that
+implementation is mechanical and disagreements are resolvable by reference.
 
 ### Pipeline
 
@@ -335,29 +331,6 @@ handle Python-specific desugaring.
 
 ---
 
-## Current Status (2026-05-11)
-
-| Metric | Current Pipeline | New Pipeline |
-|--------|-------------|-------------|
-| Test parity (same category) | — | 52/54 |
-| Regressions (→ internal_error) | — | 2 (missing runtime function) |
-| Regressions (pass → inconclusive) | — | 3 |
-| Improvements (inconclusive → pass) | — | 1 |
-| Lowering passes required | 8 | 0 (Elaboration produces Core-ready output) |
-| Written specification | None | 1000+ lines |
-| Coercion rule | Ad-hoc (scattered across Translation) | Subsumption table (one function) |
-| Adding a Python construct | Modify Translation + verify 8 pass interactions | Add Translation case + typing rule |
-
-The current pipeline remains operational as a parallel path (`pyAnalyzeLaurel`) and
-serves as the correctness baseline for differential testing.
-
-Four tests produce inconclusive where the old pipeline passes (`test_try_except_scoping`,
-`test_datetime`, `test_dict_operations`, `test_timedelta_expr`) — encoding quality gaps,
-not soundness issues. Two tests crash due to a missing runtime function (`Any_type_to_Any`
-— the Python `type()` builtin, needed for module-level code that the old pipeline skips).
-
----
-
 ## Traceability: Current Problems → Architecture Sections
 
 Each problem identified above is addressed by a specific section of the
@@ -369,14 +342,14 @@ mechanically detectable.
 
 | Problem | Evidence | Architecture Section |
 |---------|----------|---------------------|
-| No rule for when coercions fire | Issue #882, PRs #727/#918/#954/#1106 | §Subsumption Table, §Coercion Table |
-| Pass-ordering bugs | PR #1011 | §Elaboration (single pass replaces 8) |
-| Illegal states representable | PR #835 | §GFGL Term Structure, §Smart Constructors |
-| Architectural disagreement | PR #954 (100+ comments) | §Grade Monoid, §Calling Conventions |
-| Whole-pipeline blast radius | Every new construct | §Translation (syntax only), §Elaboration (semantics only) |
-| No specification to implement against | PRs #1136/#1144 document WHAT not WHEN/HOW | §Engineering Principles, §Typing Rules, §Assignment Rules |
-| Undocumented Python coverage | Implicit in 2100 lines | §Translation Desugarings, §Python Construct Coverage |
-| Laurel function/procedure distinction not enforced | Runtime procs nested in expressions crash Core | §Core Interface Requirements, §proc Grade |
+| No rule for when coercions fire | Issue #882, PRs #727/#918/#954/#1106 | §Subtyping (witness table) |
+| Pass-ordering bugs | PR #1011 | §Elaboration (single pass, no lowering) |
+| Illegal states representable | PR #835 | §GFGL Type System (values vs producers) |
+| Architectural disagreement | PR #954 (100+ comments) | §Grade Monoid, §Subgrading (witness table) |
+| Whole-pipeline blast radius | Every new construct | §Translation (syntax), §Elaboration (semantics) |
+| No specification to implement against | PRs #1136/#1144 document WHAT not WHEN/HOW | §The Translation ⟦·⟧, §Producer Checking Rules |
+| Undocumented Python coverage | Implicit in 2100 lines | §Python Construct Coverage |
+| Laurel function/procedure distinction not enforced | Runtime procs nested in expressions crash Core | §Grade Monoid (proc grade), §Producer Synthesis |
 
 ---
 
