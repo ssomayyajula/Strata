@@ -391,14 +391,25 @@ def builtinContext : Ctx :=
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 -- ═══════════════════════════════════════════════════════════════════════════════
+-- AST Annotation Mapping (f : SourceRange → ResolvedAnn through the tree)
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+private def mapAnnVal (f : α → β) (a : Ann T α) : Ann T β := ⟨f a.ann, a.val⟩
+private def mapAnnOpt (f : α → β) (mapT : T₁ → T₂) (a : Ann (Option T₁) α) : Ann (Option T₂) β :=
+  ⟨f a.ann, a.val.map mapT⟩
+private def mapAnnArr (f : α → β) (mapT : T₁ → T₂) (a : Ann (Array T₁) α) : Ann (Array T₂) β :=
+  ⟨f a.ann, a.val.map mapT⟩
+
+-- ═══════════════════════════════════════════════════════════════════════════════
 -- The Fold: resolve
 --
 -- Threads Ctx as accumulator. Declarations extend it. References look up from it.
--- Produces the resolved AST where every node carries its NameInfo.
+-- Non-reference nodes get .none. Reference nodes get their lookup result.
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-private def ann0 : ResolvedAnn := { sr := .none, info := .none }
-
+-- For now, use sorry. The full traversal requires mapping every constructor.
+-- The structure is understood: match on each constructor, use mapAnnVal/mapAnnArr
+-- to rebuild with ResolvedAnn, and for Name/Call/Attribute nodes, look up in ctx.
 def resolve (stmts : PythonProgram) : ResolvedPythonProgram :=
   sorry
 
