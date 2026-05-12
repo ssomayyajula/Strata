@@ -201,8 +201,24 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
   | .Pass _ => []
   | .Break _ => []
   | .Continue _ => []
-  | .Import _ _ => []
-  | .ImportFrom _ _ _ _ => []
+  | .Import _ aliases =>
+      aliases.val.toList.filterMap fun alias =>
+        match alias with
+        | .mk_alias _ modName asName =>
+            let name := match asName.val with
+              | some aliasName => aliasName.val
+              | none => match modName.val.splitOn "." with
+                | first :: _ => first
+                | [] => modName.val
+            some (name, annotationToPythonType none)
+  | .ImportFrom _ _ imports _ =>
+      imports.val.toList.filterMap fun imp =>
+        match imp with
+        | .mk_alias _ impName asName =>
+            let name := match asName.val with
+              | some aliasName => aliasName.val
+              | none => impName.val
+            some (name, annotationToPythonType none)
   | .Global _ _ => []
   | .Nonlocal _ _ => []
   | .Expr _ _ => []
