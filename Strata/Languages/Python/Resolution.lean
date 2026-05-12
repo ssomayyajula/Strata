@@ -191,9 +191,9 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
       cases.val.toList.flatMap fun c =>
         match c with
         | .mk_match_case _ _ _ caseBody => caseBody.val.toList.flatMap collectLocalsFromStmt
-  | .FunctionDef _ _ _ _ _ _ _ _ => []
-  | .AsyncFunctionDef _ _ _ _ _ _ _ _ => []
-  | .ClassDef _ _ _ _ _ _ _ => []
+  | .FunctionDef _ name _ _ _ _ _ _ => [(name.val, annotationToPythonType none)]
+  | .AsyncFunctionDef _ name _ _ _ _ _ _ => [(name.val, annotationToPythonType none)]
+  | .ClassDef _ name _ _ _ _ _ => [(name.val, annotationToPythonType none)]
   | .Return _ _ => []
   | .Delete _ _ => []
   | .Raise _ _ _ => []
