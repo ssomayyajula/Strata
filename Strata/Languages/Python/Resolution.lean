@@ -222,7 +222,10 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
   | .Global _ _ => []
   | .Nonlocal _ _ => []
   | .Expr _ _ => []
-  | .TypeAlias _ _ _ _ => []
+  | .TypeAlias _ nameExpr _ _ =>
+      match nameExpr with
+      | .Name _ n _ => [(n.val, annotationToPythonType none)]
+      | _ => []
 
 def computeLocals (body : PythonProgram) (paramNames : List Identifier)
     : List (Identifier × PythonType) :=
