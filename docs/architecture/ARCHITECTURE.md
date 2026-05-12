@@ -5,9 +5,10 @@
 
 This pipeline translates Python source code into Laurel (our verification IL)
 via a series of compositional passes. The key insight is **separation of
-concerns**: Translation handles Python's surface syntax (scope, classes,
-control flow) while Elaboration handles the semantic heavy lifting (effects,
-coercions, heap threading). Neither pass knows about the other's job.
+concerns**: Resolution handles scoping, Translation handles Python's surface
+syntax (desugaring to Laurel), and Elaboration handles the semantic heavy
+lifting (effects, coercions, heap threading). Each pass has a clear input
+type, output type, and contract.
 
 The elaboration pass is based on **Fine-Grain Call-By-Value** (FGCBV), a
 type theory that separates *values* (pure, duplicable) from *producers*
@@ -183,14 +184,22 @@ don't carry a FuncSig — there's nothing to emit from.
 
 ## Translation
 
-A catamorphism over the Python AST. One case per constructor. Deterministic.
+```lean
+def translate : Array (Python.stmt ResolvedAnn) → Laurel.Program
+```
 
-**Does:** scope hoisting, object construction (.New + __init__), context managers,
-for-loop abstraction (havoc + assume), loop labels, calling convention (kwargs +
-defaults via Γ), module-level wrapping (__main__), mutable param copies,
-error output declaration (`maybe_except: Error` in proc outputs).
+A catamorphism over the resolved Python AST. One case per constructor.
+Deterministic. No lookups — reads resolution from node annotations.
 
-**Does NOT:** cast insertion, literal wrapping, effect determination.
+**Does:** desugar Python surface syntax into Laurel: object construction
+(.New + __init__), context managers, for-loop abstraction (havoc + assume),
+loop labels, module-level wrapping (__main__), mutable param copies,
+error output declaration (`maybe_except: Error` in proc outputs), map
+`PythonType` annotations to `HighType`.
+
+**Does NOT:** scope resolution (Resolution did that), kwargs matching
+(FuncSig gives param order), cast insertion, literal wrapping, effect
+determination.
 
 ### Desugarings
 
