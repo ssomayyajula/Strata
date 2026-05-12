@@ -575,9 +575,13 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
             c.insert registeredName .unresolved) ctx
       (ctx', .ImportFrom (f a) (mapAnnOpt f (mapAnnVal f) modName) (mapAnnArr f (resolveAlias f) imports) (mapAnnOpt f (resolveInt f) level))
   | .Assign a targets value tc =>
-      (ctx, .Assign (f a) (mapAnnArr f (resolveExpr ctx f) targets) (resolveExpr ctx f value) (mapAnnOpt f (mapAnnVal f) tc))
+      let newNames := targets.val.toList.flatMap collectNamesFromTarget
+      let ctx' := newNames.foldl (fun c n => c.insert n (.variable (annotationToPythonType Option.none))) ctx
+      (ctx', .Assign (f a) (mapAnnArr f (resolveExpr ctx f) targets) (resolveExpr ctx f value) (mapAnnOpt f (mapAnnVal f) tc))
   | .AnnAssign a target ann value simple =>
-      (ctx, .AnnAssign (f a) (resolveExpr ctx f target) (resolveExpr ctx f ann) (mapAnnOpt f (resolveExpr ctx f) value) (resolveInt f simple))
+      let newNames := collectNamesFromTarget target
+      let ctx' := newNames.foldl (fun c n => c.insert n (.variable ann)) ctx
+      (ctx', .AnnAssign (f a) (resolveExpr ctx f target) (resolveExpr ctx f ann) (mapAnnOpt f (resolveExpr ctx f) value) (resolveInt f simple))
   | .AugAssign a target op value =>
       (ctx, .AugAssign (f a) (resolveExpr ctx f target) (resolveOperator f op) (resolveExpr ctx f value))
   | .If a test body orelse =>
