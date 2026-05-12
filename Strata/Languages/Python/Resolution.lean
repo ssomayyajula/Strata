@@ -101,7 +101,31 @@ partial def collectLocalsFromExpr (target : PythonExpr) : List Identifier :=
   | .Tuple _ elems _ => elems.val.toList.flatMap collectLocalsFromExpr
   | .List _ elems _ => elems.val.toList.flatMap collectLocalsFromExpr
   | .Starred _ inner _ => collectLocalsFromExpr inner
-  | _ => []
+  | .Subscript _ _ _ _ => []
+  | .Attribute _ _ _ _ => []
+  | .Constant _ _ _ => []
+  | .BinOp _ _ _ _ => []
+  | .BoolOp _ _ _ => []
+  | .UnaryOp _ _ _ => []
+  | .Compare _ _ _ _ => []
+  | .Call _ _ _ _ => []
+  | .IfExp _ _ _ _ => []
+  | .Dict _ _ _ => []
+  | .Set _ _ => []
+  | .ListComp _ _ _ => []
+  | .SetComp _ _ _ => []
+  | .DictComp _ _ _ _ => []
+  | .GeneratorExp _ _ _ => []
+  | .Await _ _ => []
+  | .Yield _ _ => []
+  | .YieldFrom _ _ => []
+  | .FormattedValue _ _ _ _ => []
+  | .JoinedStr _ _ => []
+  | .Lambda _ _ _ => []
+  | .NamedExpr _ _ _ => []
+  | .Slice _ _ _ _ => []
+  | .TemplateStr _ _ => []
+  | .Interpolation _ _ _ _ _ => []
 
 partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonType) :=
   match s with
@@ -152,7 +176,37 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
             | some varExpr => (collectLocalsFromExpr varExpr).map fun n => (n, annotationToPythonType none)
             | none => []
       itemVars ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
-  | _ => []
+  | .AsyncWith _ items bodyStmts _ =>
+      let itemVars := items.val.toList.flatMap fun item =>
+        match item with
+        | .mk_withitem _ _ optVars =>
+            match optVars.val with
+            | some varExpr => (collectLocalsFromExpr varExpr).map fun n => (n, annotationToPythonType none)
+            | none => []
+      itemVars ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
+  | .AsyncFor _ target _ bodyStmts _ _ =>
+      let targetNames := (collectLocalsFromExpr target).map fun n => (n, annotationToPythonType none)
+      targetNames ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
+  | .Match _ _ cases =>
+      cases.val.toList.flatMap fun c =>
+        match c with
+        | .mk_match_case _ _ _ caseBody => caseBody.val.toList.flatMap collectLocalsFromStmt
+  | .FunctionDef _ _ _ _ _ _ _ _ => []
+  | .AsyncFunctionDef _ _ _ _ _ _ _ _ => []
+  | .ClassDef _ _ _ _ _ _ _ => []
+  | .Return _ _ => []
+  | .Delete _ _ => []
+  | .Raise _ _ _ => []
+  | .Assert _ _ _ => []
+  | .Pass _ => []
+  | .Break _ => []
+  | .Continue _ => []
+  | .Import _ _ => []
+  | .ImportFrom _ _ _ _ => []
+  | .Global _ _ => []
+  | .Nonlocal _ _ => []
+  | .Expr _ _ => []
+  | .TypeAlias _ _ _ _ => []
 
 def computeLocals (body : PythonProgram) (paramNames : List Identifier)
     : List (Identifier × PythonType) :=
