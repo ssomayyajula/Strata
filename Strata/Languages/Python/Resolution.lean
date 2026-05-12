@@ -633,7 +633,10 @@ end
 
 def resolve (stmts : PythonProgram) : ResolvedPythonProgram :=
   let f : SourceRange → ResolvedAnn := fun sr => { sr, info := .none }
-  let (_, resolved) := stmts.foldl (init := (builtinContext, (#[] : ResolvedPythonProgram))) fun acc stmt =>
+  -- Pre-compute all module-level locals (same scoping rule as functions)
+  let moduleLocals := computeLocals stmts []
+  let initCtx := moduleLocals.foldl (fun c (n, ty) => c.insert n (.variable ty)) builtinContext
+  let (_, resolved) := stmts.foldl (init := (initCtx, (#[] : ResolvedPythonProgram))) fun acc stmt =>
     let (ctx, arr) := acc
     let (ctx', resolved) := resolveStmt ctx f stmt
     (ctx', arr.push resolved)
