@@ -872,9 +872,9 @@ D :: Γ ⊢_L g(e₁,...,eₙ); rest : A    (expression as statement)
 
 
 
-### Projection (internal to Elaboration)
+### Projection
 
-The final step of `elaborate`: map FGLProducer back to Laurel statements.
+Map FGLProducer back to Laurel statements.
 
 - `effectfulCall f args outputs body` → `[decl outputs; Assign [outputs] (StaticCall f args); body]`
 - `assign x V body` → `[Assign [x] V; body]`
