@@ -58,10 +58,10 @@ Core
 ### What each pass does
 
 **Resolution** is a fold over the Python AST that threads a growing context
-(state monad at top level, reader within bodies). Each declaration extends
-the context; each reference is annotated with its resolution from the
-current context. The output is the same AST with `ResolvedAnn` on every
-node — the scoping derivation for the Python program.
+as accumulator. Each declaration extends the context; each reference is
+annotated with its resolution from the current context. The output is the
+same AST with `ResolvedAnn` on every node — the scoping derivation for
+the Python program.
 
 **Translation** is a catamorphism over the resolved AST. It reads the
 annotation on each node and emits the corresponding Laurel construct.
@@ -149,8 +149,9 @@ def resolve : Array (Python.stmt SourceRange) → Array (Python.stmt ResolvedAnn
 **Input:** Raw Python AST (`Python.stmt SourceRange`).  
 **Output:** Resolved Python AST (`Python.stmt ResolvedAnn`).
 
-Resolution is a fold over the Python AST that threads a growing context.
-At the top level (module scope), each declaration extends the context:
+Resolution is a fold over the Python AST that threads a growing context
+as accumulator. At the top level (module scope), each declaration extends
+the context:
 
 - `def f(...)` → extends context with `f : .function sig`
 - `class C` → extends context with `C : .class_`, methods as `.function`
