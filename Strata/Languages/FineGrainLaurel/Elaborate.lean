@@ -8,12 +8,51 @@ import Strata.Languages.FineGrainLaurel.FineGrainLaurel
 public import Strata.Languages.Laurel.Laurel
 public import Strata.Languages.Laurel.HeapParameterizationConstants
 public import Strata.Languages.Laurel.CoreDefinitionsForLaurel
-public import Strata.Languages.Python.NameResolution
 
 namespace Strata.FineGrainLaurel
 open Strata.Laurel
-open Strata.Python.Resolution
 public section
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Internal types for Elaboration (derived from Laurel.Program, not from Resolution)
+-- Tech debt: ideally call sites would carry callee signatures directly
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+structure FuncSig where
+  name : String
+  params : List (String × HighType)
+  returnType : HighType
+
+instance : Inhabited FuncSig where
+  default := { name := "", params := [], returnType := .TCore "Any" }
+
+inductive NameInfo where
+  | function (sig : FuncSig)
+  | variable (ty : HighType)
+
+instance : Inhabited NameInfo where
+  default := .variable (.TCore "Any")
+
+structure ElabTypeEnv where
+  names : Std.HashMap String NameInfo := {}
+  classFields : Std.HashMap String (List (String × HighType)) := {}
+  deriving Inhabited
+
+def buildElabEnvFromProgram (program : Laurel.Program) (runtime : Laurel.Program := default) : ElabTypeEnv := Id.run do
+  let mut names : Std.HashMap String NameInfo := {}
+  let mut classFields : Std.HashMap String (List (String × HighType)) := {}
+  for proc in program.staticProcedures ++ runtime.staticProcedures do
+    let params := proc.inputs.map fun p => (p.name.text, p.type.val)
+    let retTy := match proc.outputs.head? with
+      | some o => o.type.val | none => HighType.TVoid
+    names := names.insert proc.name.text (.function { name := proc.name.text, params, returnType := retTy })
+  for td in program.types do
+    match td with
+    | .Composite ct =>
+      let fields := ct.fields.map fun f => (f.name.text, f.type.val)
+      classFields := classFields.insert ct.name.text fields
+    | _ => pure ()
+  { names, classFields }
 
 def mkLaurel (md : Imperative.MetaData Core.Expression) (e : StmtExpr) : StmtExprMd :=
   { val := e, md := md }
@@ -118,7 +157,7 @@ inductive FGLProducer where
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 structure ElabEnv where
-  typeEnv : TypeEnv
+  typeEnv : ElabTypeEnv
   program : Laurel.Program
   runtime : Laurel.Program := default
   procGrades : Std.HashMap String Grade := {}
@@ -782,7 +821,8 @@ def projectBody (md : Md) (prod : FGLProducer) : StmtExprMd :=
 -- Architecture §"fullElaborate structure"
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laurel.Program := default) (initialGrades : Std.HashMap String Grade := {}) : Except String (Laurel.Program × List String) := do
+def fullElaborate (program : Laurel.Program) (runtime : Laurel.Program := default) (initialGrades : Std.HashMap String Grade := {}) : Except String (Laurel.Program × List String) := do
+  let typeEnv := buildElabEnvFromProgram program runtime
   let baseEnv : ElabEnv := { typeEnv := typeEnv, program := program, runtime := runtime }
 
   -- PASS 1: Coinductive fixpoint iteration
@@ -798,7 +838,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       match bodyOpt with
       | some bodyExpr =>
         let extEnv := (proc.inputs ++ proc.outputs).foldl
-          (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
+          (fun (e : ElabTypeEnv) p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
         let inputList := proc.inputs.map fun p => (p.name.text, p.type.val)
         let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades, procInputs := inputList }
         let retTy := match (proc.outputs.filter fun o => eraseType o.type.val != .TCore "Error").head? with
@@ -821,7 +861,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
     match proc.body with
     | .Transparent bodyExpr =>
       let extEnv := (proc.inputs ++ proc.outputs).foldl
-        (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
+        (fun (e : ElabTypeEnv) p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
       let inputList := proc.inputs.map fun p => (p.name.text, p.type.val)
       let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades, procInputs := inputList }
       let g := knownGrades[proc.name.text]?.getD .pure
