@@ -96,6 +96,12 @@ def annotationToPythonType (ann : Option PythonExpr) : PythonType :=
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 mutual
+partial def collectWalrusFromComprehensions (comps : List (Python.comprehension SourceRange)) : List Identifier :=
+  comps.flatMap fun comp =>
+    match comp with
+    | .mk_comprehension _ _target iter ifs _isAsync =>
+        collectWalrusNames iter ++ ifs.val.toList.flatMap collectWalrusNames
+
 partial def collectNamesFromTarget (target : PythonExpr) : List Identifier :=
   match target with
   | .Name _ n _ => [n.val]
@@ -119,10 +125,10 @@ partial def collectWalrusNames (expr : PythonExpr) : List Identifier :=
   | .IfExp _ test body orelse => collectWalrusNames test ++ collectWalrusNames body ++ collectWalrusNames orelse
   | .Dict _ keys vals => keys.val.toList.flatMap (fun k => match k with | .some_expr _ e => collectWalrusNames e | .missing_expr _ => []) ++ vals.val.toList.flatMap collectWalrusNames
   | .Set _ elts => elts.val.toList.flatMap collectWalrusNames
-  | .ListComp _ elt _ => collectWalrusNames elt
-  | .SetComp _ elt _ => collectWalrusNames elt
-  | .DictComp _ key value _ => collectWalrusNames key ++ collectWalrusNames value
-  | .GeneratorExp _ elt _ => collectWalrusNames elt
+  | .ListComp _ elt generators => collectWalrusNames elt ++ collectWalrusFromComprehensions generators.val.toList
+  | .SetComp _ elt generators => collectWalrusNames elt ++ collectWalrusFromComprehensions generators.val.toList
+  | .DictComp _ key value generators => collectWalrusNames key ++ collectWalrusNames value ++ collectWalrusFromComprehensions generators.val.toList
+  | .GeneratorExp _ elt generators => collectWalrusNames elt ++ collectWalrusFromComprehensions generators.val.toList
   | .Await _ inner => collectWalrusNames inner
   | .Yield _ valOpt => match valOpt.val with | some v => collectWalrusNames v | none => []
   | .YieldFrom _ inner => collectWalrusNames inner
@@ -146,20 +152,30 @@ end
 
 partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonType) :=
   match s with
-  | .Assign _ targets _ _ =>
-      targets.val.toList.flatMap fun target =>
+  | .Assign _ targets value _ =>
+      let targetNames := targets.val.toList.flatMap fun target =>
         (collectNamesFromTarget target).map fun n => (n, annotationToPythonType none)
-  | .AnnAssign _ target annotation _ _ =>
-      (collectNamesFromTarget target).map fun n => (n, annotation)
-  | .AugAssign _ target _ _ =>
-      (collectNamesFromTarget target).map fun n => (n, annotationToPythonType none)
+      let rhsWalrus := (collectWalrusNames value).map fun n => (n, annotationToPythonType none)
+      targetNames ++ rhsWalrus
+  | .AnnAssign _ target annotation valueOpt _ =>
+      let targetNames := (collectNamesFromTarget target).map fun n => (n, annotation)
+      let rhsWalrus := match valueOpt.val with
+        | some v => (collectWalrusNames v).map fun n => (n, annotationToPythonType none)
+        | none => []
+      targetNames ++ rhsWalrus
+  | .AugAssign _ target _ value =>
+      let targetNames := (collectNamesFromTarget target).map fun n => (n, annotationToPythonType none)
+      let rhsWalrus := (collectWalrusNames value).map fun n => (n, annotationToPythonType none)
+      targetNames ++ rhsWalrus
   | .If _ test bodyStmts elseStmts =>
       (collectWalrusNames test).map (fun n => (n, annotationToPythonType none)) ++
       bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
       elseStmts.val.toList.flatMap collectLocalsFromStmt
-  | .For _ target _ bodyStmts orelse _ =>
+  | .For _ target iter bodyStmts orelse _ =>
       let targetNames := (collectNamesFromTarget target).map fun n => (n, annotationToPythonType none)
-      targetNames ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
+      let iterWalrus := (collectWalrusNames iter).map fun n => (n, annotationToPythonType none)
+      targetNames ++ iterWalrus ++
+      bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
       orelse.val.toList.flatMap collectLocalsFromStmt
   | .While _ cond bodyStmts orelse =>
       (collectWalrusNames cond).map (fun n => (n, annotationToPythonType none)) ++
@@ -190,29 +206,42 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
       orelse.val.toList.flatMap collectLocalsFromStmt ++
       finalbody.val.toList.flatMap collectLocalsFromStmt
   | .With _ items bodyStmts _ =>
-      let itemVars := items.val.toList.flatMap fun item =>
+      let itemLocals := items.val.toList.flatMap fun item =>
         match item with
-        | .mk_withitem _ _ optVars =>
-            match optVars.val with
-            | some varExpr => (collectNamesFromTarget varExpr).map fun n => (n, annotationToPythonType none)
-            | none => []
-      itemVars ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
+        | .mk_withitem _ ctxExpr optVars =>
+            let ctxWalrus := (collectWalrusNames ctxExpr).map fun n => (n, annotationToPythonType none)
+            let varNames := match optVars.val with
+              | some varExpr => (collectNamesFromTarget varExpr).map fun n => (n, annotationToPythonType none)
+              | none => []
+            ctxWalrus ++ varNames
+      itemLocals ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
   | .AsyncWith _ items bodyStmts _ =>
-      let itemVars := items.val.toList.flatMap fun item =>
+      let itemLocals := items.val.toList.flatMap fun item =>
         match item with
-        | .mk_withitem _ _ optVars =>
-            match optVars.val with
-            | some varExpr => (collectNamesFromTarget varExpr).map fun n => (n, annotationToPythonType none)
-            | none => []
-      itemVars ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
-  | .AsyncFor _ target _ bodyStmts orelse _ =>
+        | .mk_withitem _ ctxExpr optVars =>
+            let ctxWalrus := (collectWalrusNames ctxExpr).map fun n => (n, annotationToPythonType none)
+            let varNames := match optVars.val with
+              | some varExpr => (collectNamesFromTarget varExpr).map fun n => (n, annotationToPythonType none)
+              | none => []
+            ctxWalrus ++ varNames
+      itemLocals ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
+  | .AsyncFor _ target iter bodyStmts orelse _ =>
       let targetNames := (collectNamesFromTarget target).map fun n => (n, annotationToPythonType none)
-      targetNames ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
+      let iterWalrus := (collectWalrusNames iter).map fun n => (n, annotationToPythonType none)
+      targetNames ++ iterWalrus ++
+      bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
       orelse.val.toList.flatMap collectLocalsFromStmt
-  | .Match _ _ cases =>
-      cases.val.toList.flatMap fun c =>
+  | .Match _ subject cases =>
+      let subjectW := (collectWalrusNames subject).map fun n => (n, annotationToPythonType none)
+      let caseLocals := cases.val.toList.flatMap fun c =>
         match c with
-        | .mk_match_case _ _ _ caseBody => caseBody.val.toList.flatMap collectLocalsFromStmt
+        | .mk_match_case _ _pattern guardOpt caseBody =>
+            -- TODO: extract pattern bindings from _pattern (requires walking Python.pattern)
+            let guardW := match guardOpt.val with
+              | some g => (collectWalrusNames g).map fun n => (n, annotationToPythonType none)
+              | none => []
+            guardW ++ caseBody.val.toList.flatMap collectLocalsFromStmt
+      subjectW ++ caseLocals
   | .FunctionDef _ name _ _ _ _ _ _ => [(name.val, annotationToPythonType none)]
   | .AsyncFunctionDef _ name _ _ _ _ _ _ => [(name.val, annotationToPythonType none)]
   | .ClassDef _ name _ _ _ _ _ => [(name.val, annotationToPythonType none)]
@@ -220,9 +249,16 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonT
       match valOpt.val with
       | some v => (collectWalrusNames v).map (fun n => (n, annotationToPythonType none))
       | none => []
-  | .Delete _ _ => []
-  | .Raise _ _ _ => []
-  | .Assert _ _ _ => []
+  | .Delete _ targets =>
+      targets.val.toList.flatMap fun t => (collectWalrusNames t).map fun n => (n, annotationToPythonType none)
+  | .Raise _ excOpt causeOpt =>
+      let excW := match excOpt.val with | some e => collectWalrusNames e | none => []
+      let causeW := match causeOpt.val with | some e => collectWalrusNames e | none => []
+      (excW ++ causeW).map fun n => (n, annotationToPythonType none)
+  | .Assert _ test msgOpt =>
+      let testW := collectWalrusNames test
+      let msgW := match msgOpt.val with | some e => collectWalrusNames e | none => []
+      (testW ++ msgW).map fun n => (n, annotationToPythonType none)
   | .Pass _ => []
   | .Break _ => []
   | .Continue _ => []
