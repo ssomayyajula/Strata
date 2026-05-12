@@ -199,9 +199,8 @@ loop labels, module-level wrapping (__main__), mutable param copies,
 error output declaration (`maybe_except: Error` in proc outputs), map
 `PythonType` annotations to `HighType`.
 
-**Does NOT:** scope resolution (Resolution did that), kwargs matching
-(FuncSig gives param order), cast insertion, literal wrapping, effect
-determination.
+**Does NOT:** scope resolution (Resolution did that), cast insertion,
+literal wrapping, effect determination.
 
 ### Desugarings
 
