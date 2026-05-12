@@ -33,7 +33,7 @@ RESULTS_DIR="$SCRIPT_DIR/results"
 
 # Pipeline commands
 OLD_PIPELINE="pyAnalyzeLaurel"
-NEW_PIPELINE="pyAnalyzeLaurelRefactored"
+NEW_PIPELINE="pyAnalyzeV2"
 
 # Timeout per test (seconds)
 TIMEOUT=10
