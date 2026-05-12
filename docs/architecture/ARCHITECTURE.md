@@ -38,8 +38,7 @@ information is available to make a deterministic choice.
 ```lean
 def resolve   : Array (Python.stmt SourceRange) → Array (Python.stmt ResolvedAnn)
 def translate : Array (Python.stmt ResolvedAnn) → Laurel.Program
-def elaborate : Laurel.Program → GFGL.Program
-def project   : GFGL.Program → Laurel.Program
+def elaborate : Laurel.Program → Laurel.Program
 ```
 
 ### Diagram
@@ -51,9 +50,7 @@ Array (Python.stmt ResolvedAnn)    (scoped, every node annotated with its meanin
   ↓ [Translation: catamorphism over resolved AST]
 Laurel.Program                     (impure CBV, effects implicit)
   ↓ [Elaboration: graded bidirectional typing, total]
-GFGL.Program                       (effects explicit via grades)
-  ↓ [Projection: forget grading, trivial catamorphism]
-Laurel.Program                     (effects in calling conventions)
+Laurel.Program                     (effects explicit via calling conventions)
   ↓ [Core translation (existing, unchanged)]
 Core
 ```
