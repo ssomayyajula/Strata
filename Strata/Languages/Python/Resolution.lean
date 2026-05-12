@@ -15,8 +15,8 @@ Fold over the Python AST that threads a growing context as accumulator.
 Each declaration extends the context; each reference is annotated with
 its resolution from the current context.
 
-Input:  Array (Python.stmt SourceRange)
-Output: Array (Python.stmt ResolvedAnn)
+Input:  PythonProgram
+Output: ResolvedPythonProgram
 
 The output AST is the scoping derivation for the Python program —
 every node carries proof of what it refers to.
@@ -33,11 +33,14 @@ public section
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 abbrev Identifier := String
-abbrev PythonType := Python.expr SourceRange
+abbrev PythonExpr := Python.expr SourceRange
+abbrev PythonStmt := Python.stmt SourceRange
+abbrev PythonProgram := Array PythonStmt
+abbrev PythonType := PythonExpr
 
 structure FuncSig where
   params : List (Identifier × PythonType)
-  defaults : List (Identifier × Python.expr SourceRange)
+  defaults : List (Identifier × PythonExpr)
   returnType : PythonType
   locals : List (Identifier × PythonType)
   deriving Inhabited
@@ -79,23 +82,20 @@ def unresolvedAnn (sr : SourceRange) : ResolvedAnn :=
   { sr, info := .unresolved }
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Python Type Extraction (from annotations — NO extractTypeStr)
+-- Annotation Extraction
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-/-- Extract a PythonType from an optional annotation. No annotation → Any Name node. -/
-def annotationToPythonType (ann : Option (Python.expr SourceRange)) : PythonType :=
+/-- Extract a PythonType from an optional annotation. No annotation defaults to Any. -/
+def annotationToPythonType (ann : Option PythonExpr) : PythonType :=
   match ann with
   | some expr => expr
   | none => .Name SourceRange.none ⟨SourceRange.none, "Any"⟩ (.Load SourceRange.none)
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Scope Resolution (Function Locals)
---
--- Python scoping rule: any assignment target anywhere in a function body
--- is function-local. This computes the locals list for a function.
+-- Function Locals (Python scoping: assignment anywhere in body → function-local)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-partial def collectLocalsFromExpr (target : Python.expr SourceRange) : List Identifier :=
+partial def collectLocalsFromExpr (target : PythonExpr) : List Identifier :=
   match target with
   | .Name _ n _ => [n.val]
   | .Tuple _ elems _ => elems.val.toList.flatMap collectLocalsFromExpr
@@ -103,7 +103,7 @@ partial def collectLocalsFromExpr (target : Python.expr SourceRange) : List Iden
   | .Starred _ inner _ => collectLocalsFromExpr inner
   | _ => []
 
-partial def collectLocalsFromStmt (s : Python.stmt SourceRange) : List (Identifier × PythonType) :=
+partial def collectLocalsFromStmt (s : PythonStmt) : List (Identifier × PythonType) :=
   match s with
   | .Assign _ targets _ _ =>
       targets.val.toList.flatMap fun target =>
@@ -154,7 +154,7 @@ partial def collectLocalsFromStmt (s : Python.stmt SourceRange) : List (Identifi
       itemVars ++ bodyStmts.val.toList.flatMap collectLocalsFromStmt
   | _ => []
 
-def computeLocals (body : Array (Python.stmt SourceRange)) (paramNames : List Identifier)
+def computeLocals (body : PythonProgram) (paramNames : List Identifier)
     : List (Identifier × PythonType) :=
   let allPairs := body.toList.flatMap collectLocalsFromStmt
   let paramSet : Std.HashSet Identifier := paramNames.foldl (fun s n => s.insert n) {}
@@ -177,7 +177,7 @@ def extractParams (args : Python.arguments SourceRange) : List (Identifier × Py
         | .mk_arg _ argName annotation _ =>
             (argName.val, annotationToPythonType annotation.val)
 
-def extractDefaults (args : Python.arguments SourceRange) : List (Identifier × Python.expr SourceRange) :=
+def extractDefaults (args : Python.arguments SourceRange) : List (Identifier × PythonExpr) :=
   match args with
   | .mk_arguments _ _ argList _ _ _ _ defaults =>
       let params := argList.val.toList.map fun arg =>
@@ -188,12 +188,12 @@ def extractDefaults (args : Python.arguments SourceRange) : List (Identifier × 
       let defaultParams := params.drop requiredCount
       defaultParams.zip (defaults.val.toList)
 
-def extractReturnType (returns : Ann (Option (Python.expr SourceRange)) SourceRange) : PythonType :=
+def extractReturnType (returns : Ann (Option PythonExpr) SourceRange) : PythonType :=
   annotationToPythonType returns.val
 
 def extractFuncSig (args : Python.arguments SourceRange)
-    (returns : Ann (Option (Python.expr SourceRange)) SourceRange)
-    (body : Array (Python.stmt SourceRange)) : FuncSig :=
+    (returns : Ann (Option PythonExpr) SourceRange)
+    (body : PythonProgram) : FuncSig :=
   let params := extractParams args
   let defaults := extractDefaults args
   let retTy := extractReturnType returns
@@ -255,7 +255,7 @@ def builtinContext : Ctx :=
 
 -- TODO: implement the full fold
 -- Stub: annotates all nodes with .unresolved
-def resolve (stmts : Array (Python.stmt SourceRange)) : ResolvedPythonProgram :=
+def resolve (stmts : PythonProgram) : ResolvedPythonProgram :=
   stmts.map fun _stmt => sorry
 
 end -- public section
