@@ -872,9 +872,9 @@ D :: Γ ⊢_L g(e₁,...,eₙ); rest : A    (expression as statement)
 
 
 
-## Projection
+### Projection (internal to Elaboration)
 
-Trivial catamorphism. Forget grades. Map GFGL → Laurel:
+The final step of `elaborate`: map FGLProducer back to Laurel statements.
 
 - `effectfulCall f args outputs body` → `[decl outputs; Assign [outputs] (StaticCall f args); body]`
 - `assign x V body` → `[Assign [x] V; body]`
