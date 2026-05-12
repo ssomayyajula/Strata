@@ -1,5 +1,16 @@
 # Executive Summary: Architecture-Driven Python Front-End Development
 
+## The Ask
+
+Should we continue development of the new pipeline (`pyAnalyzeV2`) as the path
+forward for addressing the endemic tool errors in the Python front-end? The
+current pipeline continues to operate as the production path and correctness
+baseline. The architecture specification would serve as the shared reference
+for coercion, effect, and calling convention questions — providing traceability
+for changes and a basis for PR reviews beyond implicit mental models.
+
+---
+
 ## Summary
 
 A new Python→Laurel translation architecture has been developed that introduces
@@ -399,13 +410,3 @@ The point is not that the new pipeline avoids bugs. It's that when bugs occur,
 the architecture provides a framework for diagnosing root causes and verifying
 fixes — rather than iterating through heuristics in PR review.
 
----
-
-## The Ask
-
-Should we continue development of the new pipeline (`pyAnalyzeV2`) as the path
-forward for addressing the endemic tool errors in the Python front-end? The
-current pipeline continues to operate as the production path and correctness
-baseline. The architecture specification would serve as the shared reference
-for coercion, effect, and calling convention questions — providing traceability
-for changes and a basis for PR reviews beyond implicit mental models.
