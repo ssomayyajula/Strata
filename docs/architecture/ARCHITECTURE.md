@@ -937,6 +937,12 @@ grade > 1 and the coercion scheme changes.
 **Prelude data encodings:** Lists/dicts are recursive ADTs (`ListAny_cons`/`DictStrAny_cons`).
 Translation must emit these specific constructors.
 
+**Elaboration constructs internal lookup from program declarations:** The Laurel AST
+does not carry callee signatures on call-site nodes (`StaticCall` uses string names).
+Elaboration builds an internal signature map from `program.staticProcedures` at startup.
+Ideally, call sites would carry their callee's signature directly (no lookup needed),
+but this requires extending the Laurel AST or metadata system.
+
 **Multi-output forces err grade:** Translation declares `maybe_except : Error` on every
 procedure. The `outputs.length > 1` heuristic in grade inference therefore always fires,
 joining every user proc's grade with err. Architecturally, grade should come purely from
