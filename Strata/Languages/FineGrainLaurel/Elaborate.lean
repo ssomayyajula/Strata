@@ -122,11 +122,13 @@ structure ElabEnv where
   program : Laurel.Program
   runtime : Laurel.Program := default
   procGrades : Std.HashMap String Grade := {}
+  procInputs : List (String × HighType) := []
 
 structure ElabState where
   freshCounter : Nat := 0
   heapVar : Option String := none
   usedBoxConstructors : List (String × String × HighType) := []
+  usedHoles : List (String × Bool) := []
 
 abbrev ElabM := ReaderT ElabEnv (StateT ElabState Option)
 
@@ -338,7 +340,17 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
     | none =>
       let checkedArgs ← args.mapM fun arg => checkValue arg (.TCore "Any")
       pure (.staticCall md callee.text checkedArgs, .TCore "Any")
-  | .Hole _ _ => pure (.var md "_hole", .TCore "Any")
+  | .Hole deterministic _ => do
+    if deterministic then
+      let hv ← freshVar "hole"
+      let inputs := (← read).procInputs
+      let args := inputs.map fun (name, _) => FGLValue.var md name
+      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, true)] }
+      pure (.staticCall md hv args, .TCore "Any")
+    else
+      let hv ← freshVar "havoc"
+      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, false)] }
+      pure (.staticCall md hv [], .TCore "Any")
   | _ => failure
 
 -- Γ ⊢_v V ⇐ A (value checking = synth + subsume)
@@ -728,7 +740,6 @@ partial def projectValue : FGLValue → StmtExprMd
   | .litInt md n => mkLaurel md (.LiteralInt n)
   | .litBool md b => mkLaurel md (.LiteralBool b)
   | .litString md s => mkLaurel md (.LiteralString s)
-  | .var md "_hole" => mkLaurel md (.Hole)
   | .var md name => mkLaurel md (.Identifier (Identifier.mk name none))
   | .fromInt md v => mkLaurel md (.StaticCall (Identifier.mk "from_int" none) [projectValue v])
   | .fromStr md v => mkLaurel md (.StaticCall (Identifier.mk "from_str" none) [projectValue v])
@@ -788,7 +799,8 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       | some bodyExpr =>
         let extEnv := (proc.inputs ++ proc.outputs).foldl
           (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
-        let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
+        let inputList := proc.inputs.map fun p => (p.name.text, p.type.val)
+        let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades, procInputs := inputList }
         let retTy := match (proc.outputs.filter fun o => eraseType o.type.val != .TCore "Error").head? with
           | some o => o.type.val | none => .TCore "Any"
         match tryGrades proc.name.text procEnv bodyExpr retTy [.pure, .proc, .err, .heap, .heapErr] with
@@ -803,13 +815,15 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
   -- PASS 2: Elaborate each proc with final grades
   let mut procs : List Laurel.Procedure := []
   let mut allBoxConstructors : List (String × String × HighType) := []
+  let mut allHoles : List (String × Bool × List (String × HighType)) := []
   let mut elabFailures : List String := []
   for proc in program.staticProcedures do
     match proc.body with
     | .Transparent bodyExpr =>
       let extEnv := (proc.inputs ++ proc.outputs).foldl
         (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
-      let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
+      let inputList := proc.inputs.map fun p => (p.name.text, p.type.val)
+      let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades, procInputs := inputList }
       let g := knownGrades[proc.name.text]?.getD .pure
       let retTy := match (proc.outputs.filter fun o => eraseType o.type.val != .TCore "Error").head? with
         | some o => o.type.val | none => .TCore "Any"
@@ -820,6 +834,7 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       | some (fgl, st') =>
         allBoxConstructors := allBoxConstructors ++ st'.usedBoxConstructors.filter
           (fun (c, _, _) => !allBoxConstructors.any (fun (c2, _, _) => c == c2))
+        allHoles := allHoles ++ st'.usedHoles.map fun (name, det) => (name, det, inputList)
         let projected := projectBody bodyExpr.md fgl
         let md := bodyExpr.md
         let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd md .THeap }
@@ -871,16 +886,29 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
       { name := Identifier.mk (boxFieldName ty) none, type := ⟨boxFieldType ty, #[]⟩ }] : DatatypeConstructor }
   let boxDatatype : TypeDefinition := .Datatype {
     name := "Box", typeArgs := [], constructors := boxConstructors }
+  let holeProcs := allHoles.map fun (name, deterministic, inputs) =>
+    let params := inputs.map fun (pName, pType) =>
+      ({ name := Identifier.mk pName none, type := ⟨pType, #[]⟩ } : Laurel.Parameter)
+    let outputParam : Laurel.Parameter := { name := Identifier.mk "result" none, type := ⟨.TCore "Any", #[]⟩ }
+    { name := Identifier.mk name none
+      inputs := if deterministic then params else []
+      outputs := [outputParam]
+      preconditions := []
+      determinism := if deterministic then .deterministic none else .nondeterministic
+      decreases := none
+      isFunctional := deterministic
+      body := .Opaque [] none []
+      md := #[] : Laurel.Procedure }
   let result := if hasHeap then
     let heapTypesFiltered := heapConstants.types.filter fun td => match td with
       | .Datatype dt => dt.name.text != "Composite" && dt.name.text != "NotSupportedYet"
       | _ => true
     { program with
-      staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ heapConstants.staticProcedures ++ procs
+      staticProcedures := holeProcs ++ coreDefinitionsForLaurel.staticProcedures ++ heapConstants.staticProcedures ++ procs
       types := [fieldDatatype, boxDatatype, typeTagDatatype, compositeType] ++ heapTypesFiltered ++ coreDefinitionsForLaurel.types ++ program.types }
   else
     { program with
-      staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ procs
+      staticProcedures := holeProcs ++ coreDefinitionsForLaurel.staticProcedures ++ procs
       types := [typeTagDatatype, compositeType] ++ coreDefinitionsForLaurel.types ++ program.types }
   pure (result, elabFailures)
 
