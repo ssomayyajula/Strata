@@ -5,7 +5,7 @@
 The Python front-end has endemic tool errors from ad-hoc type coercion and
 8 implicitly-ordered lowering passes with no shared specification. A new
 pipeline (`pyAnalyzeV2`) replaces these with a single architecture-governed
-elaboration pass — currently at 63/69 test parity with the old pipeline.
+elaboration pass — currently at 45/54 test parity with the old pipeline (9 regressions to fix).
 
 **Should we continue development of `pyAnalyzeV2` as the path forward?**
 
@@ -337,9 +337,9 @@ handle Python-specific desugaring.
 
 | Metric | Current Pipeline | New Pipeline |
 |--------|-------------|-------------|
-| Test parity | — | 63/69 same result |
-| Regressions (pass → inconclusive) | — | 4 |
-| Regressions (pass → internal_error) | — | 2 (missing runtime function) |
+| Test parity (same category) | — | 45/54 |
+| Regressions (→ internal_error/timeout) | — | 9 (class fields, with-stmts, heap) |
+| Regressions (pass → inconclusive) | — | 3 |
 | Improvements (inconclusive → pass) | — | 1 |
 | Lowering passes required | 8 | 0 (Elaboration produces Core-ready output) |
 | Written specification | None | 1000+ lines |
