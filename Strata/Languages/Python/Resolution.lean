@@ -520,19 +520,33 @@ partial def resolveWithitem (ctx : Ctx) (f : SourceRange → ResolvedAnn) : Pyth
   | .mk_withitem a ctxExpr optVars => .mk_withitem (f a) (resolveExpr ctx f ctxExpr) (mapAnnOpt f (resolveExpr ctx f) optVars)
 
 partial def resolveExcepthandler (ctx : Ctx) (f : SourceRange → ResolvedAnn) : Python.excepthandler SourceRange → Python.excepthandler ResolvedAnn
-  | .ExceptHandler a ty name body => .ExceptHandler (f a) (mapAnnOpt f (resolveExpr ctx f) ty) (mapAnnOpt f (mapAnnVal f) name) (mapAnnArr f (resolveStmt ctx f ·  |>.2) body)
+  | .ExceptHandler a ty name body =>
+      let handlerCtx := match name.val with
+        | some n => ctx.insert n.val (.variable (annotationToPythonType Option.none))
+        | none => ctx
+      .ExceptHandler (f a) (mapAnnOpt f (resolveExpr ctx f) ty) (mapAnnOpt f (mapAnnVal f) name) ⟨f body.ann, resolveBlock handlerCtx f body.val⟩
 
 partial def resolveMatchCase (ctx : Ctx) (f : SourceRange → ResolvedAnn) : Python.match_case SourceRange → Python.match_case ResolvedAnn
-  | .mk_match_case a pat guard body => .mk_match_case (f a) (sorry) (mapAnnOpt f (resolveExpr ctx f) guard) (mapAnnArr f (resolveStmt ctx f · |>.2) body)
+  | .mk_match_case a pat guard body => .mk_match_case (f a) (sorry) (mapAnnOpt f (resolveExpr ctx f) guard) ⟨f body.ann, resolveBlock ctx f body.val⟩
+
+partial def resolveBlock (ctx : Ctx) (f : SourceRange → ResolvedAnn) (stmts : Array PythonStmt) : Array ResolvedPythonStmt :=
+  let (_, resolved) := stmts.foldl (init := (ctx, (#[] : Array ResolvedPythonStmt))) fun acc stmt =>
+    let (c, arr) := acc
+    let (c', r) := resolveStmt c f stmt
+    (c', arr.push r)
+  resolved
 
 partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : PythonStmt) : Ctx × ResolvedPythonStmt :=
   match s with
   | .FunctionDef a name args body decorators returns tc typeParams =>
       let sig := extractFuncSig args returns body.val
       let ctx' := ctx.insert name.val (.function sig)
+      -- Body sees: outer ctx + function name + params + locals
+      let bodyCtx := sig.params.foldl (fun c (n, ty) => c.insert n (.variable ty)) ctx'
+      let bodyCtx := sig.locals.foldl (fun c (n, ty) => c.insert n (.variable ty)) bodyCtx
       let info : NameInfo := .function sig
-      (ctx', .FunctionDef { sr := a, info } (mapAnnVal f name) (resolveArguments ctx' f args)
-        (mapAnnArr f (resolveStmt ctx' f · |>.2) body)
+      (ctx', .FunctionDef { sr := a, info } (mapAnnVal f name) (resolveArguments bodyCtx f args)
+        ⟨f body.ann, resolveBlock bodyCtx f body.val⟩
         (mapAnnArr f (resolveExpr ctx' f) decorators)
         (mapAnnOpt f (resolveExpr ctx' f) returns)
         (mapAnnOpt f (mapAnnVal f) tc)
@@ -540,9 +554,11 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
   | .AsyncFunctionDef a name args body decorators returns tc typeParams =>
       let sig := extractFuncSig args returns body.val
       let ctx' := ctx.insert name.val (.function sig)
+      let bodyCtx := sig.params.foldl (fun c (n, ty) => c.insert n (.variable ty)) ctx'
+      let bodyCtx := sig.locals.foldl (fun c (n, ty) => c.insert n (.variable ty)) bodyCtx
       let info : NameInfo := .function sig
-      (ctx', .AsyncFunctionDef { sr := a, info } (mapAnnVal f name) (resolveArguments ctx' f args)
-        (mapAnnArr f (resolveStmt ctx' f · |>.2) body)
+      (ctx', .AsyncFunctionDef { sr := a, info } (mapAnnVal f name) (resolveArguments bodyCtx f args)
+        ⟨f body.ann, resolveBlock bodyCtx f body.val⟩
         (mapAnnArr f (resolveExpr ctx' f) decorators)
         (mapAnnOpt f (resolveExpr ctx' f) returns)
         (mapAnnOpt f (mapAnnVal f) tc)
@@ -555,7 +571,7 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
       (ctx', .ClassDef { sr := a, info := .class_ name.val fields } (mapAnnVal f name)
         (mapAnnArr f (resolveExpr ctx' f) bases)
         (mapAnnArr f (resolveKeyword ctx' f) keywords)
-        (mapAnnArr f (resolveStmt ctx' f · |>.2) body)
+        ⟨f body.ann, resolveBlock ctx' f body.val⟩
         (mapAnnArr f (resolveExpr ctx' f) decorators)
         (mapAnnArr f (resolveTypeParam ctx' f) typeParams))
   | .Import a aliases =>
@@ -585,21 +601,21 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
   | .AugAssign a target op value =>
       (ctx, .AugAssign (f a) (resolveExpr ctx f target) (resolveOperator f op) (resolveExpr ctx f value))
   | .If a test body orelse =>
-      (ctx, .If (f a) (resolveExpr ctx f test) (mapAnnArr f (resolveStmt ctx f · |>.2) body) (mapAnnArr f (resolveStmt ctx f · |>.2) orelse))
+      (ctx, .If (f a) (resolveExpr ctx f test) ⟨f body.ann, resolveBlock ctx f body.val⟩ ⟨f orelse.ann, resolveBlock ctx f orelse.val⟩)
   | .For a target iter body orelse tc =>
-      (ctx, .For (f a) (resolveExpr ctx f target) (resolveExpr ctx f iter) (mapAnnArr f (resolveStmt ctx f · |>.2) body) (mapAnnArr f (resolveStmt ctx f · |>.2) orelse) (mapAnnOpt f (mapAnnVal f) tc))
+      (ctx, .For (f a) (resolveExpr ctx f target) (resolveExpr ctx f iter) ⟨f body.ann, resolveBlock ctx f body.val⟩ ⟨f orelse.ann, resolveBlock ctx f orelse.val⟩ (mapAnnOpt f (mapAnnVal f) tc))
   | .AsyncFor a target iter body orelse tc =>
-      (ctx, .AsyncFor (f a) (resolveExpr ctx f target) (resolveExpr ctx f iter) (mapAnnArr f (resolveStmt ctx f · |>.2) body) (mapAnnArr f (resolveStmt ctx f · |>.2) orelse) (mapAnnOpt f (mapAnnVal f) tc))
+      (ctx, .AsyncFor (f a) (resolveExpr ctx f target) (resolveExpr ctx f iter) ⟨f body.ann, resolveBlock ctx f body.val⟩ ⟨f orelse.ann, resolveBlock ctx f orelse.val⟩ (mapAnnOpt f (mapAnnVal f) tc))
   | .While a test body orelse =>
-      (ctx, .While (f a) (resolveExpr ctx f test) (mapAnnArr f (resolveStmt ctx f · |>.2) body) (mapAnnArr f (resolveStmt ctx f · |>.2) orelse))
+      (ctx, .While (f a) (resolveExpr ctx f test) ⟨f body.ann, resolveBlock ctx f body.val⟩ ⟨f orelse.ann, resolveBlock ctx f orelse.val⟩)
   | .Try a body handlers orelse finalbody =>
-      (ctx, .Try (f a) (mapAnnArr f (resolveStmt ctx f · |>.2) body) (mapAnnArr f (resolveExcepthandler ctx f) handlers) (mapAnnArr f (resolveStmt ctx f · |>.2) orelse) (mapAnnArr f (resolveStmt ctx f · |>.2) finalbody))
+      (ctx, .Try (f a) ⟨f body.ann, resolveBlock ctx f body.val⟩ (mapAnnArr f (resolveExcepthandler ctx f) handlers) ⟨f orelse.ann, resolveBlock ctx f orelse.val⟩ ⟨f finalbody.ann, resolveBlock ctx f finalbody.val⟩)
   | .TryStar a body handlers orelse finalbody =>
-      (ctx, .TryStar (f a) (mapAnnArr f (resolveStmt ctx f · |>.2) body) (mapAnnArr f (resolveExcepthandler ctx f) handlers) (mapAnnArr f (resolveStmt ctx f · |>.2) orelse) (mapAnnArr f (resolveStmt ctx f · |>.2) finalbody))
+      (ctx, .TryStar (f a) ⟨f body.ann, resolveBlock ctx f body.val⟩ (mapAnnArr f (resolveExcepthandler ctx f) handlers) ⟨f orelse.ann, resolveBlock ctx f orelse.val⟩ ⟨f finalbody.ann, resolveBlock ctx f finalbody.val⟩)
   | .With a items body tc =>
-      (ctx, .With (f a) (mapAnnArr f (resolveWithitem ctx f) items) (mapAnnArr f (resolveStmt ctx f · |>.2) body) (mapAnnOpt f (mapAnnVal f) tc))
+      (ctx, .With (f a) (mapAnnArr f (resolveWithitem ctx f) items) ⟨f body.ann, resolveBlock ctx f body.val⟩ (mapAnnOpt f (mapAnnVal f) tc))
   | .AsyncWith a items body tc =>
-      (ctx, .AsyncWith (f a) (mapAnnArr f (resolveWithitem ctx f) items) (mapAnnArr f (resolveStmt ctx f · |>.2) body) (mapAnnOpt f (mapAnnVal f) tc))
+      (ctx, .AsyncWith (f a) (mapAnnArr f (resolveWithitem ctx f) items) ⟨f body.ann, resolveBlock ctx f body.val⟩ (mapAnnOpt f (mapAnnVal f) tc))
   | .Return a value => (ctx, .Return (f a) (mapAnnOpt f (resolveExpr ctx f) value))
   | .Delete a targets => (ctx, .Delete (f a) (mapAnnArr f (resolveExpr ctx f) targets))
   | .Raise a exc cause => (ctx, .Raise (f a) (mapAnnOpt f (resolveExpr ctx f) exc) (mapAnnOpt f (resolveExpr ctx f) cause))
