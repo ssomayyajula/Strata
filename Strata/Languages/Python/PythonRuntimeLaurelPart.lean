@@ -532,6 +532,8 @@ function PNotIn ( v: Any, dictOrList: Any) : Any
 function is_IntReal (v: Any) : bool;
 function Any_real_to_int (v: Any) : int;
 
+function Any_type_to_Any (v: Any) : Any;
+
 function normalize_any (v : Any) : Any {
   if v == from_bool(true) then from_int(1)
   else (if v == from_bool(false) then from_int(0) else
