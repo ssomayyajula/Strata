@@ -408,7 +408,7 @@ partial def lookupProcOutputs (callee : String) : ElabM (List (String × HighTyp
 
 -- Dispatch smart constructor based on grade
 -- Architecture §"Subgrading Witness"
-private partial def dispatchCall (md : Md) (callee : String) (args : List FGLValue) (retTy : HighType)
+private partial def dispatchCall (md : Md) (callee : String) (args : List FGLValue)
     (callGrade : Grade) (body : FGLValue → ElabM FGLProducer) : ElabM FGLProducer := do
   match callGrade with
   | .pure => body (FGLValue.staticCall md callee args)
@@ -427,9 +427,9 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
       let result ← synthExpr arg
       match result with
       | .value val _ => go rest [] (val :: acc)
-      | .call callee checkedArgs retTy callGrade =>
+      | .call callee checkedArgs _retTy callGrade =>
         guard (Grade.leq callGrade grade)
-        dispatchCall arg.md callee checkedArgs retTy callGrade fun rv => go rest [] (rv :: acc)
+        dispatchCall arg.md callee checkedArgs callGrade fun rv => go rest [] (rv :: acc)
     | arg :: rest, pty :: ptysRest, acc => do
       let result ← synthExpr arg
       match result with
@@ -438,7 +438,7 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
         go rest ptysRest (coerced :: acc)
       | .call callee checkedArgs retTy callGrade =>
         guard (Grade.leq callGrade grade)
-        dispatchCall arg.md callee checkedArgs retTy callGrade fun rv =>
+        dispatchCall arg.md callee checkedArgs callGrade fun rv =>
           go rest ptysRest (applySubsume rv (eraseType retTy) (eraseType pty) :: acc)
   go args paramTypes []
 
@@ -447,25 +447,25 @@ partial def checkArgsK (args : List StmtExprMd) (params : List (String × HighTy
 -- Architecture §"Producer Checking", §"Assignment Rules"
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
+partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (retTy : HighType) (grade : Grade) : ElabM FGLProducer := do
   let md := stmt.md
   match stmt.val with
 
   -- if V then M else N: branches standalone, rest in after
   | .IfThenElse cond thn els =>
     let cc ← checkValue cond .TBool
-    let tp ← checkProducer thn [] grade
+    let tp ← checkProducer thn [] retTy grade
     let ep ← match els with
-      | some e => checkProducer e [] grade
+      | some e => checkProducer e [] retTy grade
       | none => pure .unit
-    let after ← elabRest rest grade
+    let after ← elabRest rest retTy grade
     pure (.ifThenElse md cc tp ep after)
 
   -- while V do M
   | .While cond _invs _dec body =>
     let cc ← checkValue cond .TBool
-    let bp ← checkProducer body [] grade
-    let after ← elabRest rest grade
+    let bp ← checkProducer body [] retTy grade
+    let after ← elabRest rest retTy grade
     pure (.whileLoop md cc bp after)
 
   -- return V
@@ -484,45 +484,44 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (grade : 
       | some ⟨.Hole true _, _⟩ => do let hv ← freshVar "hole"; pure (some (.staticCall md hv []))
       | some i => do let v ← checkValue i typeMd.val; pure (some v)
       | none => pure none
-    mkVarDecl md nameId.text (eraseType typeMd.val) ci fun _ => elabRest rest grade
+    mkVarDecl md nameId.text (eraseType typeMd.val) ci fun _ => elabRest rest retTy grade
 
   -- assert V
   | .Assert cond =>
     let cc ← checkValue cond .TBool
-    let after ← elabRest rest grade
+    let after ← elabRest rest retTy grade
     pure (.assert md cc after)
 
   -- assume V
   | .Assume cond =>
     let cc ← checkValue cond .TBool
-    let after ← elabRest rest grade
+    let after ← elabRest rest retTy grade
     pure (.assume md cc after)
 
   -- Assign [target] value — the to-rule for assignments
   | .Assign targets value => match targets with
-    | [target] => checkAssign md target value rest grade
-    | _ => elabRest rest grade
+    | [target] => checkAssign md target value rest retTy grade
+    | _ => elabRest rest retTy grade
 
   -- StaticCall at statement level (effectful call, grade > 1)
   | .StaticCall callee args =>
     let sig ← lookupFuncSig callee.text
     let params := match sig with | some s => s.params | none => []
-    let retTy := match sig with | some s => s.returnType | none => .TCore "Any"
     let callGrade := (← read).procGrades[callee.text]?.getD .pure
     guard (Grade.leq callGrade grade)
     checkArgsK args params grade fun checkedArgs => do
       match callGrade with
-      | .pure => elabRest rest grade
-      | _ => dispatchCall md callee.text checkedArgs retTy callGrade fun _rv => elabRest rest grade
+      | .pure => elabRest rest retTy grade
+      | _ => dispatchCall md callee.text checkedArgs callGrade fun _rv => elabRest rest retTy grade
 
   -- Block (labeled or unlabeled)
   | .Block stmts label =>
     match label with
     | some l =>
-      let blockProd ← elabRest stmts grade
-      let after ← elabRest rest grade
+      let blockProd ← elabRest stmts retTy grade
+      let after ← elabRest rest retTy grade
       pure (.labeledBlock md l blockProd after)
-    | none => elabRest (stmts ++ rest) grade
+    | none => elabRest (stmts ++ rest) retTy grade
 
   -- Standalone New: elaboration failure (breaks producer synthesis inversion)
   | .New _ => failure
@@ -532,23 +531,23 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (grade : 
       let hv ← freshVar "hole"
       pure (.returnValue md (.staticCall md hv []))
     else
-      do let hv ← freshVar "havoc"; mkVarDecl md hv (.TCore "Any") none fun _ => elabRest rest grade
+      do let hv ← freshVar "havoc"; mkVarDecl md hv (.TCore "Any") none fun _ => elabRest rest retTy grade
 
   -- Architecture §"Core Interface": must not fail. Emit havoc for unhandled.
-  | _ => do let hv ← freshVar "unhandled"; mkVarDecl md hv (.TCore "Any") none fun _ => elabRest rest grade
+  | _ => do let hv ← freshVar "unhandled"; mkVarDecl md hv (.TCore "Any") none fun _ => elabRest rest retTy grade
 
 -- elabRest: elaborate remaining statements
-partial def elabRest (stmts : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
+partial def elabRest (stmts : List StmtExprMd) (retTy : HighType) (grade : Grade) : ElabM FGLProducer := do
   match stmts with
   | [] => pure .unit
-  | stmt :: rest => checkProducer stmt rest grade
+  | stmt :: rest => checkProducer stmt rest retTy grade
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- checkAssign: assignment handled uniformly via typing rules
 -- Architecture §"Assignment Rules"
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtExprMd) (grade : Grade) : ElabM FGLProducer := do
+partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtExprMd) (retTy : HighType) (grade : Grade) : ElabM FGLProducer := do
   match target.val with
   -- Field write: obj.field := v (heap effect)
   | .FieldSelect obj field =>
@@ -569,7 +568,7 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
       let freshH ← freshVar "heap"
       modify fun s => { s with heapVar := some freshH }
       extendEnv freshH .THeap do
-        let after ← elabRest rest grade
+        let after ← elabRest rest retTy grade
         pure (.varDecl md freshH (.TCore "Heap") (some newHeap) after)
     | none => failure
 
@@ -589,7 +588,7 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
         | some e => ⟨.Assign [target] e, value.md⟩
         | none => ⟨.Block [] none, value.md⟩
       let desugared : StmtExprMd := ⟨.IfThenElse cond assignThn (some assignEls), value.md⟩
-      checkProducer desugared rest grade
+      checkProducer desugared rest retTy grade
     -- Block RHS (class instantiation): desugar
     | .Block stmts _ =>
       match stmts.reverse with
@@ -597,23 +596,23 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
         let init := initRev.reverse
         let assignLast : StmtExprMd := ⟨.Assign [target] last, md⟩
         let desugared : StmtExprMd := ⟨.Block (init ++ [assignLast]) none, value.md⟩
-        checkProducer desugared rest grade
-      | [] => elabRest rest grade
+        checkProducer desugared rest retTy grade
+      | [] => elabRest rest retTy grade
     -- Hole RHS
     | .Hole false _ =>
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_havoc"
-        mkVarDecl md name (eraseType targetTy) none fun _ => elabRest rest grade
+        mkVarDecl md name (eraseType targetTy) none fun _ => elabRest rest retTy grade
       else
         do let hvName ← freshVar "havoc"; mkVarDecl md hvName (eraseType targetTy) none fun hv => do
-          let after ← elabRest rest grade; pure (.assign md tv hv after)
+          let after ← elabRest rest retTy grade; pure (.assign md tv hv after)
     | .Hole true _ =>
       let hv ← freshVar "hole"
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_x"
-        mkVarDecl md name (eraseType targetTy) (some (.staticCall md hv [])) fun _ => elabRest rest grade
+        mkVarDecl md name (eraseType targetTy) (some (.staticCall md hv [])) fun _ => elabRest rest retTy grade
       else do
-        let after ← elabRest rest grade; pure (.assign md tv (.staticCall md hv []) after)
+        let after ← elabRest rest retTy grade; pure (.assign md tv (.staticCall md hv []) after)
     -- New RHS (heap effect + coercion)
     | .New classId =>
       guard (Grade.leq .heap grade)
@@ -628,10 +627,10 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
         extendEnv freshH .THeap do
           if needsDecl then
             let name := match target.val with | .Identifier id => id.text | _ => "_x"
-            let cont ← extendEnv name (.UserDefined (Identifier.mk classId.text none)) (elabRest rest grade)
+            let cont ← extendEnv name (.UserDefined (Identifier.mk classId.text none)) (elabRest rest retTy grade)
             pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.varDecl md name (eraseType targetTy) (some coercedObj) cont))
           else do
-            let after ← elabRest rest grade
+            let after ← elabRest rest retTy grade
             pure (.varDecl md freshH (.TCore "Heap") (some newHeap) (.assign md tv coercedObj after))
       | none => failure
     -- StaticCall RHS (to-rule: effectful call → bind → assign)
@@ -644,8 +643,8 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
       let assignOrDecl (val : FGLValue) : ElabM FGLProducer := do
         if needsDecl then
           let name := match target.val with | .Identifier id => id.text | _ => "_x"
-          mkVarDecl md name (eraseType targetTy) (some val) fun _ => elabRest rest grade
-        else do let after ← elabRest rest grade; pure (.assign md tv val after)
+          mkVarDecl md name (eraseType targetTy) (some val) fun _ => elabRest rest retTy grade
+        else do let after ← elabRest rest retTy grade; pure (.assign md tv val after)
       checkArgsK args params grade fun checkedArgs => do
         match callGrade with
         | .pure =>
@@ -653,7 +652,7 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
           let coerced := applySubsume cv (eraseType retHty) (eraseType targetTy)
           assignOrDecl coerced
         | _ =>
-          dispatchCall md callee.text checkedArgs retHty callGrade fun rv => do
+          dispatchCall md callee.text checkedArgs callGrade fun rv => do
             let coerced := applySubsume rv (eraseType retHty) (eraseType targetTy)
             assignOrDecl coerced
     -- FieldSelect RHS (heap read)
@@ -674,20 +673,20 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
         let coerced := applySubsume unboxed (eraseType fieldTy) (eraseType targetTy)
         if needsDecl then
           let name := match target.val with | .Identifier id => id.text | _ => "_x"
-          mkVarDecl md name (eraseType targetTy) (some coerced) fun _ => elabRest rest grade
-        else do let after ← elabRest rest grade; pure (.assign md tv coerced after)
+          mkVarDecl md name (eraseType targetTy) (some coerced) fun _ => elabRest rest retTy grade
+        else do let after ← elabRest rest retTy grade; pure (.assign md tv coerced after)
       | none =>
         let fv := FGLValue.fieldAccess md ov field.text
-        let after ← elabRest rest grade
+        let after ← elabRest rest retTy grade
         pure (.assign md tv fv after)
     -- Default: checkValue on RHS
     | _ =>
       let cv ← checkValue value targetTy
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_x"
-        mkVarDecl md name (eraseType targetTy) (some cv) fun _ => elabRest rest grade
+        mkVarDecl md name (eraseType targetTy) (some cv) fun _ => elabRest rest retTy grade
       else do
-        let after ← elabRest rest grade
+        let after ← elabRest rest retTy grade
         pure (.assign md tv cv after)
 
 end
@@ -698,7 +697,7 @@ end
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd)
-    (grades : List Grade) : Option Grade :=
+    (retTy : HighType) (grades : List Grade) : Option Grade :=
   match grades with
   | [] => some .heapErr
   | g :: rest =>
@@ -706,9 +705,9 @@ partial def tryGrades (callee : String) (env : ElabEnv) (body : StmtExprMd)
       freshCounter := 0
       heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
     let trialEnv := { env with procGrades := env.procGrades.insert callee g }
-    match (checkProducer body [] g).run trialEnv |>.run st with
+    match (checkProducer body [] retTy g).run trialEnv |>.run st with
     | some _ => some g
-    | none => tryGrades callee env body rest
+    | none => tryGrades callee env body retTy rest
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Projection
@@ -781,7 +780,9 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
         let extEnv := (proc.inputs ++ proc.outputs).foldl
           (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
         let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
-        match tryGrades proc.name.text procEnv bodyExpr [.pure, .proc, .err, .heap, .heapErr] with
+        let retTy := match (proc.outputs.filter fun o => eraseType o.type.val != .TCore "Error").head? with
+          | some o => o.type.val | none => .TCore "Any"
+        match tryGrades proc.name.text procEnv bodyExpr retTy [.pure, .proc, .err, .heap, .heapErr] with
         | some g =>
           let g := if proc.outputs.length > 1 then Grade.join g .err else g
           if knownGrades[proc.name.text]? != some g then
@@ -801,10 +802,12 @@ def fullElaborate (typeEnv : TypeEnv) (program : Laurel.Program) (runtime : Laur
         (fun e p => { e with names := e.names.insert p.name.text (.variable p.type.val) }) typeEnv
       let procEnv : ElabEnv := { baseEnv with typeEnv := extEnv, procGrades := knownGrades }
       let g := knownGrades[proc.name.text]?.getD .pure
+      let retTy := match (proc.outputs.filter fun o => eraseType o.type.val != .TCore "Error").head? with
+        | some o => o.type.val | none => .TCore "Any"
       let st : ElabState := {
         freshCounter := 0
         heapVar := if g == .heap || g == .heapErr then some "$heap" else none }
-      match (checkProducer bodyExpr [] g).run procEnv |>.run st with
+      match (checkProducer bodyExpr [] retTy g).run procEnv |>.run st with
       | some (fgl, st') =>
         allBoxConstructors := allBoxConstructors ++ st'.usedBoxConstructors.filter
           (fun (c, _, _) => !allBoxConstructors.any (fun (c2, _, _) => c == c2))
