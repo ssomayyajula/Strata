@@ -39,6 +39,7 @@ information is available to make a deterministic choice.
 def resolve   : Array (Python.stmt SourceRange) → Array (Python.stmt ResolvedAnn)
 def translate : Array (Python.stmt ResolvedAnn) → Laurel.Program
 def elaborate : Laurel.Program → GFGL.Program
+def project   : GFGL.Program → Laurel.Program
 ```
 
 ### Diagram
@@ -47,7 +48,7 @@ def elaborate : Laurel.Program → GFGL.Program
 Array (Python.stmt SourceRange)    (raw, unscoped)
   ↓ [Resolution: scope resolution, fold with growing context]
 Array (Python.stmt ResolvedAnn)    (scoped, every node annotated with its meaning)
-  ↓ [Translation: catamorphism, no lookups]
+  ↓ [Translation: catamorphism over resolved AST]
 Laurel.Program                     (impure CBV, effects implicit)
   ↓ [Elaboration: graded bidirectional typing, total]
 GFGL.Program                       (effects explicit via grades)
@@ -85,13 +86,13 @@ abbrev Identifier := String
 abbrev PythonType := Python.expr SourceRange
 
 structure FuncSig where
-  params : Std.HashMap Identifier PythonType
-  defaults : Std.HashMap Identifier (Python.expr SourceRange)
+  params : List (Identifier × PythonType)
+  defaults : List (Identifier × Python.expr SourceRange)
   returnType : PythonType
-  locals : Std.HashMap Identifier PythonType
+  locals : List (Identifier × PythonType)
 
 inductive NameInfo where
-  | class_ (name : Identifier) (fields : Std.HashMap Identifier PythonType)
+  | class_ (name : Identifier) (fields : List (Identifier × PythonType))
   | function (sig : FuncSig)
   | variable (ty : PythonType)
   | module_ (name : Identifier)
