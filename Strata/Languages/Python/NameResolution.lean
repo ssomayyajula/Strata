@@ -58,6 +58,10 @@ structure ResolvedAnn where
 instance : Inhabited ResolvedAnn where
   default := { sr := .none, info := .unresolved }
 
+abbrev ResolvedPythonStmt := Python.stmt ResolvedAnn
+abbrev ResolvedPythonExpr := Python.expr ResolvedAnn
+abbrev ResolvedPythonProgram := Array ResolvedPythonStmt
+
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Context
 -- ═══════════════════════════════════════════════════════════════════════════════
@@ -249,9 +253,10 @@ def builtinContext : Ctx :=
 -- The Fold: resolve
 -- ═══════════════════════════════════════════════════════════════════════════════
 
--- TODO: implement the actual fold
--- For now, stub that passes through with .unresolved on all nodes
--- This will be filled in step by step
+-- TODO: implement the full fold
+-- Stub: annotates all nodes with .unresolved
+def resolve (stmts : Array (Python.stmt SourceRange)) : ResolvedPythonProgram :=
+  stmts.map fun _stmt => sorry
 
 end -- public section
 end Strata.Python.Resolution

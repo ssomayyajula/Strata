@@ -466,16 +466,14 @@ public def pyAnalyzeLaurelV2
     | .ok r => pure r
     | .error msg => throw (.internal msg)
 
-  -- Step 2: Build TypeEnv (Γ) from Python AST + prelude
-  let baseEnv ← profileStep profile "Build TypeEnv (Resolution)" do
-    let env := Python.Resolution.buildTypeEnv stmts
-    pure env.withPrelude
+  -- Step 2: Resolution (scope the Python AST)
+  let resolvedStmts ← profileStep profile "Resolution (scope Python AST)" do
+    pure (Python.Resolution.resolve stmts)
 
-  -- Step 3: Run Translation with extended Γ (includes runtime sigs for default filling)
-  let translationEnv := baseEnv.withRuntimeProgram Python.pythonRuntimeLaurelPart
+  -- Step 3: Translation (fold resolved AST → Laurel)
   let metadataPath := sourcePath.getD pythonIonPath
   let laurelProgram ← profileStep profile "Translate Python to Laurel (V2)" do
-    match Python.Translation.runTranslation stmts translationEnv metadataPath with
+    match Python.Translation.runTranslation resolvedStmts metadataPath with
     | .error e => match e with
       | .userError range msg => throw (.userCode range msg)
       | _ => throw (.internal s!"V2 Translation failed: {e}")
@@ -487,7 +485,7 @@ public def pyAnalyzeLaurelV2
     let runtimeGrades := Python.pythonRuntimeLaurelPart.staticProcedures.foldl (fun acc proc =>
       acc.insert proc.name.text (FineGrainLaurel.gradeFromSignature proc))
       ({} : Std.HashMap String FineGrainLaurel.Grade)
-    match FineGrainLaurel.fullElaborate translationEnv laurelProgram Python.pythonRuntimeLaurelPart runtimeGrades with
+    match FineGrainLaurel.fullElaborate laurelProgram Python.pythonRuntimeLaurelPart runtimeGrades with
     | .error e => throw (.internal s!"Elaboration failed: {e}")
     | .ok (prog, failures) =>
       unless failures.isEmpty do
