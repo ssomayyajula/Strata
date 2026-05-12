@@ -2,23 +2,24 @@
 
 ## The Ask
 
-Should we continue development of the new pipeline (`pyAnalyzeV2`) as the path
-forward for addressing the endemic tool errors in the Python front-end? The
-current pipeline continues to operate as the production path and correctness
-baseline. The architecture specification would serve as the shared reference
-for coercion, effect, and calling convention questions — providing traceability
-for changes and a basis for PR reviews beyond implicit mental models.
+The Python front-end has endemic tool errors from ad-hoc type coercion and
+8 implicitly-ordered lowering passes with no shared specification. A new
+pipeline (`pyAnalyzeV2`) replaces these with a single architecture-governed
+elaboration pass — currently at 63/69 test parity with the old pipeline.
+
+**Should we continue development of `pyAnalyzeV2` as the path forward?**
+
+The current pipeline remains operational as the production path. The new
+architecture (`ARCHITECTURE.md`, 1000+ lines) provides a written specification
+for coercion, effect, and calling convention decisions — enabling traceable
+changes and spec-based PR review.
 
 ---
 
-## Summary
+## Background
 
-A new Python→Laurel translation architecture has been developed that introduces
-a single, written specification governing how type coercions are inserted, how
-effects are tracked, and what intermediate representations are valid.
-
-The existing pipeline (2100 lines of translation + 8 lowering passes) has no such
-specification. As a result, contributors operate under different mental models of
+The existing pipeline (2100 lines of translation + 8 lowering passes) has no
+written specification. Contributors operate under different mental models of
 when coercions should fire, how effects compose, and what constitutes valid
 intermediate output. This leads to:
 
