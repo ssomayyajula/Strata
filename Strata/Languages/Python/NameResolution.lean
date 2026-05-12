@@ -347,7 +347,7 @@ private def resolveClassDef (name : Ann String SourceRange)
           | _ => "unknown"
         let fieldType := annotationToHighType annotation
         fields := fields ++ [(fieldName, fieldType)]
-    | .FunctionDef _ methodName methodArgs methodBody _ methodReturns _ _ =>
+    | .FunctionDef _ methodName methodArgs _methodBody _ methodReturns _ _ =>
         let qualName := s!"{name.val}@{methodName.val}"
         let allParams := extractParams methodArgs
         let allDefaults := extractDefaults methodArgs
@@ -727,7 +727,7 @@ def TypeEnv.mergeSpecsWithErrors (env : TypeEnv)
   let mut names := env.names
   let mut classFields := env.classFields
   -- Insert procedures with error output info
-  for (procName, (paramPairs, retTypeStr, hasError)) in procedures.toList do
+  for (procName, (paramPairs, retTypeStr, _hasError)) in procedures.toList do
     let params := paramPairs.map fun (pName, pType) => (pName, pythonTypeToHighType pType)
     let retTy := pythonTypeToHighType retTypeStr
     let defaults := params.map fun _ => (none : Option StmtExprMd)
