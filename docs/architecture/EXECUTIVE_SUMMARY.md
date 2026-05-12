@@ -333,14 +333,15 @@ handle Python-specific desugaring.
 
 ---
 
-## Current Status (2026-05-08)
+## Current Status (2026-05-11)
 
 | Metric | Current Pipeline | New Pipeline |
 |--------|-------------|-------------|
-| CI test agreement | — | 42/46 same result |
-| Regressions (pass → inconclusive) | — | 3 |
+| Test parity | — | 63/69 same result |
+| Regressions (pass → inconclusive) | — | 4 |
+| Regressions (pass → internal_error) | — | 2 (missing runtime function) |
 | Improvements (inconclusive → pass) | — | 1 |
-| Lowering passes required | 8 | 1 (Laurel → GFGL) |
+| Lowering passes required | 8 | 0 (Elaboration produces Core-ready output) |
 | Written specification | None | 1000+ lines |
 | Coercion rule | Ad-hoc (scattered across Translation) | Subsumption table (one function) |
 | Adding a Python construct | Modify Translation + verify 8 pass interactions | Add Translation case + typing rule |
@@ -348,11 +349,10 @@ handle Python-specific desugaring.
 The current pipeline remains operational as a parallel path (`pyAnalyzeLaurel`) and
 serves as the correctness baseline for differential testing.
 
-Three tests remain where the current pipeline proves VCs that the new pipeline
-cannot yet (`test_try_except_scoping`, `test_datetime`, `test_dict_operations`).
-These are encoding quality gaps — the new pipeline's try/except and module-level
-encoding generates more complex VC structure that the solver needs more time to
-handle — not soundness issues.
+Four tests produce inconclusive where the old pipeline passes (`test_try_except_scoping`,
+`test_datetime`, `test_dict_operations`, `test_timedelta_expr`) — encoding quality gaps,
+not soundness issues. Two tests crash due to a missing runtime function (`Any_type_to_Any`
+— the Python `type()` builtin, needed for module-level code that the old pipeline skips).
 
 ---
 
