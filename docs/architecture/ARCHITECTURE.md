@@ -36,8 +36,8 @@ information is available to make a deterministic choice.
 ### Type signatures
 
 ```lean
-def resolve   : Array (Python.stmt SourceRange) → Array (Python.stmt ResolvedAnn)
-def translate : Array (Python.stmt ResolvedAnn) → Laurel.Program
+def resolve   : Array (Python.stmt SourceRange) → ResolvedPythonProgram
+def translate : ResolvedPythonProgram → Laurel.Program
 def elaborate : Laurel.Program → Laurel.Program
 ```
 
@@ -45,9 +45,9 @@ def elaborate : Laurel.Program → Laurel.Program
 
 ```
 Array (Python.stmt SourceRange)    (raw, unscoped)
-  ↓ [Resolution: scope resolution, fold with growing context]
-Array (Python.stmt ResolvedAnn)    (scoped, every node annotated with its meaning)
-  ↓ [Translation: fold over resolved AST]
+  ↓ [Resolution: disambiguate, produce Laurel-ready identifiers]
+ResolvedPythonProgram              (scoped, every node annotated with NodeInfo)
+  ↓ [Translation: structural recursion, pattern match on NodeInfo]
 Laurel.Program                     (impure CBV, effects implicit)
   ↓ [Elaboration: graded bidirectional typing, total]
 Laurel.Program                     (effects explicit via calling conventions)
@@ -63,8 +63,8 @@ annotated with its resolution from the current context. The output is the
 same AST with `ResolvedAnn` on every node — the scoping derivation for
 the Python program.
 
-**Translation** is a fold over the resolved AST. It reads the
-annotation on each node and emits the corresponding Laurel construct.
+**Translation** is a structural recursion over the resolved AST. It
+pattern matches on `NodeInfo` and emits the corresponding Laurel construct.
 No name resolution — that was done by Resolution. At call sites,
 Translation uses the FuncSig from the annotation to match args to params
 (positional + kwargs → param order). If a node is `.unresolved`,
@@ -79,26 +79,53 @@ produces output. Grade inference is by coinduction on the call graph.
 ### Intermediate types
 
 ```lean
-abbrev Identifier := String
 abbrev PythonType := Python.expr SourceRange
 
 structure FuncSig where
-  params : List (Identifier × PythonType)
-  defaults : List (Identifier × Python.expr SourceRange)
+  name : Laurel.Identifier
+  params : List (Laurel.Identifier × PythonType)
+  defaults : List (Laurel.Identifier × PythonExpr)
   returnType : PythonType
-  locals : List (Identifier × PythonType)
+  locals : List (Laurel.Identifier × PythonType)
 
-inductive NameInfo where
-  | class_ (name : Identifier) (fields : List (Identifier × PythonType))
-  | function (sig : FuncSig)
-  | variable (ty : PythonType)
-  | module_ (name : Identifier)
+inductive NodeInfo where
+  | variable (id : Laurel.Identifier)
+  | call (callee : Laurel.Identifier) (sig : FuncSig)
+  | classNew (cls : Laurel.Identifier) (init : Laurel.Identifier) (sig : FuncSig)
+  | operator (callee : Laurel.Identifier)
+  | funcDecl (sig : FuncSig)
+  | classDecl (name : Laurel.Identifier) (fields : List (Laurel.Identifier × PythonType)) (methods : List FuncSig)
   | unresolved
+  | irrelevant
 
 structure ResolvedAnn where
   sr : SourceRange
-  info : NameInfo
+  info : NodeInfo
+
+structure ResolvedPythonProgram where
+  stmts : Array (Python.stmt ResolvedAnn)
+  moduleLocals : List (Laurel.Identifier × PythonType)
 ```
+
+**Design invariant:** Resolution constructs all `Laurel.Identifier` values
+(applying name qualification, builtin mapping, etc.). Translation pattern
+matches on `NodeInfo` and uses the identifiers directly. Translation never
+constructs a `Laurel.Identifier` from a string — it can only forward what
+Resolution provided. This makes ill-scoped names unrepresentable in
+Translation's output.
+
+**What Resolution disambiguates:** A Python `Name` node is syntactically
+ambiguous — it could be a variable reference, a function callee, a class
+reference, a type annotation, or a module. Resolution determines which it
+is and attaches the appropriate `NodeInfo` variant with Laurel-ready data.
+The process of disambiguation also produces auxiliary data (FuncSig, field
+lists) that Translation needs to be mechanical.
+
+**Internal vs output:** Resolution's internal `Ctx` tracks modules (for
+resolving `module.func()` calls) and other intermediate state. This does
+NOT appear in the output `NodeInfo`. Module Name nodes get `.irrelevant`
+in the output — the Call node for `module.func()` gets `.call` with the
+resolved callee.
 
 
 ## Engineering Principles
@@ -118,108 +145,159 @@ structure ResolvedAnn where
 ### Illegal States Unrepresentable
 
 **Resolution → Translation contract:** Translation CANNOT emit a `StaticCall`
-to a name that is not in Γ. Enforced by the resolved AST representation:
-call sites carry `.function sig` in their annotation. Unresolvable calls
-carry `.unresolved` and Translation emits Hole. There is no constructor
-that represents "StaticCall to an unresolved name."
+to a name that Resolution did not verify. Enforced by the data: call sites
+carry `.call callee sig` where `callee` is a `Laurel.Identifier` that
+Resolution constructed. Translation pattern matches and forwards `callee`
+directly. It cannot fabricate a callee name because it never constructs
+`Laurel.Identifier` values — it only receives them from the annotation.
+
+Unresolvable calls carry `.unresolved` and Translation emits Hole.
 
 This eliminates an entire class of bugs:
-- Undefined function calls (→ Core "not found" errors)
+- Undefined function calls (→ free variables in output)
+- Ill-qualified method names (→ "get_x" instead of "Foo@get_x")
 - Arity mismatches (sig in annotation determines param count)
-- Type-level module resolution failures silently producing garbage names
+- Stringly-typed name fabrication in Translation
 
 **Types are Python annotation expressions:** Types flow through Resolution
 as `PythonType := Python.expr SourceRange` — the actual annotation from the
 source. Translation maps them to `HighType` when emitting Laurel. No string
 intermediate (`extractTypeStr` is abolished).
 
-**No boolean blindness in Resolution:** `NameInfo` is an inductive —
-pattern matching on it gives you the data you need. There is no
-`isResolved : String → Bool` followed by a separate lookup. The annotation
-IS the resolution.
+**No boolean blindness:** `NodeInfo` is an inductive — pattern matching
+on it gives you the data you need and determines Translation's action.
+There is no `isResolved : String → Bool` followed by a separate lookup.
+The annotation IS the resolution.
 
 
 
 ## Resolution
 
 ```lean
-def resolve : Array (Python.stmt SourceRange) → Array (Python.stmt ResolvedAnn)
+def resolve : Array (Python.stmt SourceRange) → ResolvedPythonProgram
 ```
 
-**Input:** Raw Python AST (`Python.stmt SourceRange`).  
-**Output:** Resolved Python AST (`Python.stmt ResolvedAnn`).
+**Input:** Raw Python AST (`Python.stmt SourceRange`).
+**Output:** `ResolvedPythonProgram` — resolved stmts + module-level locals.
 
 Resolution is a fold over the Python AST that threads a growing context
-as accumulator. At the top level (module scope), each declaration extends
-the context:
+as accumulator. Its job is to **disambiguate** what each AST node means
+and attach the result as a `NodeInfo` annotation. The process of
+disambiguation produces Laurel-ready identifiers and auxiliary data
+(FuncSig, field lists) that Translation uses mechanically.
 
-- `def f(...)` → extends context with `f : .function sig`
-- `class C` → extends context with `C : .class_`, methods as `.function`
-- `import M` → extends context with `M : .module_`
-- `x : T = ...` → extends context with `x : .variable T`
-- Python builtins (from stubs) → extend context with `.function sig`
+At the top level (module scope), each declaration extends the context:
 
-At each reference (name use, call site, attribute access), the node is
-annotated with the resolution from the current context. Unresolvable
-references are annotated `.unresolved`.
+- `def f(...)` → extends context, annotates FunctionDef with `.funcDecl sig`
+- `class C` → extends context with class + methods, annotates with `.classDecl`
+- `import M` → extends context internally (module tracked in Ctx only)
+- `x : T = ...` → extends context with variable
+
+At each reference, Resolution annotates with the appropriate `NodeInfo`:
+
+- Name use (variable) → `.variable id` where `id` is a `Laurel.Identifier`
+- Call (function) → `.call callee sig` where `callee` is the qualified Laurel name
+- Call (class) → `.classNew cls init sig`
+- Call (method) → `.call callee sig` (Resolution qualifies: `ClassName@method`)
+- Call (module function) → `.call callee sig` (Resolution qualifies: `module_func`)
+- BinOp/Compare/UnaryOp → `.operator callee` (Resolution maps `+` → `PAdd`, etc.)
+- Unresolvable → `.unresolved`
+- Non-reference (literal, keyword, etc.) → `.irrelevant`
 
 Within a function body, the context is extended with:
 - Parameters (from the function signature)
 - Locals (Python's scoping rule: any assignment target anywhere in
   the body is function-local)
 
-The output AST is the scoping derivation: every node carries proof of
-what it refers to. Translation reads this directly — no lookups needed.
+**Resolution constructs all Laurel.Identifier values.** The builtin
+mapping (`len` → `Any_len_to_Any`), method qualification
+(`get_x` → `Account@get_x`), and module qualification
+(`timedelta` → `datetime_timedelta`) all happen in Resolution.
+Translation never maps names.
 
 **Resolution does NOT:**
 - Determine effects (Elaboration does that)
-- Translate types to Laurel (Translation does that)
+- Map PythonType → HighType (Translation does that)
+- Emit Laurel constructs (Translation does that)
 
 **Known incompleteness:** Match case pattern bindings are not yet extracted
 as function locals. Requires walking `Python.pattern` inductive.
 
-**Contract with Translation:** The resolved AST IS the interface. Every
-call site carries `.function sig` or is `.unresolved` (→ Hole). Translation
-cannot emit `StaticCall` for an unresolved name because unresolved nodes
-don't carry a FuncSig — there's nothing to emit from.
-
+**Contract with Translation:** The resolved AST IS the interface.
+Translation pattern matches on `NodeInfo` and uses the `Laurel.Identifier`
+values directly. It never constructs identifiers from strings.
 
 
 
 ## Translation
 
 ```lean
-def translate : Array (Python.stmt ResolvedAnn) → Laurel.Program
+def translate : ResolvedPythonProgram → Laurel.Program
 ```
 
-A fold over the resolved Python AST. One case per constructor.
-Deterministic. No lookups — reads resolution from node annotations.
+A structural recursion over the resolved Python AST. Translation has
+two modes of operation depending on the node:
 
-**Does:** desugar Python surface syntax into Laurel: object construction
-(.New + __init__), context managers, for-loop abstraction (havoc + assume),
-loop labels, module-level wrapping (__main__), mutable param copies,
-error output declaration (`maybe_except: Error` in proc outputs), map
-`PythonType` annotations to `HighType`.
+**Reference nodes** (Name, Call, BinOp, etc.): Translation pattern
+matches on `ann.info : NodeInfo` and transcribes:
+- `.variable id` → `Identifier id`
+- `.call callee sig` → `StaticCall callee (matchArgs sig posArgs kwargs)`
+- `.classNew cls init sig` → `Assign [tmp] (New cls); StaticCall init (tmp :: args)`
+- `.operator callee` → `StaticCall callee [left, right]`
+- `.unresolved` → `Hole`
+- `.irrelevant` → not reachable in expression position
 
-**Does NOT:** scope resolution (Resolution did that), cast insertion,
-literal wrapping, effect determination.
+**Structural nodes** (literals, control flow, assignments): Translation
+emits the corresponding Laurel construct directly:
+- `LiteralInt`, `LiteralBool`, `LiteralString` (from constants)
+- `Block`, `While`, `IfThenElse` (from control flow)
+- `Assign`, `Exit`, `Assert`, `Assume` (from statements)
+- `LocalVariable` (from `sig.locals` / `moduleLocals`)
+- List/dict/tuple encoding — Translation uses runtime constants
+  (defined once as `Laurel.Identifier` values from the runtime interface,
+  NOT as string literals in Translation code)
+
+**Declaration nodes** (FunctionDef, ClassDef): Translation reads
+`.funcDecl sig` / `.classDecl name fields methods` and emits
+`Procedure` / `CompositeType` using the sig data directly.
+
+**Translation does NOT:**
+- Construct `Laurel.Identifier` values (Resolution did that)
+- Map Python names to Laurel names (Resolution did that)
+- Resolve method calls or qualify names (Resolution did that)
+- Insert casts or coercions (Elaboration does that)
+- Determine effects (Elaboration does that)
+
+**Translation DOES:**
+- Map `PythonType` → `HighType` (for procedure input/output/local types)
+- Desugar Python control flow to Laurel (loops → labeled blocks, etc.)
+- Match args to params (using FuncSig from annotation)
+- Emit scope declarations (`LocalVariable` from sig.locals / moduleLocals)
+- Wrap module-level code in `__main__` procedure
 
 ### Desugarings
 
-| Python | Laurel |
-|---|---|
-| `x = expr` | `Assign [x] expr` |
-| `a, b = rhs` | `tmp := rhs; a := Get(tmp,0); b := Get(tmp,1)` |
-| `x += v` | `Assign [x] (PAdd x v)` |
-| `x[i] = v` | `Assign [x] (Any_sets(ListAny_cons(i, ListAny_nil()), x, v))` |
-| `x[start:stop]` | `Any_get(x, from_Slice(Any..as_int!(start), OptSome(Any..as_int!(stop))))` |
-| `return e` | `LaurelResult := e; exit $body` |
-| `Foo(args)` (class) | `Assign [tmp] (New Foo); Foo@__init__(tmp, args)` |
-| `with mgr as v: body` | `v := Type@__enter__(mgr); body; Type@__exit__(mgr)` |
-| `for x in iter: body` | `x := Hole; Assume(PIn(x, iter)); body` (labeled blocks for break/continue) |
-| `[a, b, c]` | `from_ListAny(ListAny_cons(a, ListAny_cons(b, ListAny_cons(c, ListAny_nil()))))` |
-| `{k: v}` | `from_DictStrAny(DictStrAny_cons(k, v, DictStrAny_empty()))` |
-| `f"{expr}"` | `to_string_any(expr)` |
+All identifiers in the Laurel column come from either:
+- The `NodeInfo` annotation (operators, callees — Resolution produced them)
+- Runtime constants (data structure constructors — extracted from runtime program)
+- The `FuncSig` annotation (variable names, param names, locals)
+
+Translation never fabricates these as string literals.
+
+| Python | Laurel | Name source |
+|---|---|---|
+| `x = expr` | `Assign [x] expr` | `x` from `.variable id` |
+| `a, b = rhs` | `tmp := rhs; a := Get(tmp,0); b := Get(tmp,1)` | `a`,`b` from annotation; `Get` = runtime constant |
+| `x += v` | `Assign [x] (StaticCall op [x, v])` | `op` from `.operator callee` |
+| `x[i] = v` | `Assign [x] (StaticCall Any_sets [...])` | `Any_sets` = runtime constant |
+| `x[start:stop]` | `StaticCall Any_get [x, StaticCall from_Slice [...]]` | runtime constants |
+| `return e` | `Assign [LaurelResult] e; Exit $body` | output var from sig; label is structural |
+| `Foo(args)` (class) | `Assign [tmp] (New cls); StaticCall init (tmp :: args)` | `cls`, `init` from `.classNew` |
+| `with mgr as v: body` | `v := StaticCall enter [mgr]; body; StaticCall exit [mgr]` | `enter`, `exit` from annotation |
+| `for x in iter: body` | `x := Hole; Assume(StaticCall PIn [x, iter]); body` | `PIn` = runtime constant |
+| `[a, b, c]` | `StaticCall from_ListAny [StaticCall ListAny_cons [...]]` | runtime constants |
+| `{k: v}` | `StaticCall from_DictStrAny [StaticCall DictStrAny_cons [...]]` | runtime constants |
+| `f"{expr}"` | `StaticCall to_string_any [expr]` | runtime constant |
 
 
 
@@ -938,7 +1016,8 @@ grade > 1 and the coercion scheme changes.
 `instanceProcedures` on CompositeType is empty.
 
 **Prelude data encodings:** Lists/dicts are recursive ADTs (`ListAny_cons`/`DictStrAny_cons`).
-Translation must emit these specific constructors.
+Translation emits these via runtime constants (resolved `Laurel.Identifier` values
+extracted from the runtime program), not via string literals.
 
 **Elaboration constructs internal lookup from program declarations:** The Laurel AST
 does not carry callee signatures on call-site nodes (`StaticCall` uses string names).
@@ -961,25 +1040,34 @@ outputs (`LaurelResult`, `maybe_except`) before elaboration. Necessary because T
 assigns to output variables. Architecture's entry point description only mentions params.
 
 
-## Current Status (2026-05-12)
+## Current Status (2026-05-13)
 
-### Parity with the Current Pipeline
+### Rewrite in progress
 
-On the 54 in-tree CI tests (`diff_test.sh compare` using `pyAnalyzeV2`):
+Resolution and Translation are being rewritten to match this architecture.
 
-- **52/54 tests:** Same result category (pass/inconclusive) as old pipeline
-- **2/54 tests:** internal_error (`test_foo_client_folder`, `test_invalid_client_type`)
-  — missing runtime function + field resolution on non-class receivers
-- **3/54 tests:** pass → inconclusive (encoding quality gaps)
-- **1/54 tests:** inconclusive → pass (improvement)
+**Resolution:** Rewrites complete. Fold with growing context, produces
+`ResolvedPythonProgram` with `NodeInfo` annotations. Class methods
+registered in ctx. Method calls resolved through receiver type annotation.
+Module-level locals computed and exposed on the output structure.
 
-### Architectural issues pending rewrite
+**Translation:** Rewrite in progress. Currently pattern matches on
+`NodeInfo` but still uses string literals for operators and runtime
+constructors. Needs to use `Laurel.Identifier` values from Resolution
+and runtime constants. 14 test regressions remaining (class fields,
+method calls, arg matching, with-statements).
 
-The implementation has fundamental architectural violations requiring a
-rewrite of all three passes (see plan):
-- Resolution uses imperative loops, string-based builtinMap, no resolved AST
-- Translation does name resolution and kwargs matching (should be Resolution's job)
-- Elaboration uses Option monad with failure (should be total)
+**Elaboration:** Datatype constructors registered in env lookup (fix).
+Otherwise unchanged from previous working state.
+
+### Architectural issues remaining
+
+- Translation uses string literals for operator/runtime procedure names
+  (should use resolved identifiers from Resolution or runtime constants)
+- `.operator` variant not yet implemented in Resolution (operators still
+  translated stringly in Translation)
+- Class fields declared only in `__init__` not extracted (test gap, not
+  architecture gap)
 
 ### Key Implementation Decisions
 
@@ -995,11 +1083,12 @@ rewrite of all three passes (see plan):
 ## Success Criteria
 
 1. All 54 in-tree tests pass.
-2. Translation is a fold — no post-hoc rewrites.
+2. Translation is a structural recursion on `NodeInfo` — no string fabrication.
 3. Elaboration is separate — translation emits no casts or grades.
 4. Types from annotations — `Any` only when annotation absent.
 5. One file per pass.
 6. Implementation reads as transcription of the typing rules.
+7. Translation cannot produce ill-scoped names (enforced by data flow from Resolution).
 
 
 
@@ -1007,10 +1096,10 @@ rewrite of all three passes (see plan):
 ## Files
 
 ```
-NameResolution.lean    -- Scope resolution: Python AST → Resolved AST
-Translation.lean       -- Fold: Resolved AST → Laurel
+Resolution.lean        -- Disambiguate + scope: Python AST → ResolvedPythonProgram
+Translation.lean       -- Structural recursion: ResolvedPythonProgram → Laurel.Program
 Elaborate.lean         -- Graded bidirectional elaboration: Laurel → GFGL → Laurel
-Pipeline.lean          -- Wire passes, CLI
+PySpecPipeline.lean    -- Wire passes, CLI
 ```
 
 

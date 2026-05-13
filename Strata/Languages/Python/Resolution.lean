@@ -39,6 +39,7 @@ abbrev PythonProgram := Array PythonStmt
 abbrev PythonType := PythonExpr
 
 structure FuncSig where
+  name : Identifier
   params : List (Identifier × PythonType)
   defaults : List (Identifier × PythonExpr)
   returnType : PythonType
@@ -381,7 +382,7 @@ def extractDefaults (args : Python.arguments SourceRange) : List (Identifier × 
 def extractReturnType (returns : Ann (Option PythonExpr) SourceRange) : PythonType :=
   annotationToPythonType returns.val
 
-def extractFuncSig (args : Python.arguments SourceRange)
+def extractFuncSig (name : Identifier) (args : Python.arguments SourceRange)
     (returns : Ann (Option PythonExpr) SourceRange)
     (body : PythonProgram) : FuncSig :=
   let params := extractParams args
@@ -389,7 +390,7 @@ def extractFuncSig (args : Python.arguments SourceRange)
   let retTy := extractReturnType returns
   let allParamNames := extractAllParamNames args
   let locals := computeLocals body allParamNames
-  { params, defaults, returnType := retTy, locals }
+  { name, params, defaults, returnType := retTy, locals }
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Initial Context: Python Builtins
@@ -536,15 +537,17 @@ partial def resolveExpr (ctx : Ctx) (f : SourceRange → ResolvedAnn) (e : Pytho
       .Name { sr := a, info } (mapAnnVal f n) (resolveExprCtx f ectx)
   | .Call a func args kwargs =>
       let callInfo := match func with
-        | .Name _ n _ => ctx[n.val]?.getD .unresolved
+        | .Name _ n _ => dbg_trace s!"CALL direct: {n.val}"; ctx[n.val]?.getD .unresolved
         | .Attribute _ receiver methodName _ =>
+            dbg_trace s!"CALL attr: .{methodName.val}"
             match receiver with
             | .Name _ rName _ => match ctx[rName.val]? with
               | some (.variable (.Name _ tyName _)) =>
+                  dbg_trace s!"  resolved: {tyName.val}@{methodName.val}"
                   ctx[s!"{tyName.val}@{methodName.val}"]?.getD .unresolved
               | some (.module_ modName) =>
                   ctx[s!"{modName}_{methodName.val}"]?.getD .unresolved
-              | _ => .unresolved
+              | _ => dbg_trace s!"  unresolved: {rName.val} not typed"; .unresolved
             | _ => .unresolved
         | _ => .unresolved
       .Call { sr := a, info := callInfo } (resolveExpr ctx f func)
@@ -616,7 +619,7 @@ partial def resolveBlock (ctx : Ctx) (f : SourceRange → ResolvedAnn) (stmts : 
 partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : PythonStmt) : Ctx × ResolvedPythonStmt :=
   match s with
   | .FunctionDef a name args body decorators returns tc typeParams =>
-      let sig := extractFuncSig args returns body.val
+      let sig := extractFuncSig name.val args returns body.val
       let ctx' := ctx.insert name.val (.function sig)
       let bodyCtx := sig.params.foldl (fun c (n, ty) => c.insert n (.variable ty)) ctx'
       let bodyCtx := (extractVarargKwarg args).foldl (fun c (n, ty) => c.insert n (.variable ty)) bodyCtx
@@ -629,7 +632,7 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
         (mapAnnOpt f (mapAnnVal f) tc)
         (mapAnnArr f (resolveTypeParam ctx' f) typeParams))
   | .AsyncFunctionDef a name args body decorators returns tc typeParams =>
-      let sig := extractFuncSig args returns body.val
+      let sig := extractFuncSig name.val args returns body.val
       let ctx' := ctx.insert name.val (.function sig)
       let bodyCtx := sig.params.foldl (fun c (n, ty) => c.insert n (.variable ty)) ctx'
       let bodyCtx := (extractVarargKwarg args).foldl (fun c (n, ty) => c.insert n (.variable ty)) bodyCtx
