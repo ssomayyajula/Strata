@@ -132,20 +132,6 @@ private def rtLaurelResult := rt "LaurelResult"
 private def rtMaybeExcept := rt "maybe_except"
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Default Expression Translation (PythonExpr → StmtExprMd for default values)
--- ═══════════════════════════════════════════════════════════════════════════════
-
-def translateDefaultExpr (e : PythonExpr) : TransM StmtExprMd := do
-  let sr := SourceRange.none
-  match e with
-  | .Constant _ (.ConPos _ n) _ => mkExpr sr (.LiteralInt n.val)
-  | .Constant _ (.ConNeg _ n) _ => mkExpr sr (.LiteralInt (-n.val))
-  | .Constant _ (.ConString _ s) _ => mkExpr sr (.LiteralString s.val)
-  | .Constant _ (.ConTrue _) _ => mkExpr sr (.LiteralBool true)
-  | .Constant _ (.ConFalse _) _ => mkExpr sr (.LiteralBool false)
-  | .Constant _ (.ConNone _) _ => mkExpr sr (.StaticCall rtFromNone [])
-  | _ => mkExpr sr (.Hole (deterministic := false))
-
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- The Structural Recursion
 -- ═══════════════════════════════════════════════════════════════════════════════
@@ -174,7 +160,7 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs posArgs kwargPairs translateDefaultExpr))
+        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs posArgs kwargPairs translateExpr))
     | .classNew cls _initSig => mkExpr sr (.New cls.toLaurel)
     | .unresolved => mkExpr sr (.Hole (deterministic := false))
     | _ => mkExpr sr (.Hole (deterministic := false))
@@ -276,7 +262,7 @@ partial def translateAssign (sr : SourceRange) (target : Python.expr ResolvedAnn
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (targetExpr :: (← initSig.matchArgs posArgs kwargPairs translateDefaultExpr)))
+        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (targetExpr :: (← initSig.matchArgs posArgs kwargPairs translateExpr)))
         pure [assignNew, initCall]
     | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
   | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
