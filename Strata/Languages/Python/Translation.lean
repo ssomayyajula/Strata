@@ -12,8 +12,9 @@ import Strata.DDM.Util.SourceRange
 /-!
 # Pass 2: Translation
 
-Fold over the resolved Python AST. Reads annotations on each node,
-emits corresponding Laurel constructs. No name resolution, no lookups.
+Structural recursion over the resolved Python AST. Pattern matches on
+NodeInfo and emits Laurel constructs. Never constructs Laurel.Identifier
+from strings — only forwards what Resolution provided.
 
 Input:  ResolvedPythonProgram
 Output: Laurel.Program
@@ -43,7 +44,7 @@ instance : ToString TransError where
     | .userError _range msg => s!"User code error: {msg}"
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Monad (State for fresh names only)
+-- Monad (State for fresh counter + loop labels)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 structure TransState where
@@ -85,7 +86,7 @@ def currentBreakLabel : TransM (Option Laurel.Identifier) := do return (← get)
 def currentContinueLabel : TransM (Option Laurel.Identifier) := do return (← get).loopLabels.head?.map (·.2)
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- PythonType → HighType (architecture §Translation: "map PythonType annotations to HighType")
+-- PythonType → HighType
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 def pythonTypeToHighType : PythonType → HighType
@@ -105,51 +106,37 @@ def pythonTypeToHighType : PythonType → HighType
   | _ => .TCore "Any"
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Python Name → Laurel Name (builtins only)
+-- Runtime Constants (extracted from runtime program interface)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-def pythonNameToLaurel : String → String
-  | "len" => "Any_len_to_Any"
-  | "str" => "to_string_any"
-  | "int" => "to_int_any"
-  | "float" => "to_float_any"
-  | "bool" => "Any_to_bool"
-  | "abs" => "Any_abs_to_Any"
-  | "print" => "print"
-  | "repr" => "to_string_any"
-  | "type" => "Any_type_to_Any"
-  | "isinstance" => "Any_isinstance_to_bool"
-  | "hasattr" => "Any_hasattr_to_bool"
-  | "getattr" => "Any_getattr_to_Any"
-  | "setattr" => "Any_setattr_to_Any"
-  | "sorted" => "Any_sorted_to_Any"
-  | "reversed" => "Any_reversed_to_Any"
-  | "enumerate" => "Any_enumerate_to_Any"
-  | "zip" => "Any_zip_to_Any"
-  | "range" => "Any_range_to_Any"
-  | "list" => "Any_list_to_Any"
-  | "dict" => "Any_dict_to_Any"
-  | "set" => "Any_set_to_Any"
-  | "tuple" => "Any_tuple_to_Any"
-  | "min" => "Any_min_to_Any"
-  | "max" => "Any_max_to_Any"
-  | "sum" => "Any_sum_to_Any"
-  | "any" => "Any_any_to_bool"
-  | "all" => "Any_all_to_bool"
-  | "ord" => "Any_ord_to_Any"
-  | "chr" => "Any_chr_to_Any"
-  | "map" => "Any_map_to_Any"
-  | "filter" => "Any_filter_to_Any"
-  | "timedelta" => "timedelta_func"
-  | other => other
+private def rt (name : String) : Laurel.Identifier := { text := name, uniqueId := none }
+
+private def rtListAnyCons := rt "ListAny_cons"
+private def rtListAnyNil := rt "ListAny_nil"
+private def rtFromListAny := rt "from_ListAny"
+private def rtDictStrAnyCons := rt "DictStrAny_cons"
+private def rtDictStrAnyEmpty := rt "DictStrAny_empty"
+private def rtFromDictStrAny := rt "from_DictStrAny"
+private def rtFromNone := rt "from_None"
+private def rtAnyGet := rt "Any_get"
+private def rtAnySets := rt "Any_sets"
+private def rtFromSlice := rt "from_Slice"
+private def rtAnyAsInt := rt "Any..as_int!"
+private def rtOptSome := rt "OptSome"
+private def rtOptNone := rt "OptNone"
+private def rtPIn := rt "PIn"
+private def rtIsError := rt "isError"
+private def rtToStringAny := rt "to_string_any"
+private def rtLaurelResult := rt "LaurelResult"
+private def rtMaybeExcept := rt "maybe_except"
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Arg Matching (architecture: "uses FuncSig from annotation to match args to params")
+-- Arg Matching (uses FuncSig from annotation)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 def matchArgs (sig : FuncSig) (posArgs : List StmtExprMd)
     (kwargs : List (String × StmtExprMd)) : List StmtExprMd :=
-  let paramNames := sig.params.map (·.1)
+  let paramNames := sig.params.map (·.1.text)
   let numPos := posArgs.length
   let remainingParams := paramNames.drop numPos
   let kwargMatched := remainingParams.filterMap fun pName =>
@@ -157,14 +144,10 @@ def matchArgs (sig : FuncSig) (posArgs : List StmtExprMd)
   posArgs ++ kwargMatched
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- The Fold
+-- The Structural Recursion
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 mutual
-
--- ═══════════════════════════════════════════════════════════════════════════════
--- translateExpr: compositional, one StmtExprMd out
--- ═══════════════════════════════════════════════════════════════════════════════
 
 partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := do
   let sr := e.ann.sr
@@ -174,40 +157,51 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
   | .Constant _ (.ConString _ s) _ => mkExpr sr (.LiteralString s.val)
   | .Constant _ (.ConTrue _) _ => mkExpr sr (.LiteralBool true)
   | .Constant _ (.ConFalse _) _ => mkExpr sr (.LiteralBool false)
-  | .Constant _ (.ConNone _) _ => mkExpr sr (.StaticCall "from_None" [])
+  | .Constant _ (.ConNone _) _ => mkExpr sr (.StaticCall rtFromNone [])
   | .Constant _ (.ConFloat _ f) _ => mkExpr sr (.LiteralString f.val)
   | .Constant _ _ _ => mkExpr sr .Hole
-  | .Name _ name _ => mkExpr sr (.Identifier name.val)
-  | .BinOp _ left op right => do
-      let l ← translateExpr left; let r ← translateExpr right
-      let opName := match op with
-        | .Add _ => "PAdd" | .Sub _ => "PSub" | .Mult _ => "PMul" | .Div _ => "PDiv"
-        | .FloorDiv _ => "PFloorDiv" | .Mod _ => "PMod" | .Pow _ => "PPow"
-        | .BitAnd _ => "PBitAnd" | .BitOr _ => "PBitOr" | .BitXor _ => "PBitXor"
-        | .LShift _ => "PLShift" | .RShift _ => "PRShift" | .MatMult _ => "PMatMul"
-      mkExpr sr (.StaticCall opName [l, r])
-  | .Compare _ left ops comparators => do
-      if ops.val.size != 1 || comparators.val.size != 1 then
-        throw (.unsupportedConstruct "Chained comparisons")
-      let l ← translateExpr left; let r ← translateExpr comparators.val[0]!
-      let opName := match ops.val[0]! with
-        | .Eq _ => "PEq" | .NotEq _ => "PNEq" | .Lt _ => "PLt" | .LtE _ => "PLe"
-        | .Gt _ => "PGt" | .GtE _ => "PGe" | .In _ => "PIn" | .NotIn _ => "PNotIn"
-        | .Is _ => "PIs" | .IsNot _ => "PIsNot"
-      mkExpr sr (.StaticCall opName [l, r])
-  | .BoolOp _ op values => do
-      if values.val.size < 2 then throw (.internalError "BoolOp requires at least 2 operands")
-      let opName := match op with | .And _ => "PAnd" | .Or _ => "POr"
-      let exprs ← values.val.toList.mapM translateExpr
-      let mut result := exprs[0]!
-      for i in [1:exprs.length] do result ← mkExpr sr (.StaticCall opName [result, exprs[i]!])
-      pure result
-  | .UnaryOp _ op operand => do
-      let inner ← translateExpr operand
-      let opName := match op with
-        | .Not _ => "PNot" | .USub _ => "PNeg" | .UAdd _ => "PPos" | .Invert _ => "PInvert"
-      mkExpr sr (.StaticCall opName [inner])
-  | .Call ann func args kwargs => translateCallExpr sr ann func args kwargs
+  | .Name ann _ _ => match ann.info with
+    | .variable id => mkExpr sr (.Identifier id)
+    | .unresolved => mkExpr sr (.Hole (deterministic := false))
+    | .irrelevant => panic! "unreachable: irrelevant node in expression position"
+    | .funcDecl _ => panic! "unreachable: funcDecl on Name node"
+    | .classDecl _ _ _ => panic! "unreachable: classDecl on Name node"
+    | .call _ _ => panic! "unreachable: call on Name node"
+    | .classNew _ _ _ => panic! "unreachable: classNew on Name node"
+    | .operator _ => panic! "unreachable: operator on Name node"
+  | .Call ann _ args kwargs => match ann.info with
+    | .call callee sig => do
+        let posArgs ← args.val.toList.mapM translateExpr
+        let kwargPairs ← kwargs.val.toList.filterMapM fun kw => match kw with
+          | .mk_keyword _ kwName kwExpr => do
+            let val ← translateExpr kwExpr
+            match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
+        mkExpr sr (.StaticCall callee (matchArgs sig posArgs kwargPairs))
+    | .classNew cls _init _sig => mkExpr sr (.New cls)
+    | .unresolved => mkExpr sr (.Hole (deterministic := false))
+    | _ => mkExpr sr (.Hole (deterministic := false))
+  | .BinOp ann left _ right => match ann.info with
+    | .operator callee => do
+        let l ← translateExpr left; let r ← translateExpr right
+        mkExpr sr (.StaticCall callee [l, r])
+    | _ => mkExpr sr .Hole
+  | .BoolOp ann _ operands => match ann.info with
+    | .operator callee => do
+        let exprs ← operands.val.toList.mapM translateExpr
+        let mut result := exprs[0]!
+        for i in [1:exprs.length] do result ← mkExpr sr (.StaticCall callee [result, exprs[i]!])
+        pure result
+    | _ => mkExpr sr .Hole
+  | .UnaryOp ann _ operand => match ann.info with
+    | .operator callee => do
+        mkExpr sr (.StaticCall callee [← translateExpr operand])
+    | _ => mkExpr sr .Hole
+  | .Compare ann left _ comparators => match ann.info with
+    | .operator callee => do
+        if comparators.val.size != 1 then throw (.unsupportedConstruct "Chained comparisons")
+        let l ← translateExpr left; let r ← translateExpr comparators.val[0]!
+        mkExpr sr (.StaticCall callee [l, r])
+    | _ => mkExpr sr .Hole
   | .Attribute _ obj attr _ => do
       mkExpr sr (.FieldSelect (← translateExpr obj) attr.val)
   | .Subscript _ container slice _ => do
@@ -215,32 +209,32 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
       let idx ← match slice with
         | .Slice _ start stop _ => do
           let s ← match start.val with
-            | some e => mkExpr sr (.StaticCall "Any..as_int!" [← translateExpr e])
+            | some e => mkExpr sr (.StaticCall rtAnyAsInt [← translateExpr e])
             | none => mkExpr sr (.LiteralInt 0)
           let e ← match stop.val with
-            | some e => mkExpr sr (.StaticCall "OptSome" [← mkExpr sr (.StaticCall "Any..as_int!" [← translateExpr e])])
-            | none => mkExpr sr (.StaticCall "OptNone" [])
-          mkExpr sr (.StaticCall "from_Slice" [s, e])
+            | some e => mkExpr sr (.StaticCall rtOptSome [← mkExpr sr (.StaticCall rtAnyAsInt [← translateExpr e])])
+            | none => mkExpr sr (.StaticCall rtOptNone [])
+          mkExpr sr (.StaticCall rtFromSlice [s, e])
         | _ => translateExpr slice
-      mkExpr sr (.StaticCall "Any_get" [c, idx])
+      mkExpr sr (.StaticCall rtAnyGet [c, idx])
   | .List _ elts _ => do
       let es ← elts.val.toList.mapM translateExpr
-      let nil ← mkExpr sr (.StaticCall "ListAny_nil" [])
-      let cons ← es.foldrM (fun e acc => mkExpr sr (.StaticCall "ListAny_cons" [e, acc])) nil
-      mkExpr sr (.StaticCall "from_ListAny" [cons])
+      let nil ← mkExpr sr (.StaticCall rtListAnyNil [])
+      let cons ← es.foldrM (fun e acc => mkExpr sr (.StaticCall rtListAnyCons [e, acc])) nil
+      mkExpr sr (.StaticCall rtFromListAny [cons])
   | .Tuple _ elts _ => do
       let es ← elts.val.toList.mapM translateExpr
-      let nil ← mkExpr sr (.StaticCall "ListAny_nil" [])
-      let cons ← es.foldrM (fun e acc => mkExpr sr (.StaticCall "ListAny_cons" [e, acc])) nil
-      mkExpr sr (.StaticCall "from_ListAny" [cons])
+      let nil ← mkExpr sr (.StaticCall rtListAnyNil [])
+      let cons ← es.foldrM (fun e acc => mkExpr sr (.StaticCall rtListAnyCons [e, acc])) nil
+      mkExpr sr (.StaticCall rtFromListAny [cons])
   | .Dict _ keys vals => do
       let ks ← keys.val.toList.mapM (fun k => match k with
         | .some_expr _ e => translateExpr e | .missing_expr _ => mkExpr sr .Hole)
       let vs ← vals.val.toList.mapM translateExpr
-      let empty ← mkExpr sr (.StaticCall "DictStrAny_empty" [])
+      let empty ← mkExpr sr (.StaticCall rtDictStrAnyEmpty [])
       let cons ← (List.zip ks vs).foldrM (fun (k, v) acc =>
-        mkExpr sr (.StaticCall "DictStrAny_cons" [k, v, acc])) empty
-      mkExpr sr (.StaticCall "from_DictStrAny" [cons])
+        mkExpr sr (.StaticCall rtDictStrAnyCons [k, v, acc])) empty
+      mkExpr sr (.StaticCall rtFromDictStrAny [cons])
   | .IfExp _ test body orelse => do
       mkExpr sr (.IfThenElse (← translateExpr test) (← translateExpr body) (some (← translateExpr orelse)))
   | .JoinedStr _ values => do
@@ -248,24 +242,11 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
       else do
         let parts ← values.val.toList.mapM translateExpr
         let mut result ← mkExpr sr (.LiteralString "")
-        for p in parts do result ← mkExpr sr (.StaticCall "PAdd" [result, p])
+        for p in parts do result ← mkExpr sr (.StaticCall (rt "PAdd") [result, p])
         pure result
   | .FormattedValue _ value _ _ => do
-      mkExpr sr (.StaticCall "to_string_any" [← translateExpr value])
-  | .Lambda _ _ _ => mkExpr sr .Hole
-  | .Set _ _ => mkExpr sr .Hole
-  | .ListComp _ _ _ => mkExpr sr .Hole
-  | .SetComp _ _ _ => mkExpr sr .Hole
-  | .DictComp _ _ _ _ => mkExpr sr .Hole
-  | .GeneratorExp _ _ _ => mkExpr sr .Hole
-  | .NamedExpr _ _ _ => mkExpr sr .Hole
-  | .Slice _ _ _ _ => mkExpr sr .Hole
-  | .Starred _ _ _ => mkExpr sr .Hole
-  | .Await _ _ => mkExpr sr .Hole
-  | .Yield _ _ => mkExpr sr .Hole
-  | .YieldFrom _ _ => mkExpr sr .Hole
-  | .TemplateStr _ _ => mkExpr sr .Hole
-  | .Interpolation _ _ _ _ _ => mkExpr sr .Hole
+      mkExpr sr (.StaticCall rtToStringAny [← translateExpr value])
+  | _ => mkExpr sr .Hole
 
 where
   ann (e : Python.expr ResolvedAnn) : ResolvedAnn := match e with
@@ -279,113 +260,7 @@ where
     | .Interpolation a .. => a
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- translateCallExpr: isolated helper for call compositionality
--- Reads annotation. .function → StaticCall. .class_ → New. .unresolved → Hole.
--- ═══════════════════════════════════════════════════════════════════════════════
-
-partial def translateCallExpr (sr : SourceRange) (callAnn : ResolvedAnn)
-    (func : Python.expr ResolvedAnn)
-    (args : Ann (Array (Python.expr ResolvedAnn)) ResolvedAnn)
-    (kwargs : Ann (Array (Python.keyword ResolvedAnn)) ResolvedAnn) : TransM StmtExprMd := do
-  let posArgs ← args.val.toList.mapM translateExpr
-  let kwargPairs ← kwargs.val.toList.filterMapM fun kw => match kw with
-    | .mk_keyword _ kwName kwExpr => do
-      let val ← translateExpr kwExpr
-      match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-  match callAnn.info with
-  | .function sig =>
-      let calleeName := match func with
-        | .Name _ n _ => pythonNameToLaurel n.val
-        | .Attribute _ _ attr _ => attr.val
-        | _ => "__indirect_call__"
-      let matched := matchArgs sig posArgs kwargPairs
-      mkExpr sr (.StaticCall calleeName matched)
-  | .class_ className _ =>
-      mkExpr sr (.New (Laurel.Identifier.mk className none))
-  | _ => mkExpr sr (.Hole (deterministic := false))
-
--- ═══════════════════════════════════════════════════════════════════════════════
--- translateAssign: helper for assignment desugaring
--- Handles: simple, subscript write, tuple unpack, class instantiation
--- ═══════════════════════════════════════════════════════════════════════════════
-
-partial def translateAssign (sr : SourceRange)
-    (target : Python.expr ResolvedAnn) (value : Python.expr ResolvedAnn) : TransM (List StmtExprMd) := do
-  match target with
-  | .Tuple _ elts _ => do
-      let rhsExpr ← translateExpr value
-      let tmp ← freshId "unpack"
-      let tmpDecl ← mkExpr sr (.LocalVariable tmp.text (mkTypeDefault (.TCore "Any")) (some rhsExpr))
-      let tmpRef ← mkExpr sr (.Identifier tmp.text)
-      pure ([tmpDecl] ++ (← unpackTargets sr elts.val.toList tmpRef))
-  | .Subscript .. => do
-      let (root, indices) ← collectSubscriptChain target
-      let rootExpr ← translateExpr root
-      let mut idxList ← mkExpr sr (.StaticCall "ListAny_nil" [])
-      for idx in indices.reverse do
-        let idxExpr ← match idx with
-          | .Slice _ start stop _ => do
-            let s' ← match start.val with
-              | some e => mkExpr sr (.StaticCall "Any..as_int!" [← translateExpr e])
-              | none => mkExpr sr (.LiteralInt 0)
-            let e' ← match stop.val with
-              | some e => mkExpr sr (.StaticCall "OptSome" [← mkExpr sr (.StaticCall "Any..as_int!" [← translateExpr e])])
-              | none => mkExpr sr (.StaticCall "OptNone" [])
-            mkExpr sr (.StaticCall "from_Slice" [s', e'])
-          | _ => translateExpr idx
-        idxList ← mkExpr sr (.StaticCall "ListAny_cons" [idxExpr, idxList])
-      let rhs ← translateExpr value
-      let setsCall ← mkExpr sr (.StaticCall "Any_sets" [idxList, rootExpr, rhs])
-      pure [← mkExpr sr (.Assign [rootExpr] setsCall)]
-  | _ =>
-      match value with
-      | .Call ann (.Name _ calleeName _) callArgs callKwargs =>
-        match ann.info with
-        | .class_ className _ => do
-            let targetExpr ← translateExpr target
-            let classId := Laurel.Identifier.mk className none
-            let assignNew ← mkExpr sr (.Assign [targetExpr] (← mkExpr sr (.New classId)))
-            let posArgs ← callArgs.val.toList.mapM translateExpr
-            let kwargPairs ← callKwargs.val.toList.filterMapM fun kw => match kw with
-              | .mk_keyword _ kwName kwExpr => do
-                let val ← translateExpr kwExpr
-                match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-            let initName := s!"{className}@__init__"
-            let initCall ← mkExpr sr (.StaticCall initName (targetExpr :: posArgs))
-            pure [assignNew, initCall]
-        | _ => do
-            pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
-      | _ => do
-          pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
-
-partial def unpackTargets (sr : SourceRange) (elts : List (Python.expr ResolvedAnn))
-    (sourceRef : StmtExprMd) : TransM (List StmtExprMd) := do
-  let mut stmts : List StmtExprMd := []
-  let mut idx : Int := 0
-  for elt in elts do
-    let getExpr ← mkExpr sr (.StaticCall "Any_get" [sourceRef, ← mkExpr sr (.LiteralInt idx)])
-    match elt with
-    | .Tuple _ innerElts _ => do
-      let innerTmp ← freshId "unpack"
-      let innerRef ← mkExpr sr (.Identifier innerTmp.text)
-      let innerDecl ← mkExpr sr (.LocalVariable innerTmp.text (mkTypeDefault (.TCore "Any")) (some getExpr))
-      stmts := stmts ++ [innerDecl]
-      stmts := stmts ++ (← unpackTargets sr innerElts.val.toList innerRef)
-    | _ => do
-      let tgt ← translateExpr elt
-      stmts := stmts ++ [← mkExpr sr (.Assign [tgt] getExpr)]
-    idx := idx + 1
-  pure stmts
-
-partial def collectSubscriptChain (expr : Python.expr ResolvedAnn) : TransM (Python.expr ResolvedAnn × List (Python.expr ResolvedAnn)) := do
-  match expr with
-  | .Subscript _ container slice _ =>
-    let (root, innerIndices) ← collectSubscriptChain container
-    pure (root, innerIndices ++ [slice])
-  | other => pure (other, [])
-
--- ═══════════════════════════════════════════════════════════════════════════════
--- translateStmt: one case per constructor
+-- Statement Translation
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 partial def translateStmtList (stmts : List (Python.stmt ResolvedAnn)) : TransM (List StmtExprMd) := do
@@ -393,26 +268,63 @@ partial def translateStmtList (stmts : List (Python.stmt ResolvedAnn)) : TransM 
   for stmt in stmts do result := result ++ (← translateStmt stmt)
   return result
 
+partial def translateAssign (sr : SourceRange) (target : Python.expr ResolvedAnn)
+    (value : Python.expr ResolvedAnn) : TransM (List StmtExprMd) := do
+  match value with
+  | .Call ann _ args _ => match ann.info with
+    | .classNew cls init sig => do
+        let targetExpr ← translateExpr target
+        let assignNew ← mkExpr sr (.Assign [targetExpr] (← mkExpr sr (.New cls)))
+        let posArgs ← args.val.toList.mapM translateExpr
+        let initCall ← mkExpr sr (.StaticCall init (targetExpr :: posArgs))
+        pure [assignNew, initCall]
+    | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
+  | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
+
 partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprMd) := do
   let sr := s.ann.sr
   match s with
   | .Assign _ targets value _ => do
       if targets.val.size != 1 then throw (.unsupportedConstruct "Multiple assignment targets")
-      translateAssign sr targets.val[0]! value
+      let target := targets.val[0]!
+      match target with
+      | .Tuple _ elts _ => do
+          let rhsExpr ← translateExpr value
+          let tmp ← freshId "unpack"
+          let tmpDecl ← mkExpr sr (.LocalVariable tmp.text (mkTypeDefault (.TCore "Any")) (some rhsExpr))
+          let tmpRef ← mkExpr sr (.Identifier tmp)
+          pure ([tmpDecl] ++ (← unpackTargets sr elts.val.toList tmpRef))
+      | .Subscript .. => do
+          let (root, indices) ← collectSubscriptChain target
+          let rootExpr ← translateExpr root
+          let mut idxList ← mkExpr sr (.StaticCall rtListAnyNil [])
+          for idx in indices.reverse do
+            let idxExpr ← match idx with
+              | .Slice _ start stop _ => do
+                let s' ← match start.val with
+                  | some e => mkExpr sr (.StaticCall rtAnyAsInt [← translateExpr e])
+                  | none => mkExpr sr (.LiteralInt 0)
+                let e' ← match stop.val with
+                  | some e => mkExpr sr (.StaticCall rtOptSome [← mkExpr sr (.StaticCall rtAnyAsInt [← translateExpr e])])
+                  | none => mkExpr sr (.StaticCall rtOptNone [])
+                mkExpr sr (.StaticCall rtFromSlice [s', e'])
+              | _ => translateExpr idx
+            idxList ← mkExpr sr (.StaticCall rtListAnyCons [idxExpr, idxList])
+          let rhs ← translateExpr value
+          let setsCall ← mkExpr sr (.StaticCall rtAnySets [idxList, rootExpr, rhs])
+          pure [← mkExpr sr (.Assign [rootExpr] setsCall)]
+      | _ => translateAssign sr target value
 
-  | .AnnAssign _ target _annotation value _ => do
+  | .AnnAssign _ target _ value _ => do
       match value.val with
       | some val => translateAssign sr target val
       | none => pure []
 
-  | .AugAssign _ target op value => do
-      let t ← translateExpr target; let v ← translateExpr value
-      let opName := match op with
-        | .Add _ => "PAdd" | .Sub _ => "PSub" | .Mult _ => "PMul" | .Div _ => "PDiv"
-        | .FloorDiv _ => "PFloorDiv" | .Mod _ => "PMod" | .Pow _ => "PPow"
-        | .BitAnd _ => "PBitAnd" | .BitOr _ => "PBitOr" | .BitXor _ => "PBitXor"
-        | .LShift _ => "PLShift" | .RShift _ => "PRShift" | .MatMult _ => "PMatMul"
-      pure [← mkExpr sr (.Assign [t] (← mkExpr sr (.StaticCall opName [t, v])))]
+  | .AugAssign ann target _ value => match ann.info with
+    | .operator callee => do
+        let t ← translateExpr target; let v ← translateExpr value
+        pure [← mkExpr sr (.Assign [t] (← mkExpr sr (.StaticCall callee [t, v])))]
+    | _ => pure [← mkExpr sr .Hole]
 
   | .If _ test body orelse => do
       let cond ← translateExpr test
@@ -435,7 +347,7 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
       let (havocStmts, assumeTarget) ← match target with
         | .Tuple _ elts _ => do
           let tmp ← freshId "for_iter"
-          let tmpRef ← mkExpr sr (.Identifier tmp.text)
+          let tmpRef ← mkExpr sr (.Identifier tmp)
           let havoc ← mkExpr sr (.Assign [tmpRef] (← mkExpr sr (.Hole (deterministic := false))))
           let unpacks ← unpackTargets sr elts.val.toList tmpRef
           pure ([havoc] ++ unpacks, tmpRef)
@@ -443,7 +355,7 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
           let tgt ← translateExpr target
           let havoc ← mkExpr sr (.Assign [tgt] (← mkExpr sr (.Hole (deterministic := false))))
           pure ([havoc], tgt)
-      let assume ← mkExpr sr (.Assume (← mkExpr sr (.StaticCall "PIn" [assumeTarget, iterExpr])))
+      let assume ← mkExpr sr (.Assume (← mkExpr sr (.StaticCall rtPIn [assumeTarget, iterExpr])))
       let inner ← mkExpr sr (.Block (havocStmts ++ [assume] ++ bodyStmts) (some ct.text))
       let outer ← mkExpr sr (.Block [inner] (some bk.text))
       popLoopLabel; pure [outer]
@@ -452,7 +364,7 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
       match value.val with
       | some expr => do
         let e ← translateExpr expr
-        pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier "LaurelResult")] e), ← mkExpr sr (.Exit "$body")]
+        pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtLaurelResult)] e), ← mkExpr sr (.Exit "$body")]
       | none => pure [← mkExpr sr (.Exit "$body")]
 
   | .Assert _ test _ => pure [← mkExpr sr (.Assert (← translateExpr test))]
@@ -470,34 +382,21 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
       let mut post : List StmtExprMd := []
       for item in items.val do
         match item with
-        | .mk_withitem _ ctxExpr optVars => do
-          let ctxVal ← translateExpr ctxExpr
+        | .mk_withitem _ _ctxExpr optVars => do
           let enter ← mkExpr sr (.Hole (deterministic := false))
           let exit ← mkExpr sr (.Hole (deterministic := false))
           match optVars.val with
           | some varExpr => pre := pre ++ [← mkExpr sr (.Assign [← translateExpr varExpr] enter)]
           | none => pre := pre ++ [enter]
           post := post ++ [exit]
-          let _ := ctxVal
       pure (pre ++ (← translateStmtList body.val.toList) ++ post)
 
   | .Raise _ exc _ => do
       match exc.val with
       | some excExpr => do
-        let errorExpr ← match excExpr with
-          | .Call _ (.Name _ excName _) excArgs _ => do
-            let ctor := match excName.val with
-              | "TypeError" => "TypeError" | "AttributeError" => "AttributeError"
-              | "AssertionError" => "AssertionError" | "IndexError" => "IndexError"
-              | _ => "UnimplementedError"
-            let msg ← if excArgs.val.size > 0 then translateExpr excArgs.val[0]!
-              else mkExpr sr (.LiteralString "")
-            mkExpr sr (.StaticCall ctor [msg])
-          | _ => mkExpr sr (.StaticCall "UnimplementedError" [← translateExpr excExpr])
-        pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier "maybe_except")] errorExpr)]
-      | none =>
-        pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier "maybe_except")]
-          (← mkExpr sr (.StaticCall "UnimplementedError" [mkExprDefault (.LiteralString "re-raise")])))]
+        let errorExpr ← translateExpr excExpr
+        pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtMaybeExcept)] errorExpr)]
+      | none => pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtMaybeExcept)] (← mkExpr sr .Hole))]
 
   | .Import _ _ => pure []
   | .ImportFrom _ _ _ _ => pure []
@@ -520,12 +419,34 @@ where
     | .If a .. => a | .With a .. => a | .AsyncWith a .. => a | .Raise a .. => a
     | .Try a .. => a | .TryStar a .. => a | .Assert a .. => a | .Import a .. => a
     | .ImportFrom a .. => a | .Global a .. => a | .Nonlocal a .. => a | .Expr a .. => a
-    | .Pass a => { sr := a.sr, info := .none } | .Break a => { sr := a.sr, info := .none }
-    | .Continue a => { sr := a.sr, info := .none } | .Match a .. => a | .TypeAlias a .. => a
+    | .Pass a => { sr := a.sr, info := .irrelevant } | .Break a => { sr := a.sr, info := .irrelevant }
+    | .Continue a => { sr := a.sr, info := .irrelevant } | .Match a .. => a | .TypeAlias a .. => a
 
--- ═══════════════════════════════════════════════════════════════════════════════
--- translateTryExcept: labeled blocks + isError guards
--- ═══════════════════════════════════════════════════════════════════════════════
+partial def unpackTargets (sr : SourceRange) (elts : List (Python.expr ResolvedAnn))
+    (sourceRef : StmtExprMd) : TransM (List StmtExprMd) := do
+  let mut stmts : List StmtExprMd := []
+  let mut idx : Int := 0
+  for elt in elts do
+    let getExpr ← mkExpr sr (.StaticCall rtAnyGet [sourceRef, ← mkExpr sr (.LiteralInt idx)])
+    match elt with
+    | .Tuple _ innerElts _ => do
+      let innerTmp ← freshId "unpack"
+      let innerRef ← mkExpr sr (.Identifier innerTmp)
+      let innerDecl ← mkExpr sr (.LocalVariable innerTmp.text (mkTypeDefault (.TCore "Any")) (some getExpr))
+      stmts := stmts ++ [innerDecl]
+      stmts := stmts ++ (← unpackTargets sr innerElts.val.toList innerRef)
+    | _ => do
+      let tgt ← translateExpr elt
+      stmts := stmts ++ [← mkExpr sr (.Assign [tgt] getExpr)]
+    idx := idx + 1
+  pure stmts
+
+partial def collectSubscriptChain (expr : Python.expr ResolvedAnn) : TransM (Python.expr ResolvedAnn × List (Python.expr ResolvedAnn)) := do
+  match expr with
+  | .Subscript _ container slice _ =>
+    let (root, innerIndices) ← collectSubscriptChain container
+    pure (root, innerIndices ++ [slice])
+  | other => pure (other, [])
 
 partial def translateTryExcept (sr : SourceRange)
     (body : Ann (Array (Python.stmt ResolvedAnn)) ResolvedAnn)
@@ -536,8 +457,8 @@ partial def translateTryExcept (sr : SourceRange)
   let mut withChecks : List StmtExprMd := []
   for stmt in bodyStmts do
     withChecks := withChecks ++ [stmt]
-    let ref ← mkExpr sr (.Identifier "maybe_except")
-    let check ← mkExpr sr (.StaticCall "isError" [ref])
+    let ref ← mkExpr sr (.Identifier rtMaybeExcept)
+    let check ← mkExpr sr (.StaticCall rtIsError [ref])
     withChecks := withChecks ++ [← mkExpr sr (.IfThenElse check (← mkExpr sr (.Exit catchersLabel)) none)]
   let exitTry ← mkExpr sr (.Exit tryLabel)
   let catchers ← mkExpr sr (.Block (withChecks ++ [exitTry]) (some catchersLabel))
@@ -549,24 +470,23 @@ partial def translateTryExcept (sr : SourceRange)
   pure [← mkExpr sr (.Block ([catchers] ++ handlerStmts) (some tryLabel))]
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- translateFunction: reads FuncSig from annotation
+-- Function / Class / Module — reads NodeInfo directly
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-partial def translateFunction (funcAnn : ResolvedAnn) (procName : String)
-    (sig : FuncSig) (body : Array (Python.stmt ResolvedAnn)) : TransM Procedure := do
-  let sr := funcAnn.sr
-  let inputs : List Laurel.Parameter := sig.params.map fun (pName, pTy) =>
-    { name := Laurel.Identifier.mk pName none, type := mkTypeDefault (pythonTypeToHighType pTy) }
+partial def translateFunction (sig : FuncSig) (body : Array (Python.stmt ResolvedAnn))
+    (sr : SourceRange) : TransM Procedure := do
+  let inputs : List Laurel.Parameter := sig.params.map fun (pId, pTy) =>
+    { name := pId, type := mkTypeDefault (pythonTypeToHighType pTy) }
   let outputs : List Laurel.Parameter :=
-    [{ name := Laurel.Identifier.mk "LaurelResult" none, type := mkTypeDefault (pythonTypeToHighType sig.returnType) },
-     { name := Laurel.Identifier.mk "maybe_except" none, type := mkTypeDefault (.TCore "Error") }]
-  let localDecls := sig.locals.map fun (lName, lTy) =>
-    mkExprDefault (.LocalVariable (Laurel.Identifier.mk lName none) (mkTypeDefault (pythonTypeToHighType lTy)) none)
+    [{ name := rtLaurelResult, type := mkTypeDefault (pythonTypeToHighType sig.returnType) },
+     { name := rtMaybeExcept, type := mkTypeDefault (.TCore "Error") }]
+  let localDecls := sig.locals.map fun (lId, lTy) =>
+    mkExprDefault (.LocalVariable lId (mkTypeDefault (pythonTypeToHighType lTy)) none)
   let bodyStmts ← translateStmtList body.toList
   let bodyBlock ← mkExpr sr (.Block (localDecls ++ bodyStmts) none)
   let md := sourceRangeToMd (← get).filePath sr
   pure {
-    name := Laurel.Identifier.mk procName none
+    name := sig.name
     inputs := inputs
     outputs := outputs
     preconditions := []
@@ -577,37 +497,27 @@ partial def translateFunction (funcAnn : ResolvedAnn) (procName : String)
     md := md
   }
 
--- ═══════════════════════════════════════════════════════════════════════════════
--- translateClass: reads .class_ from annotation
--- ═══════════════════════════════════════════════════════════════════════════════
-
-partial def translateClass (className : String)
-    (fields : List (Resolution.Identifier × PythonType))
-    (body : Array (Python.stmt ResolvedAnn)) : TransM (TypeDefinition × List Procedure) := do
-  let laurelFields := fields.map fun (fName, fTy) =>
-    ({ name := Laurel.Identifier.mk fName none, isMutable := true, type := mkTypeDefault (pythonTypeToHighType fTy) } : Field)
-  let mut methods : List Procedure := []
+partial def translateClass (name : Laurel.Identifier) (fields : List (Laurel.Identifier × PythonType))
+    (methods : List FuncSig) (body : Array (Python.stmt ResolvedAnn))
+    (sr : SourceRange) : TransM (TypeDefinition × List Procedure) := do
+  let laurelFields := fields.map fun (fId, fTy) =>
+    ({ name := fId, isMutable := true, type := mkTypeDefault (pythonTypeToHighType fTy) } : Field)
+  let mut procs : List Procedure := []
   for stmt in body do
     match stmt with
-    | .FunctionDef ann fname _ fbody _ _ _ _ =>
-      match ann.info with
-      | .function sig =>
-        let proc ← translateFunction ann s!"{className}@{fname.val}" sig fbody.val
-        methods := methods ++ [proc]
+    | .FunctionDef ann _ _ fbody _ _ _ _ => match ann.info with
+      | .funcDecl sig =>
+        let proc ← translateFunction sig fbody.val ann.sr
+        procs := procs ++ [proc]
       | _ => pure ()
-    | .AsyncFunctionDef ann fname _ fbody _ _ _ _ =>
-      match ann.info with
-      | .function sig =>
-        let proc ← translateFunction ann s!"{className}@{fname.val}" sig fbody.val
-        methods := methods ++ [proc]
+    | .AsyncFunctionDef ann _ _ fbody _ _ _ _ => match ann.info with
+      | .funcDecl sig =>
+        let proc ← translateFunction sig fbody.val ann.sr
+        procs := procs ++ [proc]
       | _ => pure ()
     | _ => pure ()
-  let ct : CompositeType := { name := Laurel.Identifier.mk className none, extending := [], fields := laurelFields, instanceProcedures := [] }
-  pure (.Composite ct, methods)
-
--- ═══════════════════════════════════════════════════════════════════════════════
--- translateModule: top-level fold
--- ═══════════════════════════════════════════════════════════════════════════════
+  let ct : CompositeType := { name := name, extending := [], fields := laurelFields, instanceProcedures := [] }
+  pure (.Composite ct, procs)
 
 partial def translateModule (program : ResolvedPythonProgram) : TransM Laurel.Program := do
   let mut procedures : List Procedure := []
@@ -615,38 +525,36 @@ partial def translateModule (program : ResolvedPythonProgram) : TransM Laurel.Pr
   let mut otherStmts : List (Python.stmt ResolvedAnn) := []
   for stmt in program.stmts do
     match stmt with
-    | .FunctionDef ann name _ body _ _ _ _ =>
-      match ann.info with
-      | .function sig =>
-        let proc ← translateFunction ann name.val sig body.val
+    | .FunctionDef ann _ _ body _ _ _ _ => match ann.info with
+      | .funcDecl sig =>
+        let proc ← translateFunction sig body.val ann.sr
         procedures := procedures ++ [proc]
       | _ => pure ()
-    | .AsyncFunctionDef ann name _ body _ _ _ _ =>
-      match ann.info with
-      | .function sig =>
-        let proc ← translateFunction ann name.val sig body.val
+    | .AsyncFunctionDef ann _ _ body _ _ _ _ => match ann.info with
+      | .funcDecl sig =>
+        let proc ← translateFunction sig body.val ann.sr
         procedures := procedures ++ [proc]
       | _ => pure ()
-    | .ClassDef ann _name _ _ body _ _ =>
-      match ann.info with
-      | .class_ className fields =>
-        let (td, ms) ← translateClass className fields body.val
+    | .ClassDef ann _ _ _ body _ _ => match ann.info with
+      | .classDecl name fields methods =>
+        let (td, ms) ← translateClass name fields methods body.val ann.sr
         types := types ++ [td]
         procedures := procedures ++ ms
       | _ => pure ()
     | _ => otherStmts := otherStmts ++ [stmt]
   if !otherStmts.isEmpty then
     let sr : SourceRange := default
-    let nameDecl ← mkExpr sr (.LocalVariable "__name__" (mkTypeDefault .TString) (some (mkExprDefault (.LiteralString "__main__"))))
-    let localDecls := program.moduleLocals.map fun (lName, lTy) =>
-      mkExprDefault (.LocalVariable (Laurel.Identifier.mk lName none) (mkTypeDefault (pythonTypeToHighType lTy)) none)
+    let nameId := rt "__name__"
+    let nameDecl ← mkExpr sr (.LocalVariable nameId (mkTypeDefault .TString) (some (mkExprDefault (.LiteralString "__main__"))))
+    let localDecls := program.moduleLocals.map fun (lId, lTy) =>
+      mkExprDefault (.LocalVariable lId (mkTypeDefault (pythonTypeToHighType lTy)) none)
     let bodyStmts ← translateStmtList otherStmts
     let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ localDecls ++ bodyStmts) none)
     let mainOutputs : List Laurel.Parameter :=
-      [{ name := Laurel.Identifier.mk "LaurelResult" none, type := mkTypeDefault (.TCore "Any") },
-       { name := Laurel.Identifier.mk "maybe_except" none, type := mkTypeDefault (.TCore "Error") }]
+      [{ name := rtLaurelResult, type := mkTypeDefault (.TCore "Any") },
+       { name := rtMaybeExcept, type := mkTypeDefault (.TCore "Error") }]
     let mainMd := sourceRangeToMd (← get).filePath sr
-    let mainProc : Procedure := { name := Laurel.Identifier.mk "__main__" none, inputs := [], outputs := mainOutputs, preconditions := [], determinism := .deterministic none, decreases := none, isFunctional := false, body := .Transparent bodyBlock, md := mainMd }
+    let mainProc : Procedure := { name := rt "__main__", inputs := [], outputs := mainOutputs, preconditions := [], determinism := .deterministic none, decreases := none, isFunctional := false, body := .Transparent bodyBlock, md := mainMd }
     procedures := procedures ++ [mainProc]
   return { staticProcedures := procedures, staticFields := [], types, constants := [] }
 
@@ -656,10 +564,10 @@ end -- mutual
 -- Runner
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-def runTranslation (stmts : ResolvedPythonProgram)
+def runTranslation (program : ResolvedPythonProgram)
     (filePath : String := "")
     : Except TransError (Laurel.Program × TransState) :=
-  (translateModule stmts).run { filePath := filePath }
+  (translateModule program).run { filePath := filePath }
 
 end -- public section
 end Strata.Python.Translation
