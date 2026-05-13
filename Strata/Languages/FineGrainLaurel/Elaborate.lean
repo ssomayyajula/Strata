@@ -46,12 +46,17 @@ def buildElabEnvFromProgram (program : Laurel.Program) (runtime : Laurel.Program
     let retTy := match proc.outputs.head? with
       | some o => o.type.val | none => HighType.TVoid
     names := names.insert proc.name.text (.function { name := proc.name.text, params, returnType := retTy })
-  for td in program.types do
+  for td in program.types ++ runtime.types do
     match td with
     | .Composite ct =>
       let fields := ct.fields.map fun f => (f.name.text, f.type.val)
       classFields := classFields.insert ct.name.text fields
-    | _ => pure ()
+    | .Datatype dt =>
+      for ctor in dt.constructors do
+        let ctorParams := ctor.args.map fun p => (p.name.text, p.type.val)
+        let retTy := HighType.UserDefined { text := dt.name.text, uniqueId := none }
+        names := names.insert ctor.name.text (.function { name := ctor.name.text, params := ctorParams, returnType := retTy })
+    | .Constrained _ => pure ()
   { names, classFields }
 
 def mkLaurel (md : Imperative.MetaData Core.Expression) (e : StmtExpr) : StmtExprMd :=
