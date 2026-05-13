@@ -4,6 +4,7 @@ import test_helper
 from typing import List
 
 class CircularBuffer:
+    buffer: int
     def __init__(self, n: int):
         print("Hi")
         self.buffer : int = n

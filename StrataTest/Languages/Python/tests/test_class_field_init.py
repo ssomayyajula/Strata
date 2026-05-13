@@ -2,6 +2,7 @@ import test_helper
 
 class CircularBuffer:
     name: str
+    size: int
     def __init__(self, size: int, name: str):
         self.size: int = size
         self.name = name

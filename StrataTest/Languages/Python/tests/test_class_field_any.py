@@ -1,4 +1,5 @@
 class MyClass:
+    some_field: Any
     def __init__(self, some_field):
         self.some_field: Any = some_field
 

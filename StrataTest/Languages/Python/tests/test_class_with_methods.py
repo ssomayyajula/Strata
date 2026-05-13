@@ -1,6 +1,8 @@
 import test_helper
 
 class DataStore:
+    name: str
+    count: int
     def __init__(self, name: str):
         self.name: str = name
         self.count: int = 0

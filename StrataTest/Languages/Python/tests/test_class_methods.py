@@ -1,6 +1,8 @@
 import test_helper
 
 class Account:
+    owner: str
+    balance: int
     def __init__(self, owner: str, balance: int):
         self.owner: str = owner
         self.balance: int = balance
