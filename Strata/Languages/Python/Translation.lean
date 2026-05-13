@@ -132,17 +132,19 @@ private def rtLaurelResult := rt "LaurelResult"
 private def rtMaybeExcept := rt "maybe_except"
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Arg Matching (uses FuncSig from annotation)
+-- Default Expression Translation (PythonExpr → StmtExprMd for default values)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-def matchArgs (sig : FuncSig) (posArgs : List StmtExprMd)
-    (kwargs : List (String × StmtExprMd)) : List StmtExprMd :=
-  let paramNames := sig.laurelCallParams.map (·.1.text)
-  let numPos := posArgs.length
-  let remainingParams := paramNames.drop numPos
-  let kwargMatched := remainingParams.filterMap fun pName =>
-    kwargs.find? (fun (k, _) => k == pName) |>.map (·.2)
-  posArgs ++ kwargMatched
+def translateDefaultExpr (e : PythonExpr) : TransM StmtExprMd := do
+  let sr := SourceRange.none
+  match e with
+  | .Constant _ (.ConPos _ n) _ => mkExpr sr (.LiteralInt n.val)
+  | .Constant _ (.ConNeg _ n) _ => mkExpr sr (.LiteralInt (-n.val))
+  | .Constant _ (.ConString _ s) _ => mkExpr sr (.LiteralString s.val)
+  | .Constant _ (.ConTrue _) _ => mkExpr sr (.LiteralBool true)
+  | .Constant _ (.ConFalse _) _ => mkExpr sr (.LiteralBool false)
+  | .Constant _ (.ConNone _) _ => mkExpr sr (.StaticCall rtFromNone [])
+  | _ => mkExpr sr (.Hole (deterministic := false))
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- The Structural Recursion
@@ -172,7 +174,7 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        mkExpr sr (.StaticCall sig.laurelName (matchArgs sig posArgs kwargPairs))
+        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs posArgs kwargPairs translateDefaultExpr))
     | .classNew cls _initSig => mkExpr sr (.New cls.toLaurel)
     | .unresolved => mkExpr sr (.Hole (deterministic := false))
     | _ => mkExpr sr (.Hole (deterministic := false))
@@ -274,7 +276,7 @@ partial def translateAssign (sr : SourceRange) (target : Python.expr ResolvedAnn
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (targetExpr :: matchArgs initSig posArgs kwargPairs))
+        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (targetExpr :: (← initSig.matchArgs posArgs kwargPairs translateDefaultExpr)))
         pure [assignNew, initCall]
     | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
   | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]

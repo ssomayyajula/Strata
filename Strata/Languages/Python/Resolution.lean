@@ -38,7 +38,7 @@ abbrev PythonProgram := Array PythonStmt
 abbrev PythonType := PythonExpr
 structure PythonIdentifier where
   private mk ::
-  val : String
+  private val : String
   deriving BEq, Hashable, Inhabited, Repr
 
 def PythonIdentifier.fromAst (n : Ann String SourceRange) : PythonIdentifier :=
@@ -53,19 +53,21 @@ def PythonIdentifier.builtin (name : String) : PythonIdentifier :=
   ⟨name⟩
 
 structure ParamList where
-  required : List (PythonIdentifier × PythonType)
-  optional : List (PythonIdentifier × PythonType × PythonExpr)
-  kwonly : List (PythonIdentifier × PythonType × Option PythonExpr)
+  private mk ::
+  private required : List (PythonIdentifier × PythonType)
+  private optional : List (PythonIdentifier × PythonType × PythonExpr)
+  private kwonly : List (PythonIdentifier × PythonType × Option PythonExpr)
   deriving Inhabited
 
 inductive FuncParams where
-  | instance (receiver : PythonIdentifier) (params : ParamList)
-  | static (params : ParamList)
+  | private instance (receiver : PythonIdentifier) (params : ParamList)
+  | private static (params : ParamList)
   deriving Inhabited
 
 structure FuncSig where
-  name : PythonIdentifier
-  className : Option PythonIdentifier
+  private mk ::
+  private name : PythonIdentifier
+  private className : Option PythonIdentifier
   private params : FuncParams
   returnType : PythonType
   private locals : List (PythonIdentifier × PythonType)
@@ -488,8 +490,8 @@ def FuncSig.laurelName (sig : FuncSig) : Laurel.Identifier :=
   | some cls => { text := s!"{cls.val}@{sig.name.val}", uniqueId := none }
   | none => { text := pythonNameToLaurel sig.name.val, uniqueId := none }
 
-def ParamList.allParams (pl : ParamList) : List (PythonIdentifier × PythonType) :=
-  pl.required ++ pl.optional.map (fun (n, ty, _) => (n, ty)) ++ pl.kwonly.filterMap (fun (n, ty, _) => some (n, ty))
+private def ParamList.allParams (pl : ParamList) : List (PythonIdentifier × PythonType) :=
+  pl.required ++ pl.optional.map (fun (n, ty, _) => (n, ty)) ++ pl.kwonly.map (fun (n, ty, _) => (n, ty))
 
 def FuncSig.laurelDeclInputs (sig : FuncSig) : List (Laurel.Identifier × PythonType) :=
   let anyTy : PythonType := .Name SourceRange.none ⟨SourceRange.none, "Any"⟩ (.Load SourceRange.none)
@@ -499,11 +501,23 @@ def FuncSig.laurelDeclInputs (sig : FuncSig) : List (Laurel.Identifier × Python
   | .static pl =>
     pl.allParams.map fun (id, ty) => ({ text := id.val, uniqueId := none }, ty)
 
-def FuncSig.laurelCallParams (sig : FuncSig) : List (Laurel.Identifier × PythonType) :=
+def FuncSig.matchArgs [Monad m] [Inhabited (m α)] (sig : FuncSig) (posArgs : List α) (kwargs : List (String × α))
+    (translateDefault : PythonExpr → m α) : m (List α) := do
   let pl := match sig.params with
     | .instance _ pl => pl
     | .static pl => pl
-  pl.allParams.map fun (id, ty) => ({ text := id.val, uniqueId := none }, ty)
+  let allParams : List (String × Option PythonExpr) :=
+    pl.required.map (fun (id, _) => (id.val, none)) ++
+    pl.optional.map (fun (id, _, dflt) => (id.val, some dflt)) ++
+    pl.kwonly.map (fun (id, _, dflt) => (id.val, dflt))
+  let remaining := allParams.drop posArgs.length
+  let restFilled ← remaining.mapM fun (pName, dflt) =>
+    match kwargs.find? (fun (k, _) => k == pName) with
+    | some (_, v) => pure v
+    | none => match dflt with
+      | some d => translateDefault d
+      | none => panic! "Resolution bug: required param without arg"
+  pure (posArgs ++ restFilled)
 
 def FuncSig.laurelLocals (sig : FuncSig) : List (Laurel.Identifier × PythonType) :=
   sig.locals.map fun (id, ty) => ({ text := id.val, uniqueId := none }, ty)
