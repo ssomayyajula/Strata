@@ -470,10 +470,11 @@ def FuncSig.laurelDeclInputs (sig : FuncSig) : List (Laurel.Identifier × Python
 
 def FuncSig.matchArgs [Monad m] [Inhabited (m α)] (sig : FuncSig) (posArgs : List α) (kwargs : List (String × α))
     (translateDefault : ResolvedPythonExpr → m α) : m (List α) := do
-  let pl := match sig.params with
-    | .instance _ pl => pl
-    | .static pl => pl
+  let (receiverSlot, pl) := match sig.params with
+    | .instance recv pl => ([(recv.val, (none : Option ResolvedPythonExpr))], pl)
+    | .static pl => ([], pl)
   let slots : List (String × Option ResolvedPythonExpr) :=
+    receiverSlot ++
     pl.required.map (fun (id, _) => (id.val, none)) ++
     pl.optional.map (fun (id, _, dflt) => (id.val, some dflt)) ++
     pl.kwonly.map (fun (id, _, dflt) => (id.val, dflt))

@@ -265,7 +265,7 @@ partial def translateAssign (sr : SourceRange) (target : Python.expr ResolvedAnn
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (targetExpr :: (← initSig.matchArgs posArgs kwargPairs translateExpr)))
+        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (← initSig.matchArgs ([targetExpr] ++ posArgs) kwargPairs translateExpr))
         pure [assignNew, initCall]
     | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
   | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
