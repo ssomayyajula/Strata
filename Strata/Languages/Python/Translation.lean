@@ -609,11 +609,11 @@ partial def translateClass (className : String)
 -- translateModule: top-level fold
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-partial def translateModule (stmts : ResolvedPythonProgram) : TransM Laurel.Program := do
+partial def translateModule (program : ResolvedPythonProgram) : TransM Laurel.Program := do
   let mut procedures : List Procedure := []
   let mut types : List TypeDefinition := []
   let mut otherStmts : List (Python.stmt ResolvedAnn) := []
-  for stmt in stmts do
+  for stmt in program.stmts do
     match stmt with
     | .FunctionDef ann name _ body _ _ _ _ =>
       match ann.info with
@@ -638,8 +638,10 @@ partial def translateModule (stmts : ResolvedPythonProgram) : TransM Laurel.Prog
   if !otherStmts.isEmpty then
     let sr : SourceRange := default
     let nameDecl ← mkExpr sr (.LocalVariable "__name__" (mkTypeDefault .TString) (some (mkExprDefault (.LiteralString "__main__"))))
+    let localDecls := program.moduleLocals.map fun (lName, lTy) =>
+      mkExprDefault (.LocalVariable (Laurel.Identifier.mk lName none) (mkTypeDefault (pythonTypeToHighType lTy)) none)
     let bodyStmts ← translateStmtList otherStmts
-    let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ bodyStmts) none)
+    let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ localDecls ++ bodyStmts) none)
     let mainOutputs : List Laurel.Parameter :=
       [{ name := Laurel.Identifier.mk "LaurelResult" none, type := mkTypeDefault (.TCore "Any") },
        { name := Laurel.Identifier.mk "maybe_except" none, type := mkTypeDefault (.TCore "Error") }]

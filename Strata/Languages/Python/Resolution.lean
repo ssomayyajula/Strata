@@ -64,7 +64,10 @@ instance : Inhabited ResolvedAnn where
 
 abbrev ResolvedPythonStmt := Python.stmt ResolvedAnn
 abbrev ResolvedPythonExpr := Python.expr ResolvedAnn
-abbrev ResolvedPythonProgram := Array ResolvedPythonStmt
+
+structure ResolvedPythonProgram where
+  stmts : Array ResolvedPythonStmt
+  moduleLocals : List (Identifier × PythonType)
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Context
@@ -715,14 +718,13 @@ end
 
 def resolve (stmts : PythonProgram) : ResolvedPythonProgram :=
   let f : SourceRange → ResolvedAnn := fun sr => { sr, info := .none }
-  -- Pre-compute all module-level locals (same scoping rule as functions)
   let moduleLocals := computeLocals stmts []
   let initCtx := moduleLocals.foldl (fun c (n, ty) => c.insert n (.variable ty)) builtinContext
-  let (_, resolved) := stmts.foldl (init := (initCtx, (#[] : ResolvedPythonProgram))) fun acc stmt =>
+  let (_, resolved) := stmts.foldl (init := (initCtx, (#[] : Array ResolvedPythonStmt))) fun acc stmt =>
     let (ctx, arr) := acc
     let (ctx', resolved) := resolveStmt ctx f stmt
     (ctx', arr.push resolved)
-  resolved
+  { stmts := resolved, moduleLocals }
 
 end -- public section
 end Strata.Python.Resolution
