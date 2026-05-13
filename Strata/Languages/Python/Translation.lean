@@ -144,60 +144,6 @@ def pythonNameToLaurel : String → String
   | other => other
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- Module-level local collection (for __main__ scope declarations)
--- ═══════════════════════════════════════════════════════════════════════════════
-
-private partial def extractResolvedTargetNames : Python.expr ResolvedAnn → List String
-  | .Name _ n _ => [n.val]
-  | .Tuple _ elems _ => elems.val.toList.flatMap extractResolvedTargetNames
-  | .List _ elems _ => elems.val.toList.flatMap extractResolvedTargetNames
-  | .Starred _ inner _ => extractResolvedTargetNames inner
-  | _ => []
-
-private partial def collectLocalsFromResolvedStmt (s : Python.stmt ResolvedAnn) : List String :=
-  match s with
-  | .Assign _ targets _ _ => targets.val.toList.flatMap extractResolvedTargetNames
-  | .AnnAssign _ target _ _ _ => extractResolvedTargetNames target
-  | .AugAssign _ target _ _ => extractResolvedTargetNames target
-  | .For _ target _ body orelse _ =>
-      extractResolvedTargetNames target ++
-      body.val.toList.flatMap collectLocalsFromResolvedStmt ++
-      orelse.val.toList.flatMap collectLocalsFromResolvedStmt
-  | .AsyncFor _ target _ body orelse _ =>
-      extractResolvedTargetNames target ++
-      body.val.toList.flatMap collectLocalsFromResolvedStmt ++
-      orelse.val.toList.flatMap collectLocalsFromResolvedStmt
-  | .If _ _ body orelse =>
-      body.val.toList.flatMap collectLocalsFromResolvedStmt ++
-      orelse.val.toList.flatMap collectLocalsFromResolvedStmt
-  | .While _ _ body orelse =>
-      body.val.toList.flatMap collectLocalsFromResolvedStmt ++
-      orelse.val.toList.flatMap collectLocalsFromResolvedStmt
-  | .Try _ body handlers orelse finalbody =>
-      body.val.toList.flatMap collectLocalsFromResolvedStmt ++
-      handlers.val.toList.flatMap (fun h => match h with
-        | .ExceptHandler _ _ _ hBody => hBody.val.toList.flatMap collectLocalsFromResolvedStmt) ++
-      orelse.val.toList.flatMap collectLocalsFromResolvedStmt ++
-      finalbody.val.toList.flatMap collectLocalsFromResolvedStmt
-  | .TryStar _ body handlers orelse finalbody =>
-      body.val.toList.flatMap collectLocalsFromResolvedStmt ++
-      handlers.val.toList.flatMap (fun h => match h with
-        | .ExceptHandler _ _ _ hBody => hBody.val.toList.flatMap collectLocalsFromResolvedStmt) ++
-      orelse.val.toList.flatMap collectLocalsFromResolvedStmt ++
-      finalbody.val.toList.flatMap collectLocalsFromResolvedStmt
-  | .With _ _ body _ => body.val.toList.flatMap collectLocalsFromResolvedStmt
-  | .AsyncWith _ _ body _ => body.val.toList.flatMap collectLocalsFromResolvedStmt
-  | _ => []
-
-private def collectModuleLocals (stmts : List (Python.stmt ResolvedAnn)) : List (String × Unit) :=
-  let allNames := stmts.flatMap collectLocalsFromResolvedStmt
-  let (_, result) := allNames.foldl (init := (({} : Std.HashSet String), ([] : List (String × Unit)))) fun acc name =>
-    let (seen, result) := acc
-    if seen.contains name then (seen, result)
-    else (seen.insert name, result ++ [(name, ())])
-  result
-
--- ═══════════════════════════════════════════════════════════════════════════════
 -- Arg Matching (architecture: "uses FuncSig from annotation to match args to params")
 -- ═══════════════════════════════════════════════════════════════════════════════
 
@@ -692,11 +638,8 @@ partial def translateModule (stmts : ResolvedPythonProgram) : TransM Laurel.Prog
   if !otherStmts.isEmpty then
     let sr : SourceRange := default
     let nameDecl ← mkExpr sr (.LocalVariable "__name__" (mkTypeDefault .TString) (some (mkExprDefault (.LiteralString "__main__"))))
-    let moduleLocals := collectModuleLocals otherStmts
-    let localDecls := moduleLocals.map fun (lName, _) =>
-      mkExprDefault (.LocalVariable (Laurel.Identifier.mk lName none) (mkTypeDefault (.TCore "Any")) none)
     let bodyStmts ← translateStmtList otherStmts
-    let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ localDecls ++ bodyStmts) none)
+    let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ bodyStmts) none)
     let mainOutputs : List Laurel.Parameter :=
       [{ name := Laurel.Identifier.mk "LaurelResult" none, type := mkTypeDefault (.TCore "Any") },
        { name := Laurel.Identifier.mk "maybe_except" none, type := mkTypeDefault (.TCore "Error") }]
