@@ -649,7 +649,7 @@ partial def extractFuncSig (ctx : Ctx) (f : SourceRange → ResolvedAnn)
   let allParamNames := extractAllParamNames args
   let locals := computeLocals body allParamNames
   let funcParams :=
-    if hasStaticmethodDecorator decorators then
+    if className.isNone || hasStaticmethodDecorator decorators then
       .static paramList
     else match paramList.required with
       | (recv, _) :: rest => .instance recv { paramList with required := rest }
