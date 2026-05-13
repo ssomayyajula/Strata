@@ -153,14 +153,17 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
     | .variable name => mkExpr sr (.Identifier name.toLaurel)
     | .unresolved => mkExpr sr (.Hole (deterministic := false))
     | _ => panic! "Resolution bug: invalid NodeInfo on Name node"
-  | .Call ann _ args kwargs => match ann.info with
+  | .Call ann func args kwargs => match ann.info with
     | .funcCall sig => do
+        let receiver ← match func with
+          | .Attribute _ obj _ _ => pure [← translateExpr obj]
+          | _ => pure []
         let posArgs ← args.val.toList.mapM translateExpr
         let kwargPairs ← kwargs.val.toList.filterMapM fun kw => match kw with
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs posArgs kwargPairs translateExpr))
+        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs (receiver ++ posArgs) kwargPairs translateExpr))
     | .classNew cls _initSig => mkExpr sr (.New cls.toLaurel)
     | .unresolved => mkExpr sr (.Hole (deterministic := false))
     | _ => mkExpr sr (.Hole (deterministic := false))
