@@ -51,6 +51,7 @@ inductive NodeInfo where
   | call (callee : Laurel.Identifier) (sig : FuncSig)
   | classNew (cls : Laurel.Identifier) (init : Laurel.Identifier) (sig : FuncSig)
   | operator (callee : Laurel.Identifier)
+  | fieldAccess (field : Laurel.Identifier)
   | funcDecl (sig : FuncSig)
   | classDecl (name : Laurel.Identifier) (fields : List (Laurel.Identifier × PythonType)) (methods : List FuncSig)
   | unresolved
@@ -516,6 +517,64 @@ def builtinContext : Ctx :=
   entries.foldl (fun ctx (name, info) => ctx.insert name info) {}
 
 -- ═══════════════════════════════════════════════════════════════════════════════
+-- Spine type resolution (chases .Name and .Attribute chains)
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+def typeOfExpr (ctx : Ctx) : PythonExpr → Option PythonType
+  | .Name _ n _ => match ctx[n.val]? with
+    | some (.variable ty) => some ty
+    | some (.function _) => none
+    | some (.class_ _ _ _) => none
+    | some (.module_ _) => none
+    | some .unresolved => none
+    | none => none
+  | .Attribute _ obj fieldName _ =>
+    match typeOfExpr ctx obj with
+    | some (.Name _ className _) => match ctx[className.val]? with
+      | some (.class_ _ fields _) =>
+        fields.find? (fun (fName, _) => fName == fieldName.val) |>.map (·.2)
+      | _ => none
+    | _ => none
+  | _ => none
+
+private def isAnyType (ty : PythonType) : Bool :=
+  match ty with
+  | .Name _ n _ => n.val == "Any"
+  | _ => false
+
+private def insertParamIfMoreSpecific (c : Ctx) (n : PythonIdentifier) (ty : PythonType) : Ctx :=
+  if isAnyType ty then
+    match c[n]? with
+    | some _ => c
+    | none => c.insert n (CtxEntry.variable ty)
+  else
+    c.insert n (CtxEntry.variable ty)
+
+private def resolveFunctionBody (ctx : Ctx) (args : Python.arguments SourceRange) (body : PythonProgram) : Ctx :=
+  let params := extractParams args
+  let varargKwarg := extractVarargKwarg args
+  let allParamNames := extractAllParamNames args
+  let locals := computeLocals body allParamNames
+  let bodyCtx := params.foldl (fun c (n, ty) => insertParamIfMoreSpecific c n ty) ctx
+  let bodyCtx := varargKwarg.foldl (fun c (n, ty) => insertParamIfMoreSpecific c n ty) bodyCtx
+  locals.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) bodyCtx
+
+private def resolveMethodCall (ctx : Ctx) (receiver : PythonExpr) (methodName : String) : NodeInfo :=
+  match typeOfExpr ctx receiver with
+  | some (.Name _ className _) =>
+    match ctx[s!"{className.val}@{methodName}"]? with
+    | some (.function sig) => .call sig.name sig
+    | _ => .unresolved
+  | _ => match receiver with
+    | .Name _ rName _ => match ctx[rName.val]? with
+      | some (.module_ modName) =>
+        match ctx[s!"{modName}_{methodName}"]? with
+        | some (.function sig) => .call sig.name sig
+        | _ => .unresolved
+      | _ => .unresolved
+    | _ => .unresolved
+
+-- ═══════════════════════════════════════════════════════════════════════════════
 -- AST Annotation Mapping (f : SourceRange → ResolvedAnn through the tree)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
@@ -609,8 +668,8 @@ partial def resolveExpr (ctx : Ctx) (f : SourceRange → ResolvedAnn) (e : Pytho
   match e with
   | .Name a n ectx =>
       let info := match ctx[n.val]? with
-        | some (.function sig) => .variable (mkLaurelId n.val)
-        | some (.class_ _ _ _) => .irrelevant
+        | some (.function sig) => .variable sig.name
+        | some (.class_ className _ _) => .variable (mkLaurelId className)
         | some (.variable _) => .variable (mkLaurelId n.val)
         | some (.module_ _) => .irrelevant
         | some .unresolved => .unresolved
@@ -622,29 +681,21 @@ partial def resolveExpr (ctx : Ctx) (f : SourceRange → ResolvedAnn) (e : Pytho
           | some (.function sig) => .call sig.name sig
           | some (.class_ className _ methods) =>
               let initSig := methods.find? (fun s => s.name.text == s!"{className}@__init__")
+              let initName := mkLaurelId s!"{className}@__init__"
               match initSig with
               | some sig => .classNew (mkLaurelId className) sig.name sig
-              | none => .classNew (mkLaurelId className) (mkLaurelId s!"{className}@__init__") default
+              | none =>
+                let emptySig : FuncSig := { name := initName, params := [], defaults := [], returnType := anyType, locals := [] }
+                .classNew (mkLaurelId className) initName emptySig
           | _ => .unresolved
         | .Attribute _ receiver methodName _ =>
-            match receiver with
-            | .Name _ rName _ => match ctx[rName.val]? with
-              | some (.variable (.Name _ tyName _)) =>
-                  match ctx[s!"{tyName.val}@{methodName.val}"]? with
-                  | some (.function sig) => .call sig.name sig
-                  | _ => .unresolved
-              | some (.module_ modName) =>
-                  match ctx[s!"{modName}_{methodName.val}"]? with
-                  | some (.function sig) => .call sig.name sig
-                  | _ => .unresolved
-              | _ => .unresolved
-            | _ => .unresolved
+            resolveMethodCall ctx receiver methodName.val
         | _ => .unresolved
       .Call { sr := a, info := callInfo } (resolveExpr ctx f func)
         (mapAnnArr f (resolveExpr ctx f) args)
         (mapAnnArr f (resolveKeyword ctx f) kwargs)
   | .Attribute a obj attr ectx =>
-      .Attribute (f a) (resolveExpr ctx f obj) (mapAnnVal f attr) (resolveExprCtx f ectx)
+      .Attribute { sr := a, info := .fieldAccess (mkLaurelId attr.val) } (resolveExpr ctx f obj) (mapAnnVal f attr) (resolveExprCtx f ectx)
   | .Constant a c tc => .Constant (f a) (resolveConstant f c) (mapAnnOpt f (mapAnnVal f) tc)
   | .BinOp a left op right =>
       .BinOp { sr := a, info := .operator (mkLaurelId (operatorToLaurel op)) } (resolveExpr ctx f left) (resolveOperator f op) (resolveExpr ctx f right)
@@ -711,41 +762,34 @@ partial def resolveBlock (ctx : Ctx) (f : SourceRange → ResolvedAnn) (stmts : 
     (c', arr.push r)
   resolved
 
+partial def resolveFuncDef (ctx : Ctx) (f : SourceRange → ResolvedAnn)
+    (a : SourceRange) (name : Ann String SourceRange) (args : Python.arguments SourceRange)
+    (body : Ann PythonProgram SourceRange) (decorators : Ann (Array PythonExpr) SourceRange)
+    (returns : Ann (Option PythonExpr) SourceRange) (tc : Ann (Option (Ann String SourceRange)) SourceRange)
+    (typeParams : Ann (Array (Python.type_param SourceRange)) SourceRange) :=
+  let sig := extractFuncSig name.val args returns body.val
+  let ctx' := ctx.insert name.val (.function sig)
+  let bodyCtx := resolveFunctionBody ctx' args body.val
+  let ann : ResolvedAnn := { sr := a, info := .funcDecl sig }
+  let rBody : Ann (Array ResolvedPythonStmt) ResolvedAnn := ⟨f body.ann, resolveBlock bodyCtx f body.val⟩
+  (ctx', ann, mapAnnVal f name, resolveArguments bodyCtx f args, rBody,
+    mapAnnArr f (resolveExpr ctx' f) decorators,
+    mapAnnOpt f (resolveExpr ctx' f) returns,
+    mapAnnOpt f (mapAnnVal f) tc,
+    mapAnnArr f (resolveTypeParam ctx' f) typeParams)
+
 partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : PythonStmt) : Ctx × ResolvedPythonStmt :=
   match s with
   | .FunctionDef a name args body decorators returns tc typeParams =>
-      let sig := extractFuncSig name.val args returns body.val
-      let ctx' := ctx.insert name.val (.function sig)
-      let params := extractParams args
-      let varargKwarg := extractVarargKwarg args
-      let allParamNames := extractAllParamNames args
-      let locals := computeLocals body.val allParamNames
-      let bodyCtx := params.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) ctx'
-      let bodyCtx := varargKwarg.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) bodyCtx
-      let bodyCtx := locals.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) bodyCtx
-      (ctx', .FunctionDef { sr := a, info := .funcDecl sig } (mapAnnVal f name) (resolveArguments bodyCtx f args)
-        ⟨f body.ann, resolveBlock bodyCtx f body.val⟩
-        (mapAnnArr f (resolveExpr ctx' f) decorators)
-        (mapAnnOpt f (resolveExpr ctx' f) returns)
-        (mapAnnOpt f (mapAnnVal f) tc)
-        (mapAnnArr f (resolveTypeParam ctx' f) typeParams))
+      let (ctx', ann, rName, rArgs, rBody, rDecs, rRets, rTc, rTps) :=
+        resolveFuncDef ctx f a name args body decorators returns tc typeParams
+      (ctx', .FunctionDef ann rName rArgs rBody rDecs rRets rTc rTps)
   | .AsyncFunctionDef a name args body decorators returns tc typeParams =>
-      let sig := extractFuncSig name.val args returns body.val
-      let ctx' := ctx.insert name.val (.function sig)
-      let params := extractParams args
-      let varargKwarg := extractVarargKwarg args
-      let allParamNames := extractAllParamNames args
-      let locals := computeLocals body.val allParamNames
-      let bodyCtx := params.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) ctx'
-      let bodyCtx := varargKwarg.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) bodyCtx
-      let bodyCtx := locals.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) bodyCtx
-      (ctx', .AsyncFunctionDef { sr := a, info := .funcDecl sig } (mapAnnVal f name) (resolveArguments bodyCtx f args)
-        ⟨f body.ann, resolveBlock bodyCtx f body.val⟩
-        (mapAnnArr f (resolveExpr ctx' f) decorators)
-        (mapAnnOpt f (resolveExpr ctx' f) returns)
-        (mapAnnOpt f (mapAnnVal f) tc)
-        (mapAnnArr f (resolveTypeParam ctx' f) typeParams))
+      let (ctx', ann, rName, rArgs, rBody, rDecs, rRets, rTc, rTps) :=
+        resolveFuncDef ctx f a name args body decorators returns tc typeParams
+      (ctx', .AsyncFunctionDef ann rName rArgs rBody rDecs rRets rTc rTps)
   | .ClassDef a name bases keywords body decorators typeParams =>
+      let classType : PythonType := .Name SourceRange.none ⟨SourceRange.none, name.val⟩ (.Load SourceRange.none)
       let fields := body.val.toList.filterMap fun s => match s with
         | .AnnAssign _ (.Name _ n _) annotation _ _ => some (n.val, annotation)
         | _ => Option.none
@@ -758,11 +802,12 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
       let methodSigs := methods.map (·.2)
       let ctx' := ctx.insert name.val (CtxEntry.class_ name.val fields methodSigs)
       let ctx' := methods.foldl (fun c (mName, mSig) => c.insert mName (CtxEntry.function mSig)) ctx'
+      let classCtx := ctx'.insert "self" (CtxEntry.variable classType)
       let laurelFields := fields.map fun (fName, fTy) => (mkLaurelId fName, fTy)
       (ctx', .ClassDef { sr := a, info := .classDecl (mkLaurelId name.val) laurelFields methodSigs } (mapAnnVal f name)
         (mapAnnArr f (resolveExpr ctx' f) bases)
         (mapAnnArr f (resolveKeyword ctx' f) keywords)
-        ⟨f body.ann, resolveBlock ctx' f body.val⟩
+        ⟨f body.ann, resolveBlock classCtx f body.val⟩
         (mapAnnArr f (resolveExpr ctx' f) decorators)
         (mapAnnArr f (resolveTypeParam ctx' f) typeParams))
   | .Import a aliases =>

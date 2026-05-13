@@ -93,6 +93,7 @@ inductive NodeInfo where
   | call (callee : Laurel.Identifier) (sig : FuncSig)
   | classNew (cls : Laurel.Identifier) (init : Laurel.Identifier) (sig : FuncSig)
   | operator (callee : Laurel.Identifier)
+  | fieldAccess (field : Laurel.Identifier)
   | funcDecl (sig : FuncSig)
   | classDecl (name : Laurel.Identifier) (fields : List (Laurel.Identifier × PythonType)) (methods : List FuncSig)
   | unresolved
@@ -196,18 +197,59 @@ At the top level (module scope), each declaration extends the context:
 At each reference, Resolution annotates with the appropriate `NodeInfo`:
 
 - Name use (variable) → `.variable id` where `id` is a `Laurel.Identifier`
+- Name use (function) → `.variable sig.name` (the **Laurel** name, not the Python name)
+- Name use (class) → `.variable (mkLaurelId className)` (classes are valid expressions)
+- Name use (module) → `.irrelevant` (only meaningful as Call receiver)
 - Call (function) → `.call callee sig` where `callee` is the qualified Laurel name
 - Call (class) → `.classNew cls init sig`
 - Call (method) → `.call callee sig` (Resolution qualifies: `ClassName@method`)
 - Call (module function) → `.call callee sig` (Resolution qualifies: `module_func`)
+- Attribute (field access) → `.fieldAccess field` where `field` is a `Laurel.Identifier`
 - BinOp/Compare/UnaryOp → `.operator callee` (Resolution maps `+` → `PAdd`, etc.)
 - Unresolvable → `.unresolved`
 - Non-reference (literal, keyword, etc.) → `.irrelevant`
 
+**Attribute resolution:** Every `.Attribute` node gets a `ResolvedAnn` with
+`.fieldAccess (mkLaurelId attrName)`. The field name is trivially the Python
+attribute name (no mapping needed — field names don't change between Python
+and Laurel), but Resolution still produces the `Laurel.Identifier` so that
+Translation never constructs one. When the Attribute is the callee of a Call,
+the Call node's annotation carries `.call` with the resolved method — the
+Attribute's own `.fieldAccess` annotation is irrelevant in that case (the
+Call subsumes it).
+
 Within a function body, the context is extended with:
-- Parameters (from the function signature)
+- Parameters (from the function signature). A parameter with no annotation
+  does NOT override a more specific type already in the context (e.g. `self`
+  typed by the enclosing class).
 - Locals (Python's scoping rule: any assignment target anywhere in
   the body is function-local)
+
+Within a class body, the context is extended with:
+- `self` typed as the enclosing class (enables method resolution on `self`)
+- All methods registered as `ClassName@method` (enables `self.method()` lookup)
+- All fields and class-level annotations
+
+This means the class body is resolved with a context where `self` has type
+`ClassName`. When Resolution encounters `self.method()`, it looks up `self`
+→ type `ClassName`, then looks up `ClassName@method` → resolves to `.call`.
+
+**Method resolution on receivers:** The receiver of a method call
+(`receiver.method()`) can be any expression. Resolution determines the
+receiver's type using `typeOfExpr`:
+
+- `.Name n` → look up `ctx[n]`, get the variable's type
+- `.Attribute obj field` → recursively get type of `obj`, find that class
+  in ctx, look up `field` in its field list, get the field's type
+
+These two forms are called **spines**. Resolution chases spines to determine
+receiver types. For any non-spine receiver (`.Call`, `.Subscript`, `.IfExp`,
+etc.), Resolution emits `.unresolved`. This is tech debt — those forms
+could be resolved by interpreting return types and generic type parameters,
+but are not yet implemented.
+
+Once `typeOfExpr` returns a type `.Name _ className _`, Resolution looks up
+`ctx["{className}@{methodName}"]` to get the method's FuncSig.
 
 **Resolution constructs all Laurel.Identifier values.** The builtin
 mapping (`len` → `Any_len_to_Any`), method qualification
@@ -219,6 +261,15 @@ Translation never maps names.
 - Determine effects (Elaboration does that)
 - Map PythonType → HighType (Translation does that)
 - Emit Laurel constructs (Translation does that)
+
+**Classes without explicit `__init__`:** Every Python class has `__init__`.
+If not explicitly defined, it inherits `object.__init__` which takes no
+arguments (just `self`). Resolution produces `.classNew cls init sig` where
+`sig` has zero params (excluding `self`).
+
+**`from foo import bar`:** If we have no information about `bar`, it is
+registered as `CtxEntry.unresolved`. Names that reference it get
+`.unresolved` and Translation emits Hole.
 
 **Known incompleteness:** Match case pattern bindings are not yet extracted
 as function locals. Requires walking `Python.pattern` inductive.
@@ -238,12 +289,13 @@ def translate : ResolvedPythonProgram → Laurel.Program
 A structural recursion over the resolved Python AST. Translation has
 two modes of operation depending on the node:
 
-**Reference nodes** (Name, Call, BinOp, etc.): Translation pattern
-matches on `ann.info : NodeInfo` and transcribes:
+**Reference nodes** (Name, Call, BinOp, Attribute, etc.): Translation
+pattern matches on `ann.info : NodeInfo` and transcribes:
 - `.variable id` → `Identifier id`
 - `.call callee sig` → `StaticCall callee (matchArgs sig posArgs kwargs)`
 - `.classNew cls init sig` → `Assign [tmp] (New cls); StaticCall init (tmp :: args)`
 - `.operator callee` → `StaticCall callee [left, right]`
+- `.fieldAccess field` → `FieldSelect (translateExpr obj) field`
 - `.unresolved` → `Hole`
 - `.irrelevant` → not reachable in expression position
 
@@ -291,9 +343,10 @@ Translation never fabricates these as string literals.
 | `x += v` | `Assign [x] (StaticCall op [x, v])` | `op` from `.operator callee` |
 | `x[i] = v` | `Assign [x] (StaticCall Any_sets [...])` | `Any_sets` = runtime constant |
 | `x[start:stop]` | `StaticCall Any_get [x, StaticCall from_Slice [...]]` | runtime constants |
+| `obj.field` | `FieldSelect (translate obj) field` | `field` from `.fieldAccess` |
 | `return e` | `Assign [LaurelResult] e; Exit $body` | output var from sig; label is structural |
 | `Foo(args)` (class) | `Assign [tmp] (New cls); StaticCall init (tmp :: args)` | `cls`, `init` from `.classNew` |
-| `with mgr as v: body` | `v := StaticCall enter [mgr]; body; StaticCall exit [mgr]` | `enter`, `exit` from annotation |
+| `with mgr as v: body` | `Hole` (unsupported — no `__enter__`/`__exit__` resolution yet) | — |
 | `for x in iter: body` | `x := Hole; Assume(StaticCall PIn [x, iter]); body` | `PIn` = runtime constant |
 | `[a, b, c]` | `StaticCall from_ListAny [StaticCall ListAny_cons [...]]` | runtime constants |
 | `{k: v}` | `StaticCall from_DictStrAny [StaticCall DictStrAny_cons [...]]` | runtime constants |
@@ -1042,32 +1095,39 @@ assigns to output variables. Architecture's entry point description only mention
 
 ## Current Status (2026-05-13)
 
-### Rewrite in progress
+### Implementation status
 
-Resolution and Translation are being rewritten to match this architecture.
+**Resolution:** Mostly complete. Outstanding issues:
+- `.Attribute` nodes not annotated with `.fieldAccess` (passes through with
+  `f a` = `.irrelevant`). Translation fabricates identifiers via coercion.
+- `Name` referring to function emits `.variable (mkLaurelId pythonName)`
+  instead of `.variable sig.name` (the Laurel name). Breaks when function
+  is passed as value (not just called).
+- `Name` referring to class emits `.irrelevant` instead of `.variable`.
+  Panics Translation if class name appears in expression position.
+- `from foo import bar` registers as `CtxEntry.unresolved` — no attempt
+  to resolve imported names against known specs.
+- `sorry` in `resolveMatchCase` — match patterns not resolved.
+- Method resolution only works for `simpleVar.method()` with an explicit
+  type annotation on `simpleVar`. Chained/complex receivers → `.unresolved`.
 
-**Resolution:** Rewrites complete. Fold with growing context, produces
-`ResolvedPythonProgram` with `NodeInfo` annotations. Class methods
-registered in ctx. Method calls resolved through receiver type annotation.
-Module-level locals computed and exposed on the output structure.
-
-**Translation:** Rewrite in progress. Currently pattern matches on
-`NodeInfo` but still uses string literals for operators and runtime
-constructors. Needs to use `Laurel.Identifier` values from Resolution
-and runtime constants. 14 test regressions remaining (class fields,
-method calls, arg matching, with-statements).
+**Translation:** Pure functional (no `let mut`, no `for` loops). Pattern
+matches on `NodeInfo`. Uses runtime constants for data structure ops.
+Violates architecture at `.Attribute` (fabricates identifier from string
+via `Coe String Identifier`). Will be fixed once Resolution produces
+`.fieldAccess`.
 
 **Elaboration:** Datatype constructors registered in env lookup (fix).
 Otherwise unchanged from previous working state.
 
 ### Architectural issues remaining
 
-- Translation uses string literals for operator/runtime procedure names
-  (should use resolved identifiers from Resolution or runtime constants)
-- `.operator` variant not yet implemented in Resolution (operators still
-  translated stringly in Translation)
-- Class fields declared only in `__init__` not extracted (test gap, not
-  architecture gap)
+- Resolution must annotate `.Attribute` with `.fieldAccess field`
+- Resolution must emit `.variable sig.name` for Name→function (Laurel name)
+- Resolution must emit `.variable (mkLaurelId className)` for Name→class
+- Translation must read `.fieldAccess` from annotation instead of `attr.val`
+- `with` statement has no resolution story (`__enter__`/`__exit__` not resolved)
+- Class fields declared only in `__init__` not extracted (test gap)
 
 ### Key Implementation Decisions
 
