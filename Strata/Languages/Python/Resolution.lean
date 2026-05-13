@@ -36,7 +36,21 @@ abbrev PythonExpr := Python.expr SourceRange
 abbrev PythonStmt := Python.stmt SourceRange
 abbrev PythonProgram := Array PythonStmt
 abbrev PythonType := PythonExpr
-abbrev PythonIdentifier := String
+structure PythonIdentifier where
+  private mk ::
+  val : String
+  deriving BEq, Hashable, Inhabited, Repr
+
+def PythonIdentifier.fromAst (n : Ann String SourceRange) : PythonIdentifier :=
+  ⟨n.val⟩
+
+def PythonIdentifier.fromImport (modName : Ann String SourceRange) : PythonIdentifier :=
+  match modName.val.splitOn "." with
+  | first :: _ => ⟨first⟩
+  | [] => ⟨modName.val⟩
+
+def PythonIdentifier.builtin (name : String) : PythonIdentifier :=
+  ⟨name⟩
 
 structure FuncSig where
   name : Laurel.Identifier
@@ -79,13 +93,13 @@ structure ResolvedPythonProgram where
 
 inductive CtxEntry where
   | function (sig : FuncSig)
-  | class_ (name : String) (fields : List (String × PythonType)) (methods : List FuncSig)
+  | class_ (name : PythonIdentifier) (fields : List (PythonIdentifier × PythonType)) (methods : List (PythonIdentifier × FuncSig))
   | variable (ty : PythonType)
-  | module_ (name : String)
+  | module_ (name : PythonIdentifier)
   | unresolved
   deriving Inhabited
 
-abbrev Ctx := Std.HashMap String CtxEntry
+abbrev Ctx := Std.HashMap PythonIdentifier CtxEntry
 
 private def mkLaurelId (name : String) : Laurel.Identifier :=
   { text := name, uniqueId := none }
@@ -113,7 +127,7 @@ partial def collectWalrusFromComprehensions (comps : List (Python.comprehension 
 
 partial def collectNamesFromTarget (target : PythonExpr) : List PythonIdentifier :=
   match target with
-  | .Name _ n _ => [n.val]
+  | .Name _ n _ => [PythonIdentifier.fromAst n]
   | .Tuple _ elems _ => elems.val.toList.flatMap collectNamesFromTarget
   | .List _ elems _ => elems.val.toList.flatMap collectNamesFromTarget
   | .Starred _ inner _ => collectNamesFromTarget inner
@@ -195,7 +209,7 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (PythonIdentifier × P
         match h with
         | .ExceptHandler _ _ maybeName handlerBody =>
             let errorVar := match maybeName.val with
-              | some n => [(n.val, annotationToPythonType none)]
+              | some n => [(PythonIdentifier.fromAst n, annotationToPythonType none)]
               | none => []
             errorVar ++ handlerBody.val.toList.flatMap collectLocalsFromStmt
       bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
@@ -207,7 +221,7 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (PythonIdentifier × P
         match h with
         | .ExceptHandler _ _ maybeName handlerBody =>
             let errorVar := match maybeName.val with
-              | some n => [(n.val, annotationToPythonType none)]
+              | some n => [(PythonIdentifier.fromAst n, annotationToPythonType none)]
               | none => []
             errorVar ++ handlerBody.val.toList.flatMap collectLocalsFromStmt
       bodyStmts.val.toList.flatMap collectLocalsFromStmt ++
@@ -251,9 +265,9 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (PythonIdentifier × P
               | none => []
             guardW ++ caseBody.val.toList.flatMap collectLocalsFromStmt
       subjectW ++ caseLocals
-  | .FunctionDef _ name _ _ _ _ _ _ => [(name.val, annotationToPythonType none)]
-  | .AsyncFunctionDef _ name _ _ _ _ _ _ => [(name.val, annotationToPythonType none)]
-  | .ClassDef _ name _ _ _ _ _ => [(name.val, annotationToPythonType none)]
+  | .FunctionDef _ name _ _ _ _ _ _ => [(PythonIdentifier.fromAst name, annotationToPythonType none)]
+  | .AsyncFunctionDef _ name _ _ _ _ _ _ => [(PythonIdentifier.fromAst name, annotationToPythonType none)]
+  | .ClassDef _ name _ _ _ _ _ => [(PythonIdentifier.fromAst name, annotationToPythonType none)]
   | .Return _ valOpt =>
       match valOpt.val with
       | some v => (collectWalrusNames v).map (fun n => (n, annotationToPythonType none))
@@ -275,20 +289,18 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (PythonIdentifier × P
       aliases.val.toList.filterMap fun alias =>
         match alias with
         | .mk_alias _ modName asName =>
-            let name := match asName.val with
-              | some aliasName => aliasName.val
-              | none => match modName.val.splitOn "." with
-                | first :: _ => first
-                | [] => modName.val
-            some (name, annotationToPythonType none)
+            let id := match asName.val with
+              | some aliasName => PythonIdentifier.fromAst aliasName
+              | none => PythonIdentifier.fromImport modName
+            some (id, annotationToPythonType none)
   | .ImportFrom _ _ imports _ =>
       imports.val.toList.filterMap fun imp =>
         match imp with
         | .mk_alias _ impName asName =>
-            let name := match asName.val with
-              | some aliasName => aliasName.val
-              | none => impName.val
-            some (name, annotationToPythonType none)
+            let id := match asName.val with
+              | some aliasName => PythonIdentifier.fromAst aliasName
+              | none => PythonIdentifier.fromAst impName
+            some (id, annotationToPythonType none)
   | .Global _ _ => []
   | .Nonlocal _ _ => []
   | .Expr _ value =>
@@ -298,8 +310,8 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (PythonIdentifier × P
 
 partial def collectGlobalNonlocalNames (s : PythonStmt) : List PythonIdentifier :=
   match s with
-  | .Global _ names => names.val.toList.map (·.val)
-  | .Nonlocal _ names => names.val.toList.map (·.val)
+  | .Global _ names => names.val.toList.map PythonIdentifier.fromAst
+  | .Nonlocal _ names => names.val.toList.map PythonIdentifier.fromAst
   | .If _ _ body orelse =>
       body.val.toList.flatMap collectGlobalNonlocalNames ++
       orelse.val.toList.flatMap collectGlobalNonlocalNames
@@ -349,7 +361,7 @@ def computeLocals (body : PythonProgram) (paramNames : List PythonIdentifier)
 
 private def argToParam (arg : Python.arg SourceRange) : PythonIdentifier × PythonType :=
   match arg with
-  | .mk_arg _ argName annotation _ => (argName.val, annotationToPythonType annotation.val)
+  | .mk_arg _ argName annotation _ => (PythonIdentifier.fromAst argName, annotationToPythonType annotation.val)
 
 def extractParams (args : Python.arguments SourceRange) : List (PythonIdentifier × PythonType) :=
   match args with
@@ -362,9 +374,9 @@ private def extractAllParamNames (args : Python.arguments SourceRange) : List Py
   match args with
   | .mk_arguments _ posonlyargs argList vararg kwonlyargs _ kwarg _ =>
       let names := (posonlyargs.val.toList ++ argList.val.toList ++ kwonlyargs.val.toList).map fun arg =>
-        match arg with | .mk_arg _ argName _ _ => argName.val
-      let vaName := match vararg.val with | some (.mk_arg _ n _ _) => [n.val] | none => []
-      let kwName := match kwarg.val with | some (.mk_arg _ n _ _) => [n.val] | none => []
+        match arg with | .mk_arg _ argName _ _ => PythonIdentifier.fromAst argName
+      let vaName := match vararg.val with | some (.mk_arg _ n _ _) => [PythonIdentifier.fromAst n] | none => []
+      let kwName := match kwarg.val with | some (.mk_arg _ n _ _) => [PythonIdentifier.fromAst n] | none => []
       names ++ vaName ++ kwName
 
 private def extractVarargKwarg (args : Python.arguments SourceRange) : List (PythonIdentifier × PythonType) :=
@@ -379,14 +391,14 @@ def extractDefaults (args : Python.arguments SourceRange) : List (PythonIdentifi
   | .mk_arguments _ posonlyargs argList _ kwonlyargs kwDefaults _ defaults =>
       let posAndRegular := posonlyargs.val.toList ++ argList.val.toList
       let paramNames := posAndRegular.map fun arg =>
-        match arg with | .mk_arg _ argName _ _ => argName.val
+        match arg with | .mk_arg _ argName _ _ => PythonIdentifier.fromAst argName
       let paramCount := paramNames.length
       let defaultCount := defaults.val.size
       let requiredCount := paramCount - defaultCount
       let defaultParams := paramNames.drop requiredCount
       let posDefaults := defaultParams.zip (defaults.val.toList)
       let kwNames := kwonlyargs.val.toList.map fun arg =>
-        match arg with | .mk_arg _ argName _ _ => argName.val
+        match arg with | .mk_arg _ argName _ _ => PythonIdentifier.fromAst argName
       let kwDefaultPairs := kwNames.zip (kwDefaults.val.toList) |>.filterMap fun (name, optExpr) =>
         match optExpr with
         | .some_expr _ e => some (name, e)
@@ -405,10 +417,10 @@ def extractFuncSig (name : String) (args : Python.arguments SourceRange)
   let allParamNames := extractAllParamNames args
   let locals := computeLocals body allParamNames
   { name := mkLaurelId name
-    params := params.map fun (n, ty) => (mkLaurelId n, ty)
-    defaults := defaults.map fun (n, e) => (mkLaurelId n, e)
+    params := params.map fun (n, ty) => (mkLaurelId n.val, ty)
+    defaults := defaults.map fun (n, e) => (mkLaurelId n.val, e)
     returnType := retTy
-    locals := locals.map fun (n, ty) => (mkLaurelId n, ty) }
+    locals := locals.map fun (n, ty) => (mkLaurelId n.val, ty) }
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Python Name → Laurel Name (builtin mapping, applied when minting identifiers)
@@ -481,38 +493,38 @@ private def mkBuiltinSig (pythonName : String) (params : List (String × PythonT
     defaults := [], returnType := retTy, locals := [] }
 
 def builtinContext : Ctx :=
-  let entries : List (String × CtxEntry) := [
-    ("len", .function (mkBuiltinSig "len" [("obj", anyType)] intType)),
-    ("str", .function (mkBuiltinSig "str" [("obj", anyType)] strType)),
-    ("int", .function (mkBuiltinSig "int" [("obj", anyType)] intType)),
-    ("float", .function (mkBuiltinSig "float" [("obj", anyType)] anyType)),
-    ("bool", .function (mkBuiltinSig "bool" [("obj", anyType)] boolType)),
-    ("print", .function (mkBuiltinSig "print" [("obj", anyType)] anyType)),
-    ("repr", .function (mkBuiltinSig "repr" [("obj", anyType)] strType)),
-    ("type", .function (mkBuiltinSig "type" [("obj", anyType)] anyType)),
-    ("isinstance", .function (mkBuiltinSig "isinstance" [("obj", anyType), ("cls", anyType)] boolType)),
-    ("hasattr", .function (mkBuiltinSig "hasattr" [("obj", anyType), ("name", strType)] boolType)),
-    ("getattr", .function (mkBuiltinSig "getattr" [("obj", anyType), ("name", strType)] anyType)),
-    ("setattr", .function (mkBuiltinSig "setattr" [("obj", anyType), ("name", strType), ("value", anyType)] anyType)),
-    ("sorted", .function (mkBuiltinSig "sorted" [("iterable", anyType)] anyType)),
-    ("reversed", .function (mkBuiltinSig "reversed" [("seq", anyType)] anyType)),
-    ("enumerate", .function (mkBuiltinSig "enumerate" [("iterable", anyType)] anyType)),
-    ("zip", .function (mkBuiltinSig "zip" [("a", anyType), ("b", anyType)] anyType)),
-    ("range", .function (mkBuiltinSig "range" [("stop", anyType)] anyType)),
-    ("list", .function (mkBuiltinSig "list" [("iterable", anyType)] anyType)),
-    ("dict", .function (mkBuiltinSig "dict" [("iterable", anyType)] anyType)),
-    ("set", .function (mkBuiltinSig "set" [("iterable", anyType)] anyType)),
-    ("tuple", .function (mkBuiltinSig "tuple" [("iterable", anyType)] anyType)),
-    ("min", .function (mkBuiltinSig "min" [("a", anyType), ("b", anyType)] anyType)),
-    ("max", .function (mkBuiltinSig "max" [("a", anyType), ("b", anyType)] anyType)),
-    ("sum", .function (mkBuiltinSig "sum" [("iterable", anyType)] anyType)),
-    ("any", .function (mkBuiltinSig "any" [("iterable", anyType)] boolType)),
-    ("all", .function (mkBuiltinSig "all" [("iterable", anyType)] boolType)),
-    ("abs", .function (mkBuiltinSig "abs" [("x", anyType)] anyType)),
-    ("ord", .function (mkBuiltinSig "ord" [("c", strType)] intType)),
-    ("chr", .function (mkBuiltinSig "chr" [("i", intType)] strType)),
-    ("map", .function (mkBuiltinSig "map" [("func", anyType), ("iterable", anyType)] anyType)),
-    ("filter", .function (mkBuiltinSig "filter" [("func", anyType), ("iterable", anyType)] anyType))
+  let entries : List (PythonIdentifier × CtxEntry) := [
+    (.builtin "len", .function (mkBuiltinSig "len" [("obj", anyType)] intType)),
+    (.builtin "str", .function (mkBuiltinSig "str" [("obj", anyType)] strType)),
+    (.builtin "int", .function (mkBuiltinSig "int" [("obj", anyType)] intType)),
+    (.builtin "float", .function (mkBuiltinSig "float" [("obj", anyType)] anyType)),
+    (.builtin "bool", .function (mkBuiltinSig "bool" [("obj", anyType)] boolType)),
+    (.builtin "print", .function (mkBuiltinSig "print" [("obj", anyType)] anyType)),
+    (.builtin "repr", .function (mkBuiltinSig "repr" [("obj", anyType)] strType)),
+    (.builtin "type", .function (mkBuiltinSig "type" [("obj", anyType)] anyType)),
+    (.builtin "isinstance", .function (mkBuiltinSig "isinstance" [("obj", anyType), ("cls", anyType)] boolType)),
+    (.builtin "hasattr", .function (mkBuiltinSig "hasattr" [("obj", anyType), ("name", strType)] boolType)),
+    (.builtin "getattr", .function (mkBuiltinSig "getattr" [("obj", anyType), ("name", strType)] anyType)),
+    (.builtin "setattr", .function (mkBuiltinSig "setattr" [("obj", anyType), ("name", strType), ("value", anyType)] anyType)),
+    (.builtin "sorted", .function (mkBuiltinSig "sorted" [("iterable", anyType)] anyType)),
+    (.builtin "reversed", .function (mkBuiltinSig "reversed" [("seq", anyType)] anyType)),
+    (.builtin "enumerate", .function (mkBuiltinSig "enumerate" [("iterable", anyType)] anyType)),
+    (.builtin "zip", .function (mkBuiltinSig "zip" [("a", anyType), ("b", anyType)] anyType)),
+    (.builtin "range", .function (mkBuiltinSig "range" [("stop", anyType)] anyType)),
+    (.builtin "list", .function (mkBuiltinSig "list" [("iterable", anyType)] anyType)),
+    (.builtin "dict", .function (mkBuiltinSig "dict" [("iterable", anyType)] anyType)),
+    (.builtin "set", .function (mkBuiltinSig "set" [("iterable", anyType)] anyType)),
+    (.builtin "tuple", .function (mkBuiltinSig "tuple" [("iterable", anyType)] anyType)),
+    (.builtin "min", .function (mkBuiltinSig "min" [("a", anyType), ("b", anyType)] anyType)),
+    (.builtin "max", .function (mkBuiltinSig "max" [("a", anyType), ("b", anyType)] anyType)),
+    (.builtin "sum", .function (mkBuiltinSig "sum" [("iterable", anyType)] anyType)),
+    (.builtin "any", .function (mkBuiltinSig "any" [("iterable", anyType)] boolType)),
+    (.builtin "all", .function (mkBuiltinSig "all" [("iterable", anyType)] boolType)),
+    (.builtin "abs", .function (mkBuiltinSig "abs" [("x", anyType)] anyType)),
+    (.builtin "ord", .function (mkBuiltinSig "ord" [("c", strType)] intType)),
+    (.builtin "chr", .function (mkBuiltinSig "chr" [("i", intType)] strType)),
+    (.builtin "map", .function (mkBuiltinSig "map" [("func", anyType), ("iterable", anyType)] anyType)),
+    (.builtin "filter", .function (mkBuiltinSig "filter" [("func", anyType), ("iterable", anyType)] anyType))
   ]
   entries.foldl (fun ctx (name, info) => ctx.insert name info) {}
 
@@ -521,7 +533,7 @@ def builtinContext : Ctx :=
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 def typeOfExpr (ctx : Ctx) : PythonExpr → Option PythonType
-  | .Name _ n _ => match ctx[n.val]? with
+  | .Name _ n _ => match ctx[PythonIdentifier.fromAst n]? with
     | some (.variable ty) => some ty
     | some (.function _) => none
     | some (.class_ _ _ _) => none
@@ -530,9 +542,9 @@ def typeOfExpr (ctx : Ctx) : PythonExpr → Option PythonType
     | none => none
   | .Attribute _ obj fieldName _ =>
     match typeOfExpr ctx obj with
-    | some (.Name _ className _) => match ctx[className.val]? with
+    | some (.Name _ className _) => match ctx[PythonIdentifier.fromAst className]? with
       | some (.class_ _ fields _) =>
-        fields.find? (fun (fName, _) => fName == fieldName.val) |>.map (·.2)
+        fields.find? (fun (fName, _) => fName == PythonIdentifier.fromAst fieldName) |>.map (·.2)
       | _ => none
     | _ => none
   | _ => none
@@ -559,18 +571,22 @@ private def resolveFunctionBody (ctx : Ctx) (args : Python.arguments SourceRange
   let bodyCtx := varargKwarg.foldl (fun c (n, ty) => insertParamIfMoreSpecific c n ty) bodyCtx
   locals.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) bodyCtx
 
-private def resolveMethodCall (ctx : Ctx) (receiver : PythonExpr) (methodName : String) : NodeInfo :=
+private def resolveMethodCall (ctx : Ctx) (receiver : PythonExpr) (methodName : Ann String SourceRange) : NodeInfo :=
+  let methId := PythonIdentifier.fromAst methodName
   match typeOfExpr ctx receiver with
   | some (.Name _ className _) =>
-    match ctx[s!"{className.val}@{methodName}"]? with
-    | some (.function sig) => .call sig.name sig
+    let classId := PythonIdentifier.fromAst className
+    match ctx[classId]? with
+    | some (.class_ _ _ methods) =>
+      match methods.find? (fun (mName, _) => mName == methId) with
+      | some (_, sig) => .call sig.name sig
+      | none => .unresolved
     | _ => .unresolved
   | _ => match receiver with
-    | .Name _ rName _ => match ctx[rName.val]? with
-      | some (.module_ modName) =>
-        match ctx[s!"{modName}_{methodName}"]? with
-        | some (.function sig) => .call sig.name sig
-        | _ => .unresolved
+    | .Name _ rName _ =>
+      let rId := PythonIdentifier.fromAst rName
+      match ctx[rId]? with
+      | some (.module_ _modName) => .unresolved
       | _ => .unresolved
     | _ => .unresolved
 
@@ -667,9 +683,10 @@ partial def resolveTypeParam (ctx : Ctx) (f : SourceRange → ResolvedAnn) : Pyt
 partial def resolveExpr (ctx : Ctx) (f : SourceRange → ResolvedAnn) (e : PythonExpr) : ResolvedPythonExpr :=
   match e with
   | .Name a n ectx =>
-      let info := match ctx[n.val]? with
+      let nId := PythonIdentifier.fromAst n
+      let info := match ctx[nId]? with
         | some (.function sig) => .variable sig.name
-        | some (.class_ className _ _) => .variable (mkLaurelId className)
+        | some (.class_ cId _ _) => .variable (mkLaurelId cId.val)
         | some (.variable _) => .variable (mkLaurelId n.val)
         | some (.module_ _) => .irrelevant
         | some .unresolved => .unresolved
@@ -677,19 +694,22 @@ partial def resolveExpr (ctx : Ctx) (f : SourceRange → ResolvedAnn) (e : Pytho
       .Name { sr := a, info } (mapAnnVal f n) (resolveExprCtx f ectx)
   | .Call a func args kwargs =>
       let callInfo : NodeInfo := match func with
-        | .Name _ n _ => match ctx[n.val]? with
+        | .Name _ n _ =>
+          let nId := PythonIdentifier.fromAst n
+          match ctx[nId]? with
           | some (.function sig) => .call sig.name sig
-          | some (.class_ className _ methods) =>
-              let initSig := methods.find? (fun s => s.name.text == s!"{className}@__init__")
-              let initName := mkLaurelId s!"{className}@__init__"
+          | some (.class_ cId _ methods) =>
+              let initId := PythonIdentifier.fromAst ⟨SourceRange.none, "__init__"⟩
+              let initSig := methods.find? (fun (mName, _) => mName == initId)
+              let initLaurelName := mkLaurelId s!"{cId.val}@__init__"
               match initSig with
-              | some sig => .classNew (mkLaurelId className) sig.name sig
+              | some (_, sig) => .classNew (mkLaurelId cId.val) sig.name sig
               | none =>
-                let emptySig : FuncSig := { name := initName, params := [], defaults := [], returnType := anyType, locals := [] }
-                .classNew (mkLaurelId className) initName emptySig
+                let emptySig : FuncSig := { name := initLaurelName, params := [], defaults := [], returnType := anyType, locals := [] }
+                .classNew (mkLaurelId cId.val) initLaurelName emptySig
           | _ => .unresolved
         | .Attribute _ receiver methodName _ =>
-            resolveMethodCall ctx receiver methodName.val
+            resolveMethodCall ctx receiver methodName
         | _ => .unresolved
       .Call { sr := a, info := callInfo } (resolveExpr ctx f func)
         (mapAnnArr f (resolveExpr ctx f) args)
@@ -748,7 +768,7 @@ partial def resolveWithitem (ctx : Ctx) (f : SourceRange → ResolvedAnn) : Pyth
 partial def resolveExcepthandler (ctx : Ctx) (f : SourceRange → ResolvedAnn) : Python.excepthandler SourceRange → Python.excepthandler ResolvedAnn
   | .ExceptHandler a ty name body =>
       let handlerCtx := match name.val with
-        | some n => ctx.insert n.val (CtxEntry.variable (annotationToPythonType Option.none))
+        | some n => ctx.insert (PythonIdentifier.fromAst n) (CtxEntry.variable (annotationToPythonType Option.none))
         | none => ctx
       .ExceptHandler (f a) (mapAnnOpt f (resolveExpr ctx f) ty) (mapAnnOpt f (mapAnnVal f) name) ⟨f body.ann, resolveBlock handlerCtx f body.val⟩
 
@@ -763,12 +783,12 @@ partial def resolveBlock (ctx : Ctx) (f : SourceRange → ResolvedAnn) (stmts : 
   resolved
 
 partial def resolveFuncDef (ctx : Ctx) (f : SourceRange → ResolvedAnn)
+    (sig : FuncSig)
     (a : SourceRange) (name : Ann String SourceRange) (args : Python.arguments SourceRange)
     (body : Ann PythonProgram SourceRange) (decorators : Ann (Array PythonExpr) SourceRange)
     (returns : Ann (Option PythonExpr) SourceRange) (tc : Ann (Option (Ann String SourceRange)) SourceRange)
     (typeParams : Ann (Array (Python.type_param SourceRange)) SourceRange) :=
-  let sig := extractFuncSig name.val args returns body.val
-  let ctx' := ctx.insert name.val (.function sig)
+  let ctx' := ctx.insert (PythonIdentifier.fromAst name) (.function sig)
   let bodyCtx := resolveFunctionBody ctx' args body.val
   let ann : ResolvedAnn := { sr := a, info := .funcDecl sig }
   let rBody : Ann (Array ResolvedPythonStmt) ResolvedAnn := ⟨f body.ann, resolveBlock bodyCtx f body.val⟩
@@ -781,29 +801,40 @@ partial def resolveFuncDef (ctx : Ctx) (f : SourceRange → ResolvedAnn)
 partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : PythonStmt) : Ctx × ResolvedPythonStmt :=
   match s with
   | .FunctionDef a name args body decorators returns tc typeParams =>
+      let nameId := PythonIdentifier.fromAst name
+      let sig := match ctx[nameId]? with
+        | some (.function existingSig) => existingSig
+        | _ => extractFuncSig name.val args returns body.val
       let (ctx', ann, rName, rArgs, rBody, rDecs, rRets, rTc, rTps) :=
-        resolveFuncDef ctx f a name args body decorators returns tc typeParams
+        resolveFuncDef ctx f sig a name args body decorators returns tc typeParams
       (ctx', .FunctionDef ann rName rArgs rBody rDecs rRets rTc rTps)
   | .AsyncFunctionDef a name args body decorators returns tc typeParams =>
+      let nameId := PythonIdentifier.fromAst name
+      let sig := match ctx[nameId]? with
+        | some (.function existingSig) => existingSig
+        | _ => extractFuncSig name.val args returns body.val
       let (ctx', ann, rName, rArgs, rBody, rDecs, rRets, rTc, rTps) :=
-        resolveFuncDef ctx f a name args body decorators returns tc typeParams
+        resolveFuncDef ctx f sig a name args body decorators returns tc typeParams
       (ctx', .AsyncFunctionDef ann rName rArgs rBody rDecs rRets rTc rTps)
   | .ClassDef a name bases keywords body decorators typeParams =>
+      let classId := PythonIdentifier.fromAst name
       let classType : PythonType := .Name SourceRange.none ⟨SourceRange.none, name.val⟩ (.Load SourceRange.none)
       let fields := body.val.toList.filterMap fun s => match s with
-        | .AnnAssign _ (.Name _ n _) annotation _ _ => some (n.val, annotation)
+        | .AnnAssign _ (.Name _ n _) annotation _ _ => some (PythonIdentifier.fromAst n, annotation)
         | _ => Option.none
       let methods := body.val.toList.filterMap fun s => match s with
         | .FunctionDef _ mName mArgs ⟨_, mBody⟩ _ mReturns _ _ =>
-            some (s!"{name.val}@{mName.val}", extractFuncSig s!"{name.val}@{mName.val}" mArgs mReturns mBody)
+            let mId := PythonIdentifier.fromAst mName
+            some (mId, extractFuncSig s!"{name.val}@{mName.val}" mArgs mReturns mBody)
         | .AsyncFunctionDef _ mName mArgs ⟨_, mBody⟩ _ mReturns _ _ =>
-            some (s!"{name.val}@{mName.val}", extractFuncSig s!"{name.val}@{mName.val}" mArgs mReturns mBody)
+            let mId := PythonIdentifier.fromAst mName
+            some (mId, extractFuncSig s!"{name.val}@{mName.val}" mArgs mReturns mBody)
         | _ => Option.none
+      let ctx' := ctx.insert classId (CtxEntry.class_ classId fields methods)
+      let classCtx := ctx'.insert (PythonIdentifier.fromAst ⟨SourceRange.none, "self"⟩) (CtxEntry.variable classType)
+      let classCtx := methods.foldl (fun c (mId, mSig) => c.insert mId (CtxEntry.function mSig)) classCtx
+      let laurelFields := fields.map fun (fId, fTy) => (mkLaurelId fId.val, fTy)
       let methodSigs := methods.map (·.2)
-      let ctx' := ctx.insert name.val (CtxEntry.class_ name.val fields methodSigs)
-      let ctx' := methods.foldl (fun c (mName, mSig) => c.insert mName (CtxEntry.function mSig)) ctx'
-      let classCtx := ctx'.insert "self" (CtxEntry.variable classType)
-      let laurelFields := fields.map fun (fName, fTy) => (mkLaurelId fName, fTy)
       (ctx', .ClassDef { sr := a, info := .classDecl (mkLaurelId name.val) laurelFields methodSigs } (mapAnnVal f name)
         (mapAnnArr f (resolveExpr ctx' f) bases)
         (mapAnnArr f (resolveKeyword ctx' f) keywords)
@@ -813,18 +844,18 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
   | .Import a aliases =>
       let ctx' := aliases.val.foldl (fun c alias => match alias with
         | .mk_alias _ modName asName =>
-            let registeredName := match asName.val with
-              | some aliasName => aliasName.val
-              | none => match modName.val.splitOn "." with
-                | first :: _ => first | [] => modName.val
-            c.insert registeredName (CtxEntry.module_ modName.val)) ctx
+            let registeredId := match asName.val with
+              | some aliasName => PythonIdentifier.fromAst aliasName
+              | none => PythonIdentifier.fromImport modName
+            c.insert registeredId (CtxEntry.module_ (PythonIdentifier.fromAst modName))) ctx
       (ctx', .Import (f a) (mapAnnArr f (resolveAlias f) aliases))
   | .ImportFrom a modName imports level =>
       let ctx' := imports.val.foldl (fun c imp => match imp with
         | .mk_alias _ impName asName =>
-            let registeredName := match asName.val with
-              | some aliasName => aliasName.val | none => impName.val
-            c.insert registeredName CtxEntry.unresolved) ctx
+            let registeredId := match asName.val with
+              | some aliasName => PythonIdentifier.fromAst aliasName
+              | none => PythonIdentifier.fromAst impName
+            c.insert registeredId CtxEntry.unresolved) ctx
       (ctx', .ImportFrom (f a) (mapAnnOpt f (mapAnnVal f) modName) (mapAnnArr f (resolveAlias f) imports) (mapAnnOpt f (resolveInt f) level))
   | .Assign a targets value tc =>
       let newNames := targets.val.toList.flatMap collectNamesFromTarget
@@ -875,7 +906,7 @@ def resolve (stmts : PythonProgram) : ResolvedPythonProgram :=
     let (ctx, arr) := acc
     let (ctx', resolved) := resolveStmt ctx f stmt
     (ctx', arr.push resolved)
-  { stmts := resolved, moduleLocals := moduleLocals.map fun (n, ty) => (mkLaurelId n, ty) }
+  { stmts := resolved, moduleLocals := moduleLocals.map fun (n, ty) => (mkLaurelId n.val, ty) }
 
 end -- public section
 end Strata.Python.Resolution

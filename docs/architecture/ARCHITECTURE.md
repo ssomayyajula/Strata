@@ -78,24 +78,48 @@ produces output. Grade inference is by coinduction on the call graph.
 
 ### Intermediate types
 
+**Phase distinction:** All Resolution types are purely Python-level. No
+`Laurel.Identifier` is stored anywhere. Translation obtains Laurel
+identifiers by calling accessor functions on the Python-level structures.
+This makes the phase boundary explicit and prevents mixing.
+
 ```lean
 abbrev PythonType := Python.expr SourceRange
+abbrev PythonExpr := Python.expr SourceRange
+
+structure PythonIdentifier where
+  private mk ::
+  val : String
+  deriving BEq, Hashable
+
+-- Constructors (only ways to create a PythonIdentifier):
+--   .fromAst    : Ann String SourceRange → PythonIdentifier  (from parsed AST node)
+--   .fromImport : Ann String SourceRange → PythonIdentifier  (first component of dotted module)
+--   .builtin    : String → PythonIdentifier                  (Python builtins: len, str, etc.)
+
+structure ParamList where
+  required : List (PythonIdentifier × PythonType)
+  optional : List (PythonIdentifier × PythonType × PythonExpr)
+  kwonly : List (PythonIdentifier × PythonType × Option PythonExpr)
+
+inductive FuncParams where
+  | instance (receiver : PythonIdentifier) (params : ParamList)
+  | static (params : ParamList)
 
 structure FuncSig where
-  name : Laurel.Identifier
-  params : List (Laurel.Identifier × PythonType)
-  defaults : List (Laurel.Identifier × PythonExpr)
+  name : PythonIdentifier
+  className : Option PythonIdentifier
+  params : FuncParams
   returnType : PythonType
-  locals : List (Laurel.Identifier × PythonType)
+  locals : List (PythonIdentifier × PythonType)
 
 inductive NodeInfo where
-  | variable (id : Laurel.Identifier)
-  | call (callee : Laurel.Identifier) (sig : FuncSig)
-  | classNew (cls : Laurel.Identifier) (init : Laurel.Identifier) (sig : FuncSig)
-  | operator (callee : Laurel.Identifier)
-  | fieldAccess (field : Laurel.Identifier)
+  | variable (name : PythonIdentifier)
+  | funcCall (sig : FuncSig)
   | funcDecl (sig : FuncSig)
-  | classDecl (name : Laurel.Identifier) (fields : List (Laurel.Identifier × PythonType)) (methods : List FuncSig)
+  | classNew (className : PythonIdentifier) (initSig : FuncSig)
+  | classDecl (name : PythonIdentifier) (attributes : List (PythonIdentifier × PythonType)) (methods : List FuncSig)
+  | attribute (name : PythonIdentifier)
   | unresolved
   | irrelevant
 
@@ -105,15 +129,42 @@ structure ResolvedAnn where
 
 structure ResolvedPythonProgram where
   stmts : Array (Python.stmt ResolvedAnn)
-  moduleLocals : List (Laurel.Identifier × PythonType)
+  moduleLocals : List (PythonIdentifier × PythonType)
 ```
 
-**Design invariant:** Resolution constructs all `Laurel.Identifier` values
-(applying name qualification, builtin mapping, etc.). Translation pattern
-matches on `NodeInfo` and uses the identifiers directly. Translation never
-constructs a `Laurel.Identifier` from a string — it can only forward what
-Resolution provided. This makes ill-scoped names unrepresentable in
-Translation's output.
+**Accessor functions (Python → Laurel):** Translation calls these to obtain
+`Laurel.Identifier` values on demand. They encode the naming conventions
+(builtin mapping, method qualification) in one place.
+
+```lean
+def PythonIdentifier.toLaurel (id : PythonIdentifier) : Laurel.Identifier :=
+  { text := id.val, uniqueId := none }
+
+def FuncSig.laurelName (sig : FuncSig) : Laurel.Identifier :=
+  match sig.className with
+  | some cls => { text := s!"{cls.val}@{sig.name.val}", uniqueId := none }
+  | none => { text := pythonNameToLaurel sig.name.val, uniqueId := none }
+
+def FuncSig.laurelParams (sig : FuncSig) : List Laurel.Parameter := ...
+def FuncSig.laurelLocals (sig : FuncSig) : List (Laurel.Identifier × HighType) := ...
+```
+
+**`NodeInfo` complements:**
+- `funcDecl` / `funcCall` — declaration and use site of a function
+- `classDecl` / `classNew` — declaration and instantiation site of a class
+- Operators (`+`, `==`, `not`) are `funcCall` — the sig carries the operator's
+  runtime procedure name. Translation desugars based on the Python AST node
+  form (BinOp, UnaryOp, etc.), not the NodeInfo variant.
+```
+
+**Design invariant:** Resolution stores only Python-level data. No
+`Laurel.Identifier` appears in Resolution's types. Translation obtains
+Laurel identifiers by calling accessor functions (`FuncSig.laurelName`,
+`PythonIdentifier.toLaurel`, etc.) which encode naming conventions
+(builtin mapping, method qualification) in one place. Translation never
+fabricates identifiers from raw strings — it calls accessors on the
+Python-level data that Resolution provided. This makes the phase boundary
+explicit and naming conventions centralized.
 
 **What Resolution disambiguates:** A Python `Name` node is syntactically
 ambiguous — it could be a variable reference, a function callee, a class
@@ -196,27 +247,25 @@ At the top level (module scope), each declaration extends the context:
 
 At each reference, Resolution annotates with the appropriate `NodeInfo`:
 
-- Name use (variable) → `.variable id` where `id` is a `Laurel.Identifier`
-- Name use (function) → `.variable sig.name` (the **Laurel** name, not the Python name)
-- Name use (class) → `.variable (mkLaurelId className)` (classes are valid expressions)
+- Name use (variable) → `.variable name`
+- Name use (function) → `.variable name` (same Python name — accessor maps to Laurel)
+- Name use (class) → `.variable name` (classes are valid expressions)
 - Name use (module) → `.irrelevant` (only meaningful as Call receiver)
-- Call (function) → `.call callee sig` where `callee` is the qualified Laurel name
-- Call (class) → `.classNew cls init sig`
-- Call (method) → `.call callee sig` (Resolution qualifies: `ClassName@method`)
-- Call (module function) → `.call callee sig` (Resolution qualifies: `module_func`)
-- Attribute (field access) → `.fieldAccess field` where `field` is a `Laurel.Identifier`
-- BinOp/Compare/UnaryOp → `.operator callee` (Resolution maps `+` → `PAdd`, etc.)
+- Call (function) → `.funcCall sig`
+- Call (class) → `.classNew className initSig`
+- Call (method) → `.funcCall sig` (sig has `className = some _` for qualification)
+- Call (module function) → `.funcCall sig` (sig has bare name, accessor maps it)
+- Attribute access → `.attribute name`
+- BinOp/Compare/UnaryOp → `.funcCall sig` (sig carries operator's Python name, accessor maps to runtime procedure)
 - Unresolvable → `.unresolved`
 - Non-reference (literal, keyword, etc.) → `.irrelevant`
 
 **Attribute resolution:** Every `.Attribute` node gets a `ResolvedAnn` with
-`.fieldAccess (mkLaurelId attrName)`. The field name is trivially the Python
-attribute name (no mapping needed — field names don't change between Python
-and Laurel), but Resolution still produces the `Laurel.Identifier` so that
-Translation never constructs one. When the Attribute is the callee of a Call,
-the Call node's annotation carries `.call` with the resolved method — the
-Attribute's own `.fieldAccess` annotation is irrelevant in that case (the
-Call subsumes it).
+`.attribute name` where `name` is the `PythonIdentifier` of the attribute.
+Translation calls `name.toLaurel` to get the Laurel field identifier.
+When the Attribute is the callee of a Call, the Call node's annotation
+carries `.funcCall` with the resolved method sig — the Attribute's own
+`.attribute` annotation is irrelevant in that case (the Call subsumes it).
 
 Within a function body, the context is extended with:
 - Parameters (from the function signature). A parameter with no annotation
@@ -251,11 +300,13 @@ but are not yet implemented.
 Once `typeOfExpr` returns a type `.Name _ className _`, Resolution looks up
 `ctx["{className}@{methodName}"]` to get the method's FuncSig.
 
-**Resolution constructs all Laurel.Identifier values.** The builtin
-mapping (`len` → `Any_len_to_Any`), method qualification
+**Resolution stores Python-level data only.** The builtin mapping
+(`len` → `Any_len_to_Any`), method qualification
 (`get_x` → `Account@get_x`), and module qualification
-(`timedelta` → `datetime_timedelta`) all happen in Resolution.
-Translation never maps names.
+(`timedelta` → `datetime_timedelta`) are encoded in accessor functions
+(`FuncSig.laurelName`, `PythonIdentifier.toLaurel`). Translation calls
+these accessors — it never fabricates Laurel identifiers from strings
+or applies naming conventions itself.
 
 **Resolution does NOT:**
 - Determine effects (Elaboration does that)
@@ -291,13 +342,16 @@ two modes of operation depending on the node:
 
 **Reference nodes** (Name, Call, BinOp, Attribute, etc.): Translation
 pattern matches on `ann.info : NodeInfo` and transcribes:
-- `.variable id` → `Identifier id`
-- `.call callee sig` → `StaticCall callee (matchArgs sig posArgs kwargs)`
-- `.classNew cls init sig` → `Assign [tmp] (New cls); StaticCall init (tmp :: args)`
-- `.operator callee` → `StaticCall callee [left, right]`
-- `.fieldAccess field` → `FieldSelect (translateExpr obj) field`
+- `.variable name` → `Identifier name.toLaurel`
+- `.funcCall sig` → `StaticCall sig.laurelName (matchArgs sig posArgs kwargs)`
+- `.classNew className initSig` → `Assign [tmp] (New className.toLaurel); StaticCall initSig.laurelName (tmp :: args)`
+- `.attribute name` → `FieldSelect (translateExpr obj) name.toLaurel`
 - `.unresolved` → `Hole`
 - `.irrelevant` → not reachable in expression position
+
+For BinOp/UnaryOp/Compare/BoolOp, Translation reads `.funcCall sig` from
+the annotation and uses the Python AST node structure to determine the
+operand layout (binary, unary, etc.).
 
 **Structural nodes** (literals, control flow, assignments): Translation
 emits the corresponding Laurel construct directly:
@@ -314,8 +368,8 @@ emits the corresponding Laurel construct directly:
 `Procedure` / `CompositeType` using the sig data directly.
 
 **Translation does NOT:**
-- Construct `Laurel.Identifier` values (Resolution did that)
-- Map Python names to Laurel names (Resolution did that)
+- Fabricate `Laurel.Identifier` from raw strings (calls accessors instead)
+- Apply naming conventions (accessors encode them)
 - Resolve method calls or qualify names (Resolution did that)
 - Insert casts or coercions (Elaboration does that)
 - Determine effects (Elaboration does that)
