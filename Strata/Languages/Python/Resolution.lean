@@ -790,7 +790,7 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
       let ctx' := newNames.foldl (fun c n => c.insert n (CtxEntry.variable ann)) ctx
       (ctx', .AnnAssign (f a) (resolveExpr ctx f target) (resolveExpr ctx f ann) (mapAnnOpt f (resolveExpr ctx f) value) (resolveInt f simple))
   | .AugAssign a target op value =>
-      (ctx, .AugAssign (f a) (resolveExpr ctx f target) (resolveOperator f op) (resolveExpr ctx f value))
+      (ctx, .AugAssign { sr := a, info := .operator (mkLaurelId (operatorToLaurel op)) } (resolveExpr ctx f target) (resolveOperator f op) (resolveExpr ctx f value))
   | .If a test body orelse =>
       (ctx, .If (f a) (resolveExpr ctx f test) ⟨f body.ann, resolveBlock ctx f body.val⟩ ⟨f orelse.ann, resolveBlock ctx f orelse.val⟩)
   | .For a target iter body orelse tc =>
