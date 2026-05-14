@@ -397,7 +397,7 @@ Translation never fabricates these as string literals.
 | `x += v` | `Assign [x] (StaticCall op [x, v])` | `op` from `.operator callee` |
 | `x[i] = v` | `Assign [x] (StaticCall Any_sets [...])` | `Any_sets` = runtime constant |
 | `x[start:stop]` | `StaticCall Any_get [x, StaticCall from_Slice [...]]` | runtime constants |
-| `obj.field` | `FieldSelect (translate obj) field` | `field` from `.fieldAccess` |
+| `obj.field` | `FieldSelect (translate obj) field` | `field` from `.attribute` |
 | `return e` | `Assign [LaurelResult] e; Exit $body` | output var from sig; label is structural |
 | `Foo(args)` (class) | `Assign [tmp] (New cls); StaticCall init (tmp :: args)` | `cls`, `init` from `.classNew` |
 | `with mgr as v: body` | `v := StaticCall enter [mgr]; body; StaticCall exit [mgr]` | `enter`, `exit` from class method resolution |
@@ -1151,47 +1151,60 @@ assigns to output variables. Architecture's entry point description only mention
 
 ### Implementation status
 
-**Resolution:** Mostly complete. Outstanding issues:
-- `.Attribute` nodes not annotated with `.fieldAccess` (passes through with
-  `f a` = `.irrelevant`). Translation fabricates identifiers via coercion.
-- `Name` referring to function emits `.variable (mkLaurelId pythonName)`
-  instead of `.variable sig.name` (the Laurel name). Breaks when function
-  is passed as value (not just called).
-- `Name` referring to class emits `.irrelevant` instead of `.variable`.
-  Panics Translation if class name appears in expression position.
-- `from foo import bar` registers as `CtxEntry.unresolved` — no attempt
-  to resolve imported names against known specs.
-- `sorry` in `resolveMatchCase` — match patterns not resolved.
-- Method resolution only works for `simpleVar.method()` with an explicit
-  type annotation on `simpleVar`. Chained/complex receivers → `.unresolved`.
+**Resolution:** Complete for supported constructs. Phase distinction enforced:
+all types are Python-level (`PythonIdentifier` newtype, `FuncSig` with
+`FuncParams`/`ParamList`). Accessor functions produce Laurel identifiers.
+Ctx keyed by `PythonIdentifier` (no fabricated string keys). Method
+resolution via spine-based `typeOfExpr`. `with` statement resolves
+`__enter__`/`__exit__` via `NodeInfo.withCtx`.
 
-**Translation:** Pure functional (no `let mut`, no `for` loops). Pattern
-matches on `NodeInfo`. Uses runtime constants for data structure ops.
-Violates architecture at `.Attribute` (fabricates identifier from string
-via `Coe String Identifier`). Will be fixed once Resolution produces
-`.fieldAccess`.
+**Translation:** Writer monad (`TransM` = `BaseM` + statement output).
+`tell` emits statements, `collect = lift ∘ runWriterT` captures them at
+block boundaries. `translateExpr` returns `TransM StmtExprMd` — may emit
+prefix statements (for `classNew` in expression position). Operators use
+`matchArgs` (correct params in sig). No coercion insertion. No string
+fabrication.
 
-**Elaboration:** Datatype constructors registered in env lookup (fix).
-Otherwise unchanged from previous working state.
+**Elaboration:** Unchanged. Datatype constructors registered in env.
 
-### Architectural issues remaining
+### Remaining issues (5 test regressions)
 
-- Resolution must annotate `.Attribute` with `.fieldAccess field`
-- Resolution must emit `.variable sig.name` for Name→function (Laurel name)
-- Resolution must emit `.variable (mkLaurelId className)` for Name→class
-- Translation must read `.fieldAccess` from annotation instead of `attr.val`
-- `with` statement: Resolution must resolve `__enter__`/`__exit__` as method calls on context manager type
-- Class fields declared only in `__init__` not extracted (test gap)
+1. **Imported class fields not resolved** (`test_foo_client_folder`,
+   `test_invalid_client_type`): `from test_helper import ...` registers as
+   `CtxEntry.unresolved`. Classes defined in imported modules have no fields
+   in Resolution's ctx. Needs spec integration or cross-module resolution.
+
+2. **Reassigned params not declared as locals** (`test_method_param_reassign`):
+   `computeLocals` excludes params from the locals list. When Python code
+   reassigns a param (`account_id = account_id`), Translation emits an
+   assignment to an immutable Laurel input. Params that are reassigned in the
+   body must be included in locals (shadowing the input).
+
+3. **Hole procedures not registered** (`test_multiple_except`): Translation
+   emits `Hole` which becomes `hole$N` in the Laurel output. These hole
+   procedures are not declared in the program, so Elaboration can't find them.
+   Pipeline must collect and declare hole procedures post-hoc.
+
+4. **Duplicate hole names** (`test_procedure_in_assert`): Fresh counter
+   produces `havoc$0` multiple times when multiple specs are processed.
+   Counter must be global or holes must have unique scoping.
+
+5. **Class fields only in `__init__`**: Tests that define fields only via
+   `self.x = ...` in `__init__` (without class-body-level annotation) don't
+   have those fields in the CompositeType. Test gap — tests should have
+   class-body-level annotations.
 
 ### Key Implementation Decisions
 
-- `annotationToHighType` handles Union/generic types directly (→ Any)
+- `pythonTypeToHighType` maps Union/generic types → `TCore "Any"`
 - Translation emits Hole for unresolved names (no undefined StaticCalls)
-- `mkGradedCall` uses proc's declared outputs (no output arity mismatch)
-- `proc` grade for runtime procedures (statement-level binding)
-- `ifThenElse`/`labeledBlock` have `after` continuation (no VC blowup)
-- `__main__` has metadata (VCs generated from module-level asserts)
-- `gradeFromSignature` uses `isFunctional` (function vs procedure)
+- `FuncSig.matchArgs` is a zip-fold: positional first, then kwarg/default
+- `instanceProcedures` on CompositeType is empty (methods as top-level statics)
+- Writer monad: `tell` for statements, `collect` for block scoping
+- `FuncParams.instance` separates receiver from other params
+- Operator sigs have correct arity (2 for binary, 1 for unary)
+- `PythonIdentifier.toLaurel` is identity; `FuncSig.laurelName` applies mapping
+- Loop labels use push/pop on state (should be reader monad — tech debt)
 
 
 ## Success Criteria
