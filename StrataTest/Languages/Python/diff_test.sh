@@ -91,13 +91,11 @@ testname_from_file() {
     basename "$f" .python.st.ion
 }
 
-# Regenerate Ion files from Python sources if the .py is newer than the .ion
+# Regenerate all Ion files from Python sources unconditionally
 regen_ion_files() {
     for pyfile in $(find "$TEST_DIR" -name '*.py' -type f); do
         local ionfile="${pyfile%.py}.python.st.ion"
-        if [ "$pyfile" -nt "$ionfile" ] || [ ! -f "$ionfile" ]; then
-            python3 -m strata.gen py_to_strata "$pyfile" "$ionfile" 2>/dev/null || true
-        fi
+        python3 -m strata.gen py_to_strata "$pyfile" "$ionfile" 2>/dev/null || true
     done
 }
 
