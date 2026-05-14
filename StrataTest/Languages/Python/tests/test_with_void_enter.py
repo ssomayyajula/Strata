@@ -1,6 +1,8 @@
 class VoidManager:
+    active: bool
+
     def __init__(self):
-        self.active: bool = True
+        self.active = True
 
     def __enter__(self):
         self.active = True
