@@ -46,16 +46,13 @@ inductive TypeError where
   | other (msg : String)
   deriving Repr
 
-/-- Render a `TypeError` into a `DiagnosticModel` at the given file range. -/
-def TypeError.toDiagnostic (err : TypeError) (range : FileRange) : DiagnosticModel :=
-  -- TODO: tailor messages per case
-  let msg := match err with
-    | .mismatch _ _ => "type mismatch"
-    | .arityMismatch callee _ _ => s!"wrong number of arguments to '{callee}'"
-    | .expected form _ => s!"expected {form}"
-    | .notComposite _ => "field access on non-composite type"
-    | .other m => m
-  DiagnosticModel.withRange range msg
+instance : Std.ToFormat TypeError where
+  format
+    | .mismatch e a        => f!"type mismatch: expected {e}, got {a}"
+    | .arityMismatch c e a => f!"'{c}' expects {e} argument(s), got {a}"
+    | .expected form a     => f!"expected {form}, got {a}"
+    | .notComposite a      => f!"field access on non-composite type {a}"
+    | .other m             => Std.Format.text m
 
 /-! ## Monad -/
 
@@ -71,7 +68,7 @@ structure TypeCheckState where
 
 private def emit (err : TypeError) (md : Imperative.MetaData Core.Expression) : TypeCheckM Unit := do
   let range := (Imperative.getFileRange md).getD FileRange.unknown
-  modify fun s => { s with errors := s.errors.push (err.toDiagnostic range) }
+  modify fun s => { s with errors := s.errors.push (.withRange range s!"{Std.format err}") }
 
 /-! ## Type relations
 
