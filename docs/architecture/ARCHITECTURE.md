@@ -1160,7 +1160,7 @@ outputs (`LaurelResult`, `maybe_except`) before elaboration. Necessary because T
 assigns to output variables. Architecture's entry point description only mentions params.
 
 
-## Current Status (2026-05-13)
+## Current Status (2026-05-14)
 
 ### Implementation status
 
@@ -1176,36 +1176,37 @@ resolution via spine-based `typeOfExpr`. `with` statement resolves
 block boundaries. `translateExpr` returns `TransM StmtExprMd` — may emit
 prefix statements (for `classNew` in expression position). Operators use
 `matchArgs` (correct params in sig). No coercion insertion. No string
-fabrication.
+fabrication. Params get `$in_` prefix on inputs; body uses mutable locals
+initialized from inputs.
 
-**Elaboration:** Unchanged. Datatype constructors registered in env.
+**Elaboration:** Hole handling bug: `checkAssign` at line 674 generates
+`hole$N` names but does NOT add them to `usedHoles`. The `synthValue`
+handler (line 392) does add to `usedHoles`. This inconsistency causes
+hole declarations to be missing from the output program when holes appear
+in assignment value position.
 
-### Remaining issues (5 test regressions)
+### Remaining issues (4 test regressions)
 
 1. **Imported class fields not resolved** (`test_foo_client_folder`,
    `test_invalid_client_type`): `from test_helper import ...` registers as
    `CtxEntry.unresolved`. Classes defined in imported modules have no fields
    in Resolution's ctx. Needs spec integration or cross-module resolution.
 
-2. **Reassigned params not declared as locals** (`test_method_param_reassign`):
-   `computeLocals` excludes params from the locals list. When Python code
-   reassigns a param (`account_id = account_id`), Translation emits an
-   assignment to an immutable Laurel input. Params that are reassigned in the
-   body must be included in locals (shadowing the input).
+2. **Hole not collected in assign position** (`test_multiple_except`):
+   Elaboration's `checkAssign` handler for `.Hole true` (line 674 in
+   Elaborate.lean) generates `hole$N` via `freshVar` but does NOT add to
+   `usedHoles`. The declaration is never emitted. Root cause: holes are
+   handled ad-hoc across multiple code paths instead of as a systematic
+   effect. Proper fix: treat nondeterminism as a graded effect with a
+   monoidal element that collects hole nominals.
 
-3. **Hole procedures not registered** (`test_multiple_except`): Translation
-   emits `Hole` which becomes `hole$N` in the Laurel output. These hole
-   procedures are not declared in the program, so Elaboration can't find them.
-   Pipeline must collect and declare hole procedures post-hoc.
+3. **Duplicate hole names across specs** (`test_procedure_in_assert`):
+   Multi-spec pipeline runs Translation/Elaboration per spec with fresh
+   counters. Multiple specs produce `havoc$0`. No `.py` source for this test.
 
-4. **Duplicate hole names** (`test_procedure_in_assert`): Fresh counter
-   produces `havoc$0` multiple times when multiple specs are processed.
-   Counter must be global or holes must have unique scoping.
-
-5. **Class fields only in `__init__`**: Tests that define fields only via
-   `self.x = ...` in `__init__` (without class-body-level annotation) don't
-   have those fields in the CompositeType. Test gap — tests should have
-   class-body-level annotations.
+4. **`test_foo_client_folder` / `test_invalid_client_type`**: These also
+   fail due to `$field.__name__` — a Python dunder attribute on a type object
+   that's accessed via imported code. Resolution doesn't model type objects.
 
 ### Key Implementation Decisions
 
@@ -1217,7 +1218,9 @@ fabrication.
 - `FuncParams.instance` separates receiver from other params
 - Operator sigs have correct arity (2 for binary, 1 for unary)
 - `PythonIdentifier.toLaurel` is identity; `FuncSig.laurelName` applies mapping
+- Params: inputs named `$in_X`, body gets `LocalVariable X := $in_X`
 - Loop labels use push/pop on state (should be reader monad — tech debt)
+- FunctionDef/ClassDef NOT included in computeLocals (they're declarations)
 
 
 ## Success Criteria
