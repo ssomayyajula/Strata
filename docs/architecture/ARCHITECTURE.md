@@ -86,10 +86,11 @@ This makes the phase boundary explicit and prevents mixing.
 ```lean
 abbrev PythonType := Python.expr SourceRange
 abbrev PythonExpr := Python.expr SourceRange
+abbrev ResolvedPythonExpr := Python.expr ResolvedAnn
 
 structure PythonIdentifier where
   private mk ::
-  val : String
+  private val : String
   deriving BEq, Hashable
 
 -- Constructors (only ways to create a PythonIdentifier):
@@ -97,10 +98,13 @@ structure PythonIdentifier where
 --   .fromImport : Ann String SourceRange → PythonIdentifier  (first component of dotted module)
 --   .builtin    : String → PythonIdentifier                  (Python builtins: len, str, etc.)
 
+-- Types are mutually recursive (ParamList stores ResolvedPythonExpr for defaults):
+mutual
+
 structure ParamList where
   required : List (PythonIdentifier × PythonType)
-  optional : List (PythonIdentifier × PythonType × PythonExpr)
-  kwonly : List (PythonIdentifier × PythonType × Option PythonExpr)
+  optional : List (PythonIdentifier × PythonType × ResolvedPythonExpr)
+  kwonly : List (PythonIdentifier × PythonType × Option ResolvedPythonExpr)
 
 inductive FuncParams where
   | instance (receiver : PythonIdentifier) (params : ParamList)
@@ -109,9 +113,9 @@ inductive FuncParams where
 structure FuncSig where
   name : PythonIdentifier
   className : Option PythonIdentifier
-  params : FuncParams
+  params : FuncParams         -- private: accessed only via matchArgs/laurelDeclInputs
   returnType : PythonType
-  locals : List (PythonIdentifier × PythonType)
+  locals : List (PythonIdentifier × PythonType)  -- private: accessed only via laurelLocals
 
 inductive NodeInfo where
   | variable (name : PythonIdentifier)
@@ -120,12 +124,15 @@ inductive NodeInfo where
   | classNew (className : PythonIdentifier) (initSig : FuncSig)
   | classDecl (name : PythonIdentifier) (attributes : List (PythonIdentifier × PythonType)) (methods : List FuncSig)
   | attribute (name : PythonIdentifier)
+  | withCtx (enterSig : FuncSig) (exitSig : FuncSig)
   | unresolved
   | irrelevant
 
 structure ResolvedAnn where
   sr : SourceRange
   info : NodeInfo
+
+end
 
 structure ResolvedPythonProgram where
   stmts : Array (Python.stmt ResolvedAnn)
@@ -145,17 +152,23 @@ def FuncSig.laurelName (sig : FuncSig) : Laurel.Identifier :=
   | some cls => { text := s!"{cls.val}@{sig.name.val}", uniqueId := none }
   | none => { text := pythonNameToLaurel sig.name.val, uniqueId := none }
 
-def FuncSig.laurelParams (sig : FuncSig) : List Laurel.Parameter := ...
-def FuncSig.laurelLocals (sig : FuncSig) : List (Laurel.Identifier × HighType) := ...
+def FuncSig.laurelDeclInputs (sig : FuncSig) : List (Laurel.Identifier × PythonType)
+  -- includes receiver for instance methods
+
+def FuncSig.matchArgs [Monad m] (sig : FuncSig) (posArgs : List α)
+    (kwargs : List (String × α)) (translateDefault : ResolvedPythonExpr → m α) : m (List α)
+  -- zip-fold: positional → kwarg → default. Includes receiver slot for instance.
+
+def FuncSig.laurelLocals (sig : FuncSig) : List (Laurel.Identifier × PythonType)
 ```
 
 **`NodeInfo` complements:**
 - `funcDecl` / `funcCall` — declaration and use site of a function
 - `classDecl` / `classNew` — declaration and instantiation site of a class
+- `withCtx` — `__enter__`/`__exit__` sigs on a with-item
 - Operators (`+`, `==`, `not`) are `funcCall` — the sig carries the operator's
-  runtime procedure name. Translation desugars based on the Python AST node
-  form (BinOp, UnaryOp, etc.), not the NodeInfo variant.
-```
+  runtime procedure name (with correct arity: 2 for binary, 1 for unary).
+  Translation uses `matchArgs` uniformly.
 
 **Design invariant:** Resolution stores only Python-level data. No
 `Laurel.Identifier` appears in Resolution's types. Translation obtains
