@@ -211,24 +211,26 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
   | .BinOp ann left _ right => match ann.info with
     | .funcCall sig => do
         let l ← translateExpr left; let r ← translateExpr right
-        mkExpr sr (.StaticCall sig.laurelName [l, r])
+        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs [l, r] [] translateExpr))
     | _ => mkExpr sr .Hole
   | .BoolOp ann _ operands => match ann.info with
     | .funcCall sig => do
         let exprs ← operands.val.toList.mapM translateExpr
         match exprs with
         | [] => mkExpr sr .Hole
-        | first :: rest => rest.foldlM (fun acc e => mkExpr sr (.StaticCall sig.laurelName [acc, e])) first
+        | first :: rest => rest.foldlM (fun acc e => do
+            let args ← sig.matchArgs [acc, e] [] translateExpr
+            mkExpr sr (.StaticCall sig.laurelName args)) first
     | _ => mkExpr sr .Hole
   | .UnaryOp ann _ operand => match ann.info with
     | .funcCall sig => do
-        mkExpr sr (.StaticCall sig.laurelName [← translateExpr operand])
+        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs [← translateExpr operand] [] translateExpr))
     | _ => mkExpr sr .Hole
   | .Compare ann left _ comparators => match ann.info with
     | .funcCall sig => do
         if comparators.val.size != 1 then throw (.unsupportedConstruct "Chained comparisons")
         let l ← translateExpr left; let r ← translateExpr comparators.val[0]!
-        mkExpr sr (.StaticCall sig.laurelName [l, r])
+        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs [l, r] [] translateExpr))
     | _ => mkExpr sr .Hole
   | .Attribute ann obj _ _ => match ann.info with
     | .attribute name => do mkExpr sr (.FieldSelect (← translateExpr obj) name.toLaurel)
@@ -358,7 +360,7 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM Unit := do
   | .AugAssign ann target _ value => match ann.info with
     | .funcCall sig => do
         let t ← translateExpr target; let v ← translateExpr value
-        tell [← mkExpr sr (.Assign [t] (← mkExpr sr (.StaticCall sig.laurelName [t, v])))]
+        tell [← mkExpr sr (.Assign [t] (← mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs [t, v] [] translateExpr))))]
     | _ => tell [← mkExpr sr .Hole]
 
   | .If _ test body orelse => do

@@ -763,17 +763,17 @@ partial def resolveExpr (ctx : Ctx) (f : SourceRange → ResolvedAnn) (e : Pytho
       .Attribute { sr := a, info := .attribute (PythonIdentifier.fromAst attr) } (resolveExpr ctx f obj) (mapAnnVal f attr) (resolveExprCtx f ectx)
   | .Constant a c tc => .Constant (f a) (resolveConstant f c) (mapAnnOpt f (mapAnnVal f) tc)
   | .BinOp a left op right =>
-      let opSig : FuncSig := { name := .builtin (operatorToLaurel op), className := none, params := .static {required := [], optional := [], kwonly := []}, returnType := anyType, locals := [] }
+      let opSig : FuncSig := { name := .builtin (operatorToLaurel op), className := none, params := .static {required := [(.builtin "left", anyType), (.builtin "right", anyType)], optional := [], kwonly := []}, returnType := anyType, locals := [] }
       .BinOp { sr := a, info := .funcCall opSig } (resolveExpr ctx f left) (resolveOperator f op) (resolveExpr ctx f right)
   | .BoolOp a op operands =>
-      let opSig : FuncSig := { name := .builtin (boolopToLaurel op), className := none, params := .static {required := [], optional := [], kwonly := []}, returnType := anyType, locals := [] }
+      let opSig : FuncSig := { name := .builtin (boolopToLaurel op), className := none, params := .static {required := [(.builtin "left", anyType), (.builtin "right", anyType)], optional := [], kwonly := []}, returnType := anyType, locals := [] }
       .BoolOp { sr := a, info := .funcCall opSig } (resolveBoolop f op) (mapAnnArr f (resolveExpr ctx f) operands)
   | .UnaryOp a op operand =>
-      let opSig : FuncSig := { name := .builtin (unaryopToLaurel op), className := none, params := .static {required := [], optional := [], kwonly := []}, returnType := anyType, locals := [] }
+      let opSig : FuncSig := { name := .builtin (unaryopToLaurel op), className := none, params := .static {required := [(.builtin "operand", anyType)], optional := [], kwonly := []}, returnType := anyType, locals := [] }
       .UnaryOp { sr := a, info := .funcCall opSig } (resolveUnaryop f op) (resolveExpr ctx f operand)
   | .Compare a left ops comps =>
       let opName := match ops.val[0]? with | some op => cmpopToLaurel op | none => "PEq"
-      let opSig : FuncSig := { name := .builtin opName, className := none, params := .static {required := [], optional := [], kwonly := []}, returnType := anyType, locals := [] }
+      let opSig : FuncSig := { name := .builtin opName, className := none, params := .static {required := [(.builtin "left", anyType), (.builtin "right", anyType)], optional := [], kwonly := []}, returnType := anyType, locals := [] }
       .Compare { sr := a, info := .funcCall opSig } (resolveExpr ctx f left) (mapAnnArr f (resolveCmpop f) ops) (mapAnnArr f (resolveExpr ctx f) comps)
   | .IfExp a test body orelse => .IfExp (f a) (resolveExpr ctx f test) (resolveExpr ctx f body) (resolveExpr ctx f orelse)
   | .Dict a keys vals => .Dict (f a) (mapAnnArr f (resolveOptExpr ctx f) keys) (mapAnnArr f (resolveExpr ctx f) vals)
@@ -930,7 +930,7 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
       let ctx' := newNames.foldl (fun c n => c.insert n (CtxEntry.variable ann)) ctx
       (ctx', .AnnAssign (f a) (resolveExpr ctx f target) (resolveExpr ctx f ann) (mapAnnOpt f (resolveExpr ctx f) value) (resolveInt f simple))
   | .AugAssign a target op value =>
-      let opSig : FuncSig := { name := .builtin (operatorToLaurel op), className := none, params := .static {required := [], optional := [], kwonly := []}, returnType := anyType, locals := [] }
+      let opSig : FuncSig := { name := .builtin (operatorToLaurel op), className := none, params := .static {required := [(.builtin "left", anyType), (.builtin "right", anyType)], optional := [], kwonly := []}, returnType := anyType, locals := [] }
       (ctx, .AugAssign { sr := a, info := .funcCall opSig } (resolveExpr ctx f target) (resolveOperator f op) (resolveExpr ctx f value))
   | .If a test body orelse =>
       (ctx, .If (f a) (resolveExpr ctx f test) ⟨f body.ann, resolveBlock ctx f body.val⟩ ⟨f orelse.ann, resolveBlock ctx f orelse.val⟩)
