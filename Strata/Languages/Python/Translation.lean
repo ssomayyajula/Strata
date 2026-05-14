@@ -370,13 +370,23 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
       let (pre, post) ← items.val.toList.foldlM (fun acc item => do
         let (pre, post) := acc
         match item with
-        | .mk_withitem _ _ctxExpr optVars => do
-          let enter ← mkExpr sr (.Hole (deterministic := false))
-          let exit ← mkExpr sr (.Hole (deterministic := false))
-          match optVars.val with
-          | some varExpr =>
-            pure (pre ++ [← mkExpr sr (.Assign [← translateExpr varExpr] enter)], post ++ [exit])
-          | none => pure (pre ++ [enter], post ++ [exit])
+        | .mk_withitem ann ctxExpr optVars => do
+          let mgr ← translateExpr ctxExpr
+          match ann.info with
+          | .withCtx enterSig exitSig =>
+            let enterCall ← mkExpr sr (.StaticCall enterSig.laurelName [mgr])
+            let exitCall ← mkExpr sr (.StaticCall exitSig.laurelName [mgr])
+            match optVars.val with
+            | some varExpr =>
+              pure (pre ++ [← mkExpr sr (.Assign [← translateExpr varExpr] enterCall)], post ++ [exitCall])
+            | none => pure (pre ++ [enterCall], post ++ [exitCall])
+          | _ =>
+            let enter ← mkExpr sr (.Hole (deterministic := false))
+            let exit ← mkExpr sr (.Hole (deterministic := false))
+            match optVars.val with
+            | some varExpr =>
+              pure (pre ++ [← mkExpr sr (.Assign [← translateExpr varExpr] enter)], post ++ [exit])
+            | none => pure (pre ++ [enter], post ++ [exit])
       ) (([] : List StmtExprMd), ([] : List StmtExprMd))
       pure (pre ++ (← translateStmtList body.val.toList) ++ post)
 

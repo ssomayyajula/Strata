@@ -77,6 +77,7 @@ inductive NodeInfo where
   | classNew (className : PythonIdentifier) (initSig : FuncSig)
   | classDecl (name : PythonIdentifier) (attributes : List (PythonIdentifier × PythonType)) (methods : List FuncSig)
   | attribute (name : PythonIdentifier)
+  | withCtx (enterSig : FuncSig) (exitSig : FuncSig)
   | unresolved
   | irrelevant
 
@@ -812,7 +813,22 @@ partial def resolveAlias (f : SourceRange → ResolvedAnn) : Python.alias Source
   | .mk_alias a name asname => .mk_alias (f a) (mapAnnVal f name) (mapAnnOpt f (mapAnnVal f) asname)
 
 partial def resolveWithitem (ctx : Ctx) (f : SourceRange → ResolvedAnn) : Python.withitem SourceRange → Python.withitem ResolvedAnn
-  | .mk_withitem a ctxExpr optVars => .mk_withitem (f a) (resolveExpr ctx f ctxExpr) (mapAnnOpt f (resolveExpr ctx f) optVars)
+  | .mk_withitem a ctxExpr optVars =>
+      let enterId := PythonIdentifier.builtin "__enter__"
+      let exitId := PythonIdentifier.builtin "__exit__"
+      let info := match typeOfExpr ctx ctxExpr with
+        | some (.Name _ className _) =>
+          let classId := PythonIdentifier.fromAst className
+          match ctx[classId]? with
+          | some (.class_ _ _ methods) =>
+            let enterSig := methods.find? (fun (mName, _) => mName == enterId) |>.map (·.2)
+            let exitSig := methods.find? (fun (mName, _) => mName == exitId) |>.map (·.2)
+            match enterSig, exitSig with
+            | some es, some xs => NodeInfo.withCtx es xs
+            | _, _ => NodeInfo.unresolved
+          | _ => NodeInfo.unresolved
+        | _ => NodeInfo.unresolved
+      .mk_withitem { sr := a, info } (resolveExpr ctx f ctxExpr) (mapAnnOpt f (resolveExpr ctx f) optVars)
 
 partial def resolveExcepthandler (ctx : Ctx) (f : SourceRange → ResolvedAnn) : Python.excepthandler SourceRange → Python.excepthandler ResolvedAnn
   | .ExceptHandler a ty name body =>
