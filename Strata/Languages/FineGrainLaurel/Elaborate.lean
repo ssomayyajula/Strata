@@ -882,7 +882,9 @@ def fullElaborate (program : Laurel.Program) (runtime : Laurel.Program := defaul
       | some (fgl, st') =>
         allBoxConstructors := allBoxConstructors ++ st'.usedBoxConstructors.filter
           (fun (c, _, _) => !allBoxConstructors.any (fun (c2, _, _) => c == c2))
-        allHoles := allHoles ++ st'.usedHoles.map fun (name, det, outTy) => (name, det, inputList, outTy)
+        let newHoles := (st'.usedHoles.map fun (name, det, outTy) => (name, det, inputList, outTy)).filter
+          (fun (n, _, _, _) => !allHoles.any (fun (n2, _, _, _) => n == n2))
+        allHoles := allHoles ++ newHoles
         let projected := projectBody bodyExpr.md fgl
         let md := bodyExpr.md
         let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd md .THeap }
