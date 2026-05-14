@@ -1,6 +1,8 @@
 class Resource:
+    value: int
+
     def __init__(self, n: int):
-        self.value : int = n
+        self.value = n
 
     def __enter__(self) -> int:
         return self.value
