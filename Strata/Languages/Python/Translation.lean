@@ -240,10 +240,10 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
       let idx ← match slice with
         | .Slice _ start stop _ => do
           let s ← match start.val with
-            | some e => mkExpr sr (.StaticCall rtAnyAsInt [← translateExpr e])
+            | some e => translateExpr e
             | none => mkExpr sr (.LiteralInt 0)
           let e ← match stop.val with
-            | some e => mkExpr sr (.StaticCall rtOptSome [← mkExpr sr (.StaticCall rtAnyAsInt [← translateExpr e])])
+            | some e => mkExpr sr (.StaticCall rtOptSome [← translateExpr e])
             | none => mkExpr sr (.StaticCall rtOptNone [])
           mkExpr sr (.StaticCall rtFromSlice [s, e])
         | _ => translateExpr slice
