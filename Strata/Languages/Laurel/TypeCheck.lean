@@ -58,6 +58,7 @@ instance : Std.ToFormat TypeError where
 
 /-- State threaded through the checker. Mirrors `InferHoleState` in shape. -/
 structure TypeCheckState where
+  /-- Resolved semantic model produced by the resolution pass. -/
   model : SemanticModel
   /-- Output type of the procedure currently being checked. Used by `Return`. -/
   currentOutputType : HighTypeMd := ⟨.Unknown, #[]⟩

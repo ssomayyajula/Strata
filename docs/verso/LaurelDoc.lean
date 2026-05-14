@@ -216,11 +216,11 @@ Literals synthesise their canonical type, and variables look up their type in
 the resolved scope.
 
 ```
-─────────────────── (T-Int)        ─────────────────── (T-Bool)
-  Γ ⊢ LiteralInt n : TInt            Γ ⊢ LiteralBool b : TBool
+───────────────────────── (T-LitInt)        ─────────────────────────── (T-LitBool)
+  Γ ⊢ LiteralInt n : TInt                     Γ ⊢ LiteralBool b : TBool
 
-────────────────────────── (T-Str)    ──────────────────────────── (T-Dec)
-  Γ ⊢ LiteralString s : TString         Γ ⊢ LiteralDecimal d : TReal
+──────────────────────────────── (T-LitString)    ────────────────────────────────── (T-LitDecimal)
+  Γ ⊢ LiteralString s : TString                     Γ ⊢ LiteralDecimal d : TReal
 
 
       Γ(x) = τ
@@ -240,43 +240,61 @@ loop invariants are also boolean and the optional `decreases` measure must
 be {name Strata.Laurel.HighType.TInt}`TInt`.
 
 ```
-  Γ ⊢ cond : TBool      Γ ⊢ thn : τ      Γ ⊢ els : τ
-─────────────────────────────────────────────────────── (T-If)
-        Γ ⊢ IfThenElse cond thn (some els) : τ
+  Γ ⊢ condition : TBool      Γ ⊢ thenBranch : τ      Γ ⊢ elseBranch : τ
+──────────────────────────────────────────────────────────────────────── (T-If)
+       Γ ⊢ IfThenElse condition thenBranch (some elseBranch) : τ
 
 
-  Γ ⊢ cond : TBool      Γ ⊢ thn : τ
-──────────────────────────────────────── (T-IfStmt)
-  Γ ⊢ IfThenElse cond thn none : TVoid
+  Γ ⊢ condition : TBool      Γ ⊢ thenBranch : τ
+─────────────────────────────────────────────────── (T-IfStmt)
+   Γ ⊢ IfThenElse condition thenBranch none : TVoid
 
 
-  Γ ⊢ cond : TBool
-  Γ ⊢ invᵢ : TBool   for each invariant invᵢ
-  Γ ⊢ dec  : TInt    if dec is present
-  Γ ⊢ body : _
-─────────────────────────────────────────────── (T-While)
-  Γ ⊢ While cond invs dec body : TVoid
+  Γ ⊢ condition  : TBool
+  Γ ⊢ invariantᵢ : TBool   for each invariantᵢ in invariants
+  Γ ⊢ decreases  : TInt    if decreases is present
+  Γ ⊢ body       : _
+──────────────────────────────────────────────────────────── (T-While)
+  Γ ⊢ While condition invariants decreases body : TVoid
 
 
-  Γ ⊢ cond : TBool                       Γ ⊢ cond : TBool
-─────────────────────────── (T-Assert)  ─────────────────────────── (T-Assume)
-  Γ ⊢ Assert cond : TVoid                  Γ ⊢ Assume cond : TVoid
+   Γ ⊢ condition : TBool                       Γ ⊢ condition : TBool
+─────────────────────────────── (T-Assert)  ─────────────────────────────── (T-Assume)
+  Γ ⊢ Assert condition : TVoid                Γ ⊢ Assume condition : TVoid
 ```
 
 ### Primitive operators
 
 The {name Strata.Laurel.Operation}`Operation` cases partition into four
-families. Logical operators (`And`, `Or`, `Implies`, `AndThen`, `OrElse`,
-`Not`) take and return {name Strata.Laurel.HighType.TBool}`TBool`.
-Arithmetic operators (`Add`, `Sub`, `Mul`, `Div`, `Mod`, `DivT`, `ModT`,
-`Neg`) require homogenous numeric operands and return that same numeric
-type — mixed forms like `TInt + TFloat64` are *rejected* in this iteration
-(roadmap item 5). Comparisons (`Lt`, `Leq`, `Gt`, `Geq`) require homogenous
-numeric operands and return `TBool`. `StrConcat` requires two
-{name Strata.Laurel.HighType.TString}`TString` operands. Equality (`Eq`,
-`Neq`) is symmetric: it accepts any two operands related by `~`, and the
-diagnostic phrasing is correspondingly symmetric (neither side is framed as
-"wrong").
+families. Logical operators
+({name Strata.Laurel.Operation.And}`And`,
+{name Strata.Laurel.Operation.Or}`Or`,
+{name Strata.Laurel.Operation.Implies}`Implies`,
+{name Strata.Laurel.Operation.AndThen}`AndThen`,
+{name Strata.Laurel.Operation.OrElse}`OrElse`,
+{name Strata.Laurel.Operation.Not}`Not`) take and return
+{name Strata.Laurel.HighType.TBool}`TBool`. Arithmetic operators
+({name Strata.Laurel.Operation.Add}`Add`,
+{name Strata.Laurel.Operation.Sub}`Sub`,
+{name Strata.Laurel.Operation.Mul}`Mul`,
+{name Strata.Laurel.Operation.Div}`Div`,
+{name Strata.Laurel.Operation.Mod}`Mod`,
+{name Strata.Laurel.Operation.DivT}`DivT`,
+{name Strata.Laurel.Operation.ModT}`ModT`,
+{name Strata.Laurel.Operation.Neg}`Neg`) require homogenous numeric operands
+and return that same numeric type — mixed forms like `TInt + TFloat64` are
+*rejected* in this iteration (see [the operator overload table
+roadmap](#roadmap-overload)). Comparisons
+({name Strata.Laurel.Operation.Lt}`Lt`,
+{name Strata.Laurel.Operation.Leq}`Leq`,
+{name Strata.Laurel.Operation.Gt}`Gt`,
+{name Strata.Laurel.Operation.Geq}`Geq`) require homogenous numeric operands
+and return `TBool`. {name Strata.Laurel.Operation.StrConcat}`StrConcat`
+requires two {name Strata.Laurel.HighType.TString}`TString` operands.
+Equality ({name Strata.Laurel.Operation.Eq}`Eq`,
+{name Strata.Laurel.Operation.Neq}`Neq`) is symmetric: it accepts any two
+operands related by `~`, and the diagnostic phrasing is correspondingly
+symmetric (neither side is framed as "wrong").
 
 `τ numeric` abbreviates `τ ∈ {`{name Strata.Laurel.HighType.TInt}`TInt`,
 {name Strata.Laurel.HighType.TReal}`TReal`,
@@ -322,26 +340,30 @@ synthesises the callee's return type.
 requires the receiver to fit the `self` slot.
 {name Strata.Laurel.StmtExpr.Assign}`Assign` demands the LHS arity match the
 RHS arity (1 for ordinary expressions, *n* for an *n*-output procedure
-call), and each component must be assignable to its target. `arity(σ) = n`
-for an *n*-tuple output, `1` otherwise; `σᵢ` is the *i*-th component of `σ`
-when multi-valued, else `σ` itself.
+call), and each component must be assignable to its target.
+`arity(valueType) = n` for an *n*-tuple output, `1` otherwise; `valueTypeᵢ`
+is the *i*-th component of `valueType` when multi-valued, else `valueType`
+itself.
 
 ```
-  Γ(f) = (τ₁,…,τₙ) → τ      Γ ⊢ aᵢ : σᵢ      σᵢ ≼ τᵢ   for each i
-─────────────────────────────────────────────────────────────────────── (T-Call)
-                Γ ⊢ StaticCall f [a₁,…,aₙ] : τ
+  Γ(callee) = (paramType₁,…,paramTypeₙ) → returnType
+  Γ ⊢ argumentᵢ : argTypeᵢ      argTypeᵢ ≼ paramTypeᵢ   for each i
+─────────────────────────────────────────────────────────────────── (T-Call)
+   Γ ⊢ StaticCall callee [argument₁,…,argumentₙ] : returnType
 
 
-  Γ ⊢ recv : τ_recv      Γ.method(τ_recv, m) = (self, τ₁,…,τₙ) → τ
-  Γ ⊢ aᵢ : σᵢ      σᵢ ≼ τᵢ   for each i      τ_recv ≼ self
+  Γ ⊢ receiver : receiverType
+  Γ.method(receiverType, callee) = (self, paramType₁,…,paramTypeₙ) → returnType
+  Γ ⊢ argumentᵢ : argTypeᵢ      argTypeᵢ ≼ paramTypeᵢ   for each i
+  receiverType ≼ self
 ──────────────────────────────────────────────────────────────────────── (T-InstCall)
-              Γ ⊢ InstanceCall recv m [a₁,…,aₙ] : τ
+  Γ ⊢ InstanceCall receiver callee [argument₁,…,argumentₙ] : returnType
 
 
-  Γ ⊢ value : σ      |targets| = arity(σ)
-  Γ ⊢ tᵢ : τᵢ        σᵢ ≼ τᵢ   for each target tᵢ
-──────────────────────────────────────────────────── (T-Assign)
-        Γ ⊢ Assign [t₁,…,tₖ] value : TVoid
+  Γ ⊢ value : valueType      |targets| = arity(valueType)
+  Γ ⊢ targetᵢ : targetTypeᵢ      valueTypeᵢ ≼ targetTypeᵢ   for each i
+──────────────────────────────────────────────────────────────── (T-Assign)
+            Γ ⊢ Assign [target₁,…,targetₖ] value : TVoid
 ```
 
 ### Variables and returns
@@ -349,14 +371,19 @@ when multi-valued, else `σ` itself.
 A {name Strata.Laurel.StmtExpr.LocalVariable}`LocalVariable` with an
 initialiser checks the initialiser against the declared type. A
 {name Strata.Laurel.StmtExpr.Return}`Return` checks its value against the
-enclosing procedure's declared output type, written `ret(proc)` — that's the
+enclosing procedure's declared output type — recorded in the
 {name Strata.Laurel.TypeCheckState.currentOutputType}`currentOutputType`
-field on the checker's state.
+field of the checker's state.
 
 ```
-  Γ ⊢ init : σ      σ ≼ τ                                  Γ ⊢ value : σ      σ ≼ ret(proc)
-─────────────────────────────────────── (T-LocalInit)    ───────────────────────────────────── (T-Return)
-  Γ ⊢ LocalVariable x τ (some init) : TVoid                  Γ ⊢ Return (some value) : TVoid
+  Γ ⊢ initialiser : initType      initType ≼ declaredType
+─────────────────────────────────────────────────────────── (T-LocalInit)
+  Γ ⊢ LocalVariable name declaredType (some initialiser) : TVoid
+
+
+  Γ ⊢ value : valueType      valueType ≼ outputType(currentProcedure)
+─────────────────────────────────────────────────────────────────────── (T-Return)
+                  Γ ⊢ Return (some value) : TVoid
 ```
 
 ### Quantifiers and type tests
@@ -369,14 +396,19 @@ variable and require a boolean body.
 type (the cast itself is not soundness-checked at compile time).
 
 ```
-  Γ, x:τ ⊢ body : TBool                                      Γ, x:τ ⊢ body : TBool
-─────────────────────────────────────── (T-Forall)         ─────────────────────────────────────── (T-Exists)
-  Γ ⊢ Forall (x:τ) trigger body : TBool                      Γ ⊢ Exists (x:τ) trigger body : TBool
+        Γ, name : paramType ⊢ body : TBool
+──────────────────────────────────────────────────── (T-Forall)
+  Γ ⊢ Forall (name : paramType) trigger body : TBool
 
 
-   Γ ⊢ target : _                                  Γ ⊢ target : _
-──────────────────────────── (T-IsType)         ───────────────────────────── (T-AsType)
-  Γ ⊢ IsType target τ : TBool                     Γ ⊢ AsType target τ : τ
+        Γ, name : paramType ⊢ body : TBool
+──────────────────────────────────────────────────── (T-Exists)
+  Γ ⊢ Exists (name : paramType) trigger body : TBool
+
+
+       Γ ⊢ target : _                                  Γ ⊢ target : _
+──────────────────────────────────── (T-IsType)   ──────────────────────────────────────── (T-AsType)
+  Γ ⊢ IsType target targetType : TBool              Γ ⊢ AsType target targetType : targetType
 ```
 
 ### Procedure-level well-formedness
@@ -388,9 +420,10 @@ first iteration enforces; other body forms (`Opaque`, `Abstract`,
 `External`) only have their sub-components checked.
 
 ```
-  proc.isFunctional      proc.body = Transparent body      Γ ⊢ body : σ      σ ≼ ret(proc)
-─────────────────────────────────────────────────────────────────────────────────────────── (T-FuncProc)
-                                  ⊢ proc  ✓
+  procedure.isFunctional      procedure.body = Transparent body
+  Γ ⊢ body : bodyType      bodyType ≼ outputType(procedure)
+──────────────────────────────────────────────────────────────── (T-FuncProc)
+                        ⊢ procedure  ✓
 ```
 
 ### Cascade suppression
@@ -403,9 +436,9 @@ type are vacuously satisfied when the sub-expression is statement-shaped
 ({name Strata.Laurel.HighType.TVoid}`TVoid`). The contract is:
 
 ```
-  one of σᵢ = Unknown
-─────────────────────── (cascade)
-  premise σᵢ ≼ τᵢ  ✓
+  any subExpressionType = Unknown
+────────────────────────────────────────── (cascade)
+  premise subExpressionType ≼ expected ✓
 ```
 
 Forgetting one of these wildcards in a future extension is the most common
@@ -414,38 +447,60 @@ invariant is worth pinning with a regression test.
 
 ## Roadmap
 
-Items deferred from the first iteration, in rough order of priority:
+### Constrained types in boolean / numeric position
+%%%
+tag := "roadmap-constrained"
+%%%
 
-1. **Constrained types in boolean / numeric position.** Today any
-   {name Strata.Laurel.HighType.UserDefined}`UserDefined` is permissively
-   accepted by the boolean and numeric checks; only
-   {name Strata.Laurel.ConstrainedType}`ConstrainedType` whose base is
-   `TBool` (resp. numeric) should pass.
-2. **Composite subtyping.** `var x: Dog := new Cat` is silently accepted.
-   Wiring {name Strata.Laurel.computeAncestors}`computeAncestors` (already
-   used by
-   {name Strata.Laurel.validateDiamondFieldAccesses}`validateDiamondFieldAccesses`)
-   into the assignability check closes this gap. The associated regression
-   test lives as a "no diagnostic today" pin so that adding subtyping flips
-   it from passing to correctly rejecting.
-3. **Generic type arguments.**
-   {name Strata.Laurel.HighType.Applied}`Applied`,
-   {name Strata.Laurel.HighType.TSet}`TSet`,
-   {name Strata.Laurel.HighType.TMap}`TMap` payload types are currently
-   checked structurally without parameter substitution; extending to a
-   substitution-aware check unlocks polymorphic procedures.
-4. **Heap-relevant operations.**
-   {name Strata.Laurel.StmtExpr.New}`New`,
-   {name Strata.Laurel.StmtExpr.Old}`Old`,
-   {name Strata.Laurel.StmtExpr.Fresh}`Fresh`,
-   {name Strata.Laurel.StmtExpr.ContractOf}`ContractOf`,
-   {name Strata.Laurel.StmtExpr.Assigned}`Assigned` currently pass through
-   with no extra checks beyond their children. Each has a small set of
-   constraints (e.g. `Fresh` only on impure composite types) worth
-   enforcing.
-5. **Operator overload table.** Today numeric operators require homogenous
-   operands; once Laurel grows mixed-numeric coercions an overload table
-   replaces the per-operator `match`.
+Today any {name Strata.Laurel.HighType.UserDefined}`UserDefined` is
+permissively accepted by the boolean and numeric checks; only
+{name Strata.Laurel.ConstrainedType}`ConstrainedType` whose base is `TBool`
+(resp. numeric) should pass.
+
+### Composite subtyping
+%%%
+tag := "roadmap-subtyping"
+%%%
+
+`var x: Dog := new Cat` is silently accepted. Wiring
+{name Strata.Laurel.computeAncestors}`computeAncestors` (already used by
+{name Strata.Laurel.validateDiamondFieldAccesses}`validateDiamondFieldAccesses`)
+into the assignability check closes this gap. The associated regression
+test lives as a "no diagnostic today" pin so that adding subtyping flips it
+from passing to correctly rejecting.
+
+### Generic type arguments
+%%%
+tag := "roadmap-generics"
+%%%
+
+{name Strata.Laurel.HighType.Applied}`Applied`,
+{name Strata.Laurel.HighType.TSet}`TSet`,
+{name Strata.Laurel.HighType.TMap}`TMap` payload types are currently checked
+structurally without parameter substitution; extending to a
+substitution-aware check unlocks polymorphic procedures.
+
+### Heap-relevant operations
+%%%
+tag := "roadmap-heap"
+%%%
+
+{name Strata.Laurel.StmtExpr.New}`New`,
+{name Strata.Laurel.StmtExpr.Old}`Old`,
+{name Strata.Laurel.StmtExpr.Fresh}`Fresh`,
+{name Strata.Laurel.StmtExpr.ContractOf}`ContractOf`,
+{name Strata.Laurel.StmtExpr.Assigned}`Assigned` currently pass through with
+no extra checks beyond their children. Each has a small set of constraints
+(e.g. `Fresh` only on impure composite types) worth enforcing.
+
+### Operator overload table
+%%%
+tag := "roadmap-overload"
+%%%
+
+Today numeric operators require homogenous operands; once Laurel grows
+mixed-numeric coercions an overload table replaces the per-operator
+`match`.
 
 # Translation Pipeline
 
