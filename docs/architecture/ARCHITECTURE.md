@@ -400,7 +400,7 @@ Translation never fabricates these as string literals.
 | `obj.field` | `FieldSelect (translate obj) field` | `field` from `.fieldAccess` |
 | `return e` | `Assign [LaurelResult] e; Exit $body` | output var from sig; label is structural |
 | `Foo(args)` (class) | `Assign [tmp] (New cls); StaticCall init (tmp :: args)` | `cls`, `init` from `.classNew` |
-| `with mgr as v: body` | `Hole` (unsupported — no `__enter__`/`__exit__` resolution yet) | — |
+| `with mgr as v: body` | `v := StaticCall enter [mgr]; body; StaticCall exit [mgr]` | `enter`, `exit` from class method resolution |
 | `for x in iter: body` | `x := Hole; Assume(StaticCall PIn [x, iter]); body` | `PIn` = runtime constant |
 | `[a, b, c]` | `StaticCall from_ListAny [StaticCall ListAny_cons [...]]` | runtime constants |
 | `{k: v}` | `StaticCall from_DictStrAny [StaticCall DictStrAny_cons [...]]` | runtime constants |
@@ -1180,7 +1180,7 @@ Otherwise unchanged from previous working state.
 - Resolution must emit `.variable sig.name` for Name→function (Laurel name)
 - Resolution must emit `.variable (mkLaurelId className)` for Name→class
 - Translation must read `.fieldAccess` from annotation instead of `attr.val`
-- `with` statement has no resolution story (`__enter__`/`__exit__` not resolved)
+- `with` statement: Resolution must resolve `__enter__`/`__exit__` as method calls on context manager type
 - Class fields declared only in `__init__` not extracted (test gap)
 
 ### Key Implementation Decisions
