@@ -172,7 +172,7 @@ structure ElabState where
   freshCounter : Nat := 0
   heapVar : Option String := none
   usedBoxConstructors : List (String × String × HighType) := []
-  usedHoles : List (String × Bool) := []
+  usedHoles : List (String × Bool × HighType) := []
 
 abbrev ElabM := ReaderT ElabEnv (StateT ElabState Option)
 
@@ -389,11 +389,11 @@ partial def synthValue (expr : StmtExprMd) : ElabM (FGLValue × LowType) := do
       let hv ← freshVar "hole"
       let inputs := (← read).procInputs
       let args := inputs.map fun (name, _) => FGLValue.var md name
-      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, true)] }
+      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, true, .TCore "Any")] }
       pure (.staticCall md hv args, .TCore "Any")
     else
       let hv ← freshVar "havoc"
-      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, false)] }
+      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, false, .TCore "Any")] }
       pure (.staticCall md hv [], .TCore "Any")
   | _ => failure
 
@@ -594,6 +594,7 @@ partial def checkProducer (stmt : StmtExprMd) (rest : List StmtExprMd) (retTy : 
   | .Hole deterministic _ =>
     if deterministic then do
       let hv ← freshVar "hole"
+      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, true, .TCore "Any")] }
       pure (.returnValue md (.staticCall md hv []))
     else
       do let hv ← freshVar "havoc"; mkVarDecl md hv (.TCore "Any") none fun _ => elabRest rest retTy grade
@@ -674,7 +675,7 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
     | .Hole true _ =>
       let hv ← freshVar "hole"
       -- TECH DEBT: holes should be a graded effect, not ad-hoc collection
-      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, true)] }
+      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, true, targetTy)] }
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_x"
         mkVarDecl md name (eraseType targetTy) (some (.staticCall md hv [])) fun _ => elabRest rest retTy grade
@@ -862,7 +863,7 @@ def fullElaborate (program : Laurel.Program) (runtime : Laurel.Program := defaul
   -- PASS 2: Elaborate each proc with final grades
   let mut procs : List Laurel.Procedure := []
   let mut allBoxConstructors : List (String × String × HighType) := []
-  let mut allHoles : List (String × Bool × List (String × HighType)) := []
+  let mut allHoles : List (String × Bool × List (String × HighType) × HighType) := []
   let mut elabFailures : List String := []
   for proc in program.staticProcedures do
     match proc.body with
@@ -881,7 +882,7 @@ def fullElaborate (program : Laurel.Program) (runtime : Laurel.Program := defaul
       | some (fgl, st') =>
         allBoxConstructors := allBoxConstructors ++ st'.usedBoxConstructors.filter
           (fun (c, _, _) => !allBoxConstructors.any (fun (c2, _, _) => c == c2))
-        allHoles := allHoles ++ st'.usedHoles.map fun (name, det) => (name, det, inputList)
+        allHoles := allHoles ++ st'.usedHoles.map fun (name, det, outTy) => (name, det, inputList, outTy)
         let projected := projectBody bodyExpr.md fgl
         let md := bodyExpr.md
         let heapInParam : Laurel.Parameter := { name := Identifier.mk "$heap_in" none, type := mkHighTypeMd md .THeap }
@@ -933,10 +934,10 @@ def fullElaborate (program : Laurel.Program) (runtime : Laurel.Program := defaul
       { name := Identifier.mk (boxFieldName ty) none, type := ⟨boxFieldType ty, #[]⟩ }] : DatatypeConstructor }
   let boxDatatype : TypeDefinition := .Datatype {
     name := "Box", typeArgs := [], constructors := boxConstructors }
-  let holeProcs := allHoles.map fun (name, deterministic, inputs) =>
+  let holeProcs := allHoles.map fun (name, deterministic, inputs, outTy) =>
     let params := inputs.map fun (pName, pType) =>
       ({ name := Identifier.mk pName none, type := ⟨pType, #[]⟩ } : Laurel.Parameter)
-    let outputParam : Laurel.Parameter := { name := Identifier.mk "result" none, type := ⟨.UserDefined (Identifier.mk "Any" none), #[]⟩ }
+    let outputParam : Laurel.Parameter := { name := Identifier.mk "result" none, type := ⟨outTy, #[]⟩ }
     { name := Identifier.mk name none
       inputs := if deterministic then params else []
       outputs := [outputParam]
