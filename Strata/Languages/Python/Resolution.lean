@@ -275,9 +275,9 @@ partial def collectLocalsFromStmt (s : PythonStmt) : List (PythonIdentifier × P
               | none => []
             guardW ++ caseBody.val.toList.flatMap collectLocalsFromStmt
       subjectW ++ caseLocals
-  | .FunctionDef _ name _ _ _ _ _ _ => [(PythonIdentifier.fromAst name, annotationToPythonType none)]
-  | .AsyncFunctionDef _ name _ _ _ _ _ _ => [(PythonIdentifier.fromAst name, annotationToPythonType none)]
-  | .ClassDef _ name _ _ _ _ _ => [(PythonIdentifier.fromAst name, annotationToPythonType none)]
+  | .FunctionDef _ _ _ _ _ _ _ _ => []
+  | .AsyncFunctionDef _ _ _ _ _ _ _ _ => []
+  | .ClassDef _ _ _ _ _ _ _ => []
   | .Return _ valOpt =>
       match valOpt.val with
       | some v => (collectWalrusNames v).map (fun n => (n, annotationToPythonType none))
