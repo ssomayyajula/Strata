@@ -517,15 +517,19 @@ partial def translateTryExcept (sr : SourceRange)
 
 partial def translateFunction (sig : FuncSig) (body : Array (Python.stmt ResolvedAnn))
     (sr : SourceRange) : TransM Procedure := do
-  let inputs : List Laurel.Parameter := sig.laurelDeclInputs.map fun (lId, pTy) =>
-    { name := lId, type := mkTypeDefault (pythonTypeToHighType pTy) }
+  let declInputs := sig.laurelDeclInputs
+  let inputs : List Laurel.Parameter := declInputs.map fun (lId, pTy) =>
+    { name := { text := s!"$in_{lId.text}", uniqueId := none }, type := mkTypeDefault (pythonTypeToHighType pTy) }
   let outputs : List Laurel.Parameter :=
     [{ name := rtLaurelResult, type := mkTypeDefault (pythonTypeToHighType sig.returnType) },
      { name := rtMaybeExcept, type := mkTypeDefault (.TCore "Error") }]
+  let paramCopies := declInputs.map fun (lId, pTy) =>
+    mkExprDefault (.LocalVariable lId (mkTypeDefault (pythonTypeToHighType pTy))
+      (some (mkExprDefault (.Identifier { text := s!"$in_{lId.text}", uniqueId := none }))))
   let localDecls := sig.laurelLocals.map fun (lId, lTy) =>
     mkExprDefault (.LocalVariable lId (mkTypeDefault (pythonTypeToHighType lTy)) none)
   let bodyStmts ← execWriter body.toList
-  let bodyBlock ← mkExpr sr (.Block (localDecls ++ bodyStmts) none)
+  let bodyBlock ← mkExpr sr (.Block (paramCopies ++ localDecls ++ bodyStmts) none)
   let md := sourceRangeToMd (← get).filePath sr
   pure {
     name := sig.laurelName
