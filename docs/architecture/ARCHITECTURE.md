@@ -268,14 +268,20 @@ At each reference, Resolution annotates with the appropriate `NodeInfo`:
 - Call (class) → `.classNew className initSig`
 - Call (method) → `.funcCall sig` (sig has `className = some _` for qualification)
 - Call (module function) → `.funcCall sig` (sig has bare name, accessor maps it)
-- Attribute access → `.attribute name`
+- Attribute access → `.attribute name` (bare field name; Elaboration resolves based on synthesized receiver type)
 - BinOp/Compare/UnaryOp → `.funcCall sig` (sig carries operator's Python name, accessor maps to runtime procedure)
 - Unresolvable → `.unresolved`
 - Non-reference (literal, keyword, etc.) → `.irrelevant`
 
 **Attribute resolution:** Every `.Attribute` node gets a `ResolvedAnn` with
-`.attribute name` where `name` is the `PythonIdentifier` of the attribute.
-Translation calls `name.toLaurel` to get the Laurel field identifier.
+`.attribute name` where `name` is the bare Python field name. Translation
+emits `FieldSelect obj name.toLaurel`. Elaboration synthesizes the receiver
+type and branches:
+- If receiver type is `Composite`: look up the field in `classFields`, emit
+  `readField` with the qualified `$field.Class.field` constructor.
+- If receiver type is `Any`: produce `Any` (havoc — field access on Any is
+  unknowable).
+
 When the Attribute is the callee of a Call, the Call node's annotation
 carries `.funcCall` with the resolved method sig — the Attribute's own
 `.attribute` annotation is irrelevant in that case (the Call subsumes it).
@@ -410,7 +416,7 @@ Translation never fabricates these as string literals.
 | `x += v` | `Assign [x] (StaticCall op [x, v])` | `op` from `.operator callee` |
 | `x[i] = v` | `Assign [x] (StaticCall Any_sets [...])` | `Any_sets` = runtime constant |
 | `x[start:stop]` | `StaticCall Any_get [x, StaticCall from_Slice [...]]` | runtime constants |
-| `obj.field` | `FieldSelect (translate obj) field` | `field` from `.attribute` |
+| `obj.field` | `FieldSelect (translate obj) field` | `field` from `.attribute`; Elaboration qualifies based on receiver type |
 | `return e` | `Assign [LaurelResult] e; Exit $body` | output var from sig; label is structural |
 | `Foo(args)` (class) | `Assign [tmp] (New cls); StaticCall init (tmp :: args)` | `cls`, `init` from `.classNew` |
 | `with mgr as v: body` | `v := StaticCall enter [mgr]; body; StaticCall exit [mgr]` | `enter`, `exit` from class method resolution |
