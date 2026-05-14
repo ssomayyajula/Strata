@@ -450,7 +450,7 @@ def boolopToLaurel : Python.boolop SourceRange → String
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 def PythonIdentifier.toLaurel (id : PythonIdentifier) : Laurel.Identifier :=
-  { text := pythonNameToLaurel id.val, uniqueId := none }
+  { text := id.val, uniqueId := none }
 
 def FuncSig.laurelName (sig : FuncSig) : Laurel.Identifier :=
   match sig.className with
