@@ -53,7 +53,37 @@ structure TransState where
   loopLabels : List (Laurel.Identifier × Laurel.Identifier) := []
   deriving Inhabited
 
-abbrev TransM := StateT TransState (Except TransError)
+abbrev BaseM := StateT TransState (Except TransError)
+
+structure TransM (α : Type) where
+  run : BaseM (α × List StmtExprMd)
+
+instance : Monad TransM where
+  pure a := ⟨pure (a, [])⟩
+  bind ma f := ⟨do
+    let (a, w1) ← ma.run
+    let (b, w2) ← (f a).run
+    pure (b, w1 ++ w2)⟩
+
+instance : MonadLift BaseM TransM where
+  monadLift ma := ⟨do let a ← ma; pure (a, [])⟩
+
+instance : MonadExceptOf TransError TransM where
+  throw e := ⟨throw e⟩
+  tryCatch ma f := ⟨tryCatch ma.run (fun e => (f e).run)⟩
+
+def tell (stmts : List StmtExprMd) : TransM Unit := ⟨pure ((), stmts)⟩
+
+def listen (ma : TransM α) : TransM (α × List StmtExprMd) := ⟨do
+  let (a, stmts) ← ma.run
+  pure ((a, stmts), stmts)⟩
+
+def pass (ma : TransM (α × (List StmtExprMd → List StmtExprMd))) : TransM α := ⟨do
+  let ((a, f), stmts) ← ma.run
+  pure (a, f stmts)⟩
+
+def collect (ma : TransM α) : TransM (α × List StmtExprMd) :=
+  liftM (α := α × List StmtExprMd) ma.run
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Smart Constructors
@@ -164,7 +194,18 @@ partial def translateExpr (e : Python.expr ResolvedAnn) : TransM StmtExprMd := d
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
         mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs (receiver ++ posArgs) kwargPairs translateExpr))
-    | .classNew cls _initSig => mkExpr sr (.New cls.toLaurel)
+    | .classNew cls initSig => do
+        let tmp ← freshId "new"
+        let tmpRef ← mkExpr sr (.Identifier tmp)
+        let assignNew ← mkExpr sr (.Assign [tmpRef] (← mkExpr sr (.New cls.toLaurel)))
+        let posArgs ← args.val.toList.mapM translateExpr
+        let kwargPairs ← kwargs.val.toList.filterMapM fun kw => match kw with
+          | .mk_keyword _ kwName kwExpr => do
+            let val ← translateExpr kwExpr
+            match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
+        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (← initSig.matchArgs ([tmpRef] ++ posArgs) kwargPairs translateExpr))
+        tell [assignNew, initCall]
+        pure tmpRef
     | .unresolved => mkExpr sr (.Hole (deterministic := false))
     | _ => mkExpr sr (.Hole (deterministic := false))
   | .BinOp ann left _ right => match ann.info with
@@ -250,11 +291,15 @@ where
 -- Statement Translation
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-partial def translateStmtList (stmts : List (Python.stmt ResolvedAnn)) : TransM (List StmtExprMd) :=
-  List.foldlM (fun acc stmt => return acc ++ (← translateStmt stmt)) [] stmts
+partial def translateStmtList (stmts : List (Python.stmt ResolvedAnn)) : TransM Unit :=
+  stmts.forM translateStmt
+
+partial def execWriter (stmts : List (Python.stmt ResolvedAnn)) : TransM (List StmtExprMd) := do
+  let (_, s) ← collect (translateStmtList stmts)
+  pure s
 
 partial def translateAssign (sr : SourceRange) (target : Python.expr ResolvedAnn)
-    (value : Python.expr ResolvedAnn) : TransM (List StmtExprMd) := do
+    (value : Python.expr ResolvedAnn) : TransM Unit := do
   match value with
   | .Call ann _ args kwargs => match ann.info with
     | .classNew cls initSig => do
@@ -266,11 +311,11 @@ partial def translateAssign (sr : SourceRange) (target : Python.expr ResolvedAnn
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
         let initCall ← mkExpr sr (.StaticCall initSig.laurelName (← initSig.matchArgs ([targetExpr] ++ posArgs) kwargPairs translateExpr))
-        pure [assignNew, initCall]
-    | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
-  | _ => pure [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
+        tell [assignNew, initCall]
+    | _ => tell [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
+  | _ => tell [← mkExpr sr (.Assign [← translateExpr target] (← translateExpr value))]
 
-partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprMd) := do
+partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM Unit := do
   let sr := s.ann.sr
   match s with
   | .Assign _ targets value _ => do
@@ -282,7 +327,8 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
           let tmp ← freshId "unpack"
           let tmpDecl ← mkExpr sr (.LocalVariable tmp (mkTypeDefault (.TCore "Any")) (some rhsExpr))
           let tmpRef ← mkExpr sr (.Identifier tmp)
-          pure ([tmpDecl] ++ (← unpackTargets sr elts.val.toList tmpRef))
+          tell [tmpDecl]
+          unpackTargets sr elts.val.toList tmpRef
       | .Subscript .. => do
           let (root, indices) ← collectSubscriptChain target
           let rootExpr ← translateExpr root
@@ -301,44 +347,44 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
           ) (← mkExpr sr (.StaticCall rtListAnyNil []))
           let rhs ← translateExpr value
           let setsCall ← mkExpr sr (.StaticCall rtAnySets [idxList, rootExpr, rhs])
-          pure [← mkExpr sr (.Assign [rootExpr] setsCall)]
+          tell [← mkExpr sr (.Assign [rootExpr] setsCall)]
       | _ => translateAssign sr target value
 
   | .AnnAssign _ target _ value _ => do
       match value.val with
       | some val => translateAssign sr target val
-      | none => pure []
+      | none => pure ()
 
   | .AugAssign ann target _ value => match ann.info with
     | .funcCall sig => do
         let t ← translateExpr target; let v ← translateExpr value
-        pure [← mkExpr sr (.Assign [t] (← mkExpr sr (.StaticCall sig.laurelName [t, v])))]
-    | _ => pure [← mkExpr sr .Hole]
+        tell [← mkExpr sr (.Assign [t] (← mkExpr sr (.StaticCall sig.laurelName [t, v])))]
+    | _ => tell [← mkExpr sr .Hole]
 
   | .If _ test body orelse => do
       let cond ← translateExpr test
-      let thn ← mkExpr sr (.Block (← translateStmtList body.val.toList) none)
+      let thn ← mkExpr sr (.Block (← execWriter body.val.toList) none)
       let els ← if orelse.val.isEmpty then pure none
-        else pure (some (← mkExpr sr (.Block (← translateStmtList orelse.val.toList) none)))
-      pure [← mkExpr sr (.IfThenElse cond thn els)]
+        else pure (some (← mkExpr sr (.Block (← execWriter orelse.val.toList) none)))
+      tell [← mkExpr sr (.IfThenElse cond thn els)]
 
   | .While _ test body _ => do
       let (bk, ct) ← pushLoopLabel "loop"
       let cond ← translateExpr test
-      let inner ← mkExpr sr (.Block (← translateStmtList body.val.toList) (some ct.text))
+      let inner ← mkExpr sr (.Block (← execWriter body.val.toList) (some ct.text))
       let outer ← mkExpr sr (.Block [← mkExpr sr (.While cond [] none inner)] (some bk.text))
-      popLoopLabel; pure [outer]
+      popLoopLabel; tell [outer]
 
   | .For _ target iter body _ _ => do
       let (bk, ct) ← pushLoopLabel "for"
       let iterExpr ← translateExpr iter
-      let bodyStmts ← translateStmtList body.val.toList
+      let bodyStmts ← execWriter body.val.toList
       let (havocStmts, assumeTarget) ← match target with
         | .Tuple _ elts _ => do
           let tmp ← freshId "for_iter"
           let tmpRef ← mkExpr sr (.Identifier tmp)
           let havoc ← mkExpr sr (.Assign [tmpRef] (← mkExpr sr (.Hole (deterministic := false))))
-          let unpacks ← unpackTargets sr elts.val.toList tmpRef
+          let (_, unpacks) ← collect (unpackTargets sr elts.val.toList tmpRef)
           pure ([havoc] ++ unpacks, tmpRef)
         | _ => do
           let tgt ← translateExpr target
@@ -347,21 +393,21 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
       let assume ← mkExpr sr (.Assume (← mkExpr sr (.StaticCall rtPIn [assumeTarget, iterExpr])))
       let inner ← mkExpr sr (.Block (havocStmts ++ [assume] ++ bodyStmts) (some ct.text))
       let outer ← mkExpr sr (.Block [inner] (some bk.text))
-      popLoopLabel; pure [outer]
+      popLoopLabel; tell [outer]
 
   | .Return _ value => do
       match value.val with
       | some expr => do
         let e ← translateExpr expr
-        pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtLaurelResult)] e), ← mkExpr sr (.Exit "$body")]
-      | none => pure [← mkExpr sr (.Exit "$body")]
+        tell [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtLaurelResult)] e), ← mkExpr sr (.Exit "$body")]
+      | none => tell [← mkExpr sr (.Exit "$body")]
 
-  | .Assert _ test _ => pure [← mkExpr sr (.Assert (← translateExpr test))]
-  | .Expr _ (.Constant _ (.ConString _ _) _) => pure []
-  | .Expr _ value => pure [← translateExpr value]
-  | .Pass _ => pure []
-  | .Break _ => do pure [← mkExpr sr (.Exit ((← currentBreakLabel).map (·.text) |>.getD "break"))]
-  | .Continue _ => do pure [← mkExpr sr (.Exit ((← currentContinueLabel).map (·.text) |>.getD "continue"))]
+  | .Assert _ test _ => tell [← mkExpr sr (.Assert (← translateExpr test))]
+  | .Expr _ (.Constant _ (.ConString _ _) _) => pure ()
+  | .Expr _ value => tell [← translateExpr value]
+  | .Pass _ => pure ()
+  | .Break _ => tell [← mkExpr sr (.Exit ((← currentBreakLabel).map (·.text) |>.getD "break"))]
+  | .Continue _ => tell [← mkExpr sr (.Exit ((← currentContinueLabel).map (·.text) |>.getD "continue"))]
 
   | .Try _ body handlers _ _ => translateTryExcept sr body handlers
   | .TryStar _ body handlers _ _ => translateTryExcept sr body handlers
@@ -388,27 +434,28 @@ partial def translateStmt (s : Python.stmt ResolvedAnn) : TransM (List StmtExprM
               pure (pre ++ [← mkExpr sr (.Assign [← translateExpr varExpr] enter)], post ++ [exit])
             | none => pure (pre ++ [enter], post ++ [exit])
       ) (([] : List StmtExprMd), ([] : List StmtExprMd))
-      pure (pre ++ (← translateStmtList body.val.toList) ++ post)
+      let bodyStmts ← execWriter body.val.toList
+      tell (pre ++ bodyStmts ++ post)
 
   | .Raise _ exc _ => do
       match exc.val with
       | some excExpr => do
         let errorExpr ← translateExpr excExpr
-        pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtMaybeExcept)] errorExpr)]
-      | none => pure [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtMaybeExcept)] (← mkExpr sr .Hole))]
+        tell [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtMaybeExcept)] errorExpr)]
+      | none => tell [← mkExpr sr (.Assign [← mkExpr sr (.Identifier rtMaybeExcept)] (← mkExpr sr .Hole))]
 
-  | .Import _ _ => pure []
-  | .ImportFrom _ _ _ _ => pure []
-  | .Global _ _ => pure []
-  | .Nonlocal _ _ => pure []
-  | .Delete _ _ => pure []
-  | .AsyncFor _ _ _ _ _ _ => pure [← mkExpr sr .Hole]
-  | .AsyncWith _ _ _ _ => pure [← mkExpr sr .Hole]
-  | .Match _ _ _ => pure [← mkExpr sr .Hole]
-  | .TypeAlias _ _ _ _ => pure []
-  | .FunctionDef _ _ _ _ _ _ _ _ => pure []
-  | .AsyncFunctionDef _ _ _ _ _ _ _ _ => pure []
-  | .ClassDef _ _ _ _ _ _ _ => pure []
+  | .Import _ _ => pure ()
+  | .ImportFrom _ _ _ _ => pure ()
+  | .Global _ _ => pure ()
+  | .Nonlocal _ _ => pure ()
+  | .Delete _ _ => pure ()
+  | .AsyncFor _ _ _ _ _ _ => tell [← mkExpr sr .Hole]
+  | .AsyncWith _ _ _ _ => tell [← mkExpr sr .Hole]
+  | .Match _ _ _ => tell [← mkExpr sr .Hole]
+  | .TypeAlias _ _ _ _ => pure ()
+  | .FunctionDef _ _ _ _ _ _ _ _ => pure ()
+  | .AsyncFunctionDef _ _ _ _ _ _ _ _ => pure ()
+  | .ClassDef _ _ _ _ _ _ _ => pure ()
 
 where
   ann (s : Python.stmt ResolvedAnn) : ResolvedAnn := match s with
@@ -422,19 +469,19 @@ where
     | .Continue a => { sr := a.sr, info := .irrelevant } | .Match a .. => a | .TypeAlias a .. => a
 
 partial def unpackTargets (sr : SourceRange) (elts : List (Python.expr ResolvedAnn))
-    (sourceRef : StmtExprMd) : TransM (List StmtExprMd) := do
-  elts.zipIdx.foldlM (fun acc (elt, idx) => do
+    (sourceRef : StmtExprMd) : TransM Unit := do
+  for (elt, idx) in elts.zipIdx do
     let getExpr ← mkExpr sr (.StaticCall rtAnyGet [sourceRef, ← mkExpr sr (.LiteralInt ↑idx)])
     match elt with
     | .Tuple _ innerElts _ => do
       let innerTmp ← freshId "unpack"
       let innerRef ← mkExpr sr (.Identifier innerTmp)
       let innerDecl ← mkExpr sr (.LocalVariable innerTmp (mkTypeDefault (.TCore "Any")) (some getExpr))
-      pure (acc ++ [innerDecl] ++ (← unpackTargets sr innerElts.val.toList innerRef))
+      tell [innerDecl]
+      unpackTargets sr innerElts.val.toList innerRef
     | _ => do
       let tgt ← translateExpr elt
-      pure (acc ++ [← mkExpr sr (.Assign [tgt] getExpr)])
-  ) ([] : List StmtExprMd)
+      tell [← mkExpr sr (.Assign [tgt] getExpr)]
 
 partial def collectSubscriptChain (expr : Python.expr ResolvedAnn) : TransM (Python.expr ResolvedAnn × List (Python.expr ResolvedAnn)) := do
   match expr with
@@ -445,10 +492,10 @@ partial def collectSubscriptChain (expr : Python.expr ResolvedAnn) : TransM (Pyt
 
 partial def translateTryExcept (sr : SourceRange)
     (body : Ann (Array (Python.stmt ResolvedAnn)) ResolvedAnn)
-    (handlers : Ann (Array (Python.excepthandler ResolvedAnn)) ResolvedAnn) : TransM (List StmtExprMd) := do
+    (handlers : Ann (Array (Python.excepthandler ResolvedAnn)) ResolvedAnn) : TransM Unit := do
   let tryLabel := s!"try_end_{sr.start.byteIdx}"
   let catchersLabel := s!"exception_handlers_{sr.start.byteIdx}"
-  let bodyStmts ← translateStmtList body.val.toList
+  let bodyStmts ← execWriter body.val.toList
   let withChecks ← bodyStmts.foldlM (fun acc stmt => do
     let ref ← mkExpr sr (.Identifier rtMaybeExcept)
     let check ← mkExpr sr (.StaticCall rtIsError [ref])
@@ -458,9 +505,9 @@ partial def translateTryExcept (sr : SourceRange)
   let exitTry ← mkExpr sr (.Exit tryLabel)
   let catchers ← mkExpr sr (.Block (withChecks ++ [exitTry]) (some catchersLabel))
   let handlerLists ← handlers.val.toList.mapM fun handler => match handler with
-    | .ExceptHandler _ _ _ handlerBody => translateStmtList handlerBody.val.toList
+    | .ExceptHandler _ _ _ handlerBody => execWriter handlerBody.val.toList
   let handlerStmts := handlerLists.flatten
-  pure [← mkExpr sr (.Block ([catchers] ++ handlerStmts) (some tryLabel))]
+  tell [← mkExpr sr (.Block ([catchers] ++ handlerStmts) (some tryLabel))]
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Function / Class / Module — reads NodeInfo directly
@@ -475,7 +522,7 @@ partial def translateFunction (sig : FuncSig) (body : Array (Python.stmt Resolve
      { name := rtMaybeExcept, type := mkTypeDefault (.TCore "Error") }]
   let localDecls := sig.laurelLocals.map fun (lId, lTy) =>
     mkExprDefault (.LocalVariable lId (mkTypeDefault (pythonTypeToHighType lTy)) none)
-  let bodyStmts ← translateStmtList body.toList
+  let bodyStmts ← execWriter body.toList
   let bodyBlock ← mkExpr sr (.Block (localDecls ++ bodyStmts) none)
   let md := sourceRangeToMd (← get).filePath sr
   pure {
@@ -535,7 +582,7 @@ partial def translateModule (program : ResolvedPythonProgram) : TransM Laurel.Pr
       let nameDecl ← mkExpr sr (.LocalVariable nameId (mkTypeDefault .TString) (some (mkExprDefault (.LiteralString "__main__"))))
       let localDecls := program.moduleLocals.map fun (lId, lTy) =>
         mkExprDefault (.LocalVariable lId.toLaurel (mkTypeDefault (pythonTypeToHighType lTy)) none)
-      let bodyStmts ← translateStmtList otherStmts
+      let bodyStmts ← execWriter otherStmts
       let bodyBlock ← mkExpr sr (.Block ([nameDecl] ++ localDecls ++ bodyStmts) none)
       let mainOutputs : List Laurel.Parameter :=
         [{ name := rtLaurelResult, type := mkTypeDefault (.TCore "Any") },
@@ -554,7 +601,7 @@ end -- mutual
 def runTranslation (program : ResolvedPythonProgram)
     (filePath : String := "")
     : Except TransError (Laurel.Program × TransState) :=
-  (translateModule program).run { filePath := filePath }
+  (translateModule program).run.run { filePath := filePath } |>.map fun ((prog, _stmts), state) => (prog, state)
 
 end -- public section
 end Strata.Python.Translation
