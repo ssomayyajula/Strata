@@ -113,9 +113,6 @@ inductive CtxEntry where
 
 abbrev Ctx := Std.HashMap PythonIdentifier CtxEntry
 
-private def mkLaurelId (name : String) : Laurel.Identifier :=
-  { text := name, uniqueId := none }
-
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Annotation Extraction
 -- ═══════════════════════════════════════════════════════════════════════════════
@@ -571,20 +568,6 @@ def typeOfExpr (ctx : Ctx) : PythonExpr → Option PythonType
     | _ => none
   | _ => none
 
-private def isAnyType (ty : PythonType) : Bool :=
-  match ty with
-  | .Name _ n _ => n.val == "Any"
-  | _ => false
-
-private def insertParamIfMoreSpecific (c : Ctx) (n : PythonIdentifier) (ty : PythonType) : Ctx :=
-  if isAnyType ty then
-    match c[n]? with
-    | some _ => c
-    | none => c.insert n (CtxEntry.variable ty)
-  else
-    c.insert n (CtxEntry.variable ty)
-
-
 private def resolveMethodCall (ctx : Ctx) (receiver : PythonExpr) (methodName : Ann String SourceRange) : NodeInfo :=
   let methId := PythonIdentifier.fromAst methodName
   match typeOfExpr ctx receiver with
@@ -667,8 +650,8 @@ partial def resolveFunctionBody (ctx : Ctx) (f : SourceRange → ResolvedAnn) (a
       va ++ kw
   let allParamNames := extractAllParamNames args
   let locals := computeLocals body allParamNames
-  let bodyCtx := allParams.foldl (fun c (n, ty) => insertParamIfMoreSpecific c n ty) ctx
-  let bodyCtx := varargKwarg.foldl (fun c (n, ty) => insertParamIfMoreSpecific c n ty) bodyCtx
+  let bodyCtx := allParams.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) ctx
+  let bodyCtx := varargKwarg.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) bodyCtx
   locals.foldl (fun c (n, ty) => c.insert n (CtxEntry.variable ty)) bodyCtx
 
 partial def resolveExprCtx (f : SourceRange → ResolvedAnn) : Python.expr_context SourceRange → Python.expr_context ResolvedAnn
