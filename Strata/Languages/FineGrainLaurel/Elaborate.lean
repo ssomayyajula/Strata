@@ -673,6 +673,8 @@ partial def checkAssign (md : Md) (target value : StmtExprMd) (rest : List StmtE
           let after ← elabRest rest retTy grade; pure (.assign md tv hv after)
     | .Hole true _ =>
       let hv ← freshVar "hole"
+      -- TECH DEBT: holes should be a graded effect, not ad-hoc collection
+      modify fun s => { s with usedHoles := s.usedHoles ++ [(hv, true)] }
       if needsDecl then
         let name := match target.val with | .Identifier id => id.text | _ => "_x"
         mkVarDecl md name (eraseType targetTy) (some (.staticCall md hv [])) fun _ => elabRest rest retTy grade
