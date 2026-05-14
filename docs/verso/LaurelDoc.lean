@@ -148,6 +148,97 @@ A Laurel program consists of procedures, global variables, type definitions, and
 
 {docstring Strata.Laurel.Program}
 
+# Type checking
+
+Type checking runs as a standalone pass over a fully resolved Laurel `Program`,
+between resolution and the translation pipeline. It consumes the `SemanticModel`
+produced by resolution and emits a list of `DiagnosticModel`s; an empty list
+means the program is well typed.
+
+A standalone pass — rather than rules folded into `Resolution.lean` — keeps each
+phase single-purpose: resolution decides *what name refers to what*, type
+checking decides *whether the uses are well typed*. The same split is already
+visible in `InferHoleTypes` and `validateDiamondFieldAccesses`, both of which
+run post-resolution and consume `SemanticModel`.
+
+## Architecture
+
+The pass lives in `Strata.Languages.Laurel.TypeCheck` and exposes a single
+entry point `typeCheck : SemanticModel → Program → Array DiagnosticModel`.
+Internally it walks each `StmtExpr`, computes its type via
+`LaurelTypes.computeExprType`, and checks the local shape constraints required
+by the construct (e.g. an `if` condition must be `TBool`).
+
+Reusable, monad-free type queries (`computeExprType`, future subtype/LUB
+helpers) live in `LaurelTypes.lean` so other passes can share them. The
+traversal, monadic state, and diagnostic emission live in `TypeCheck.lean`.
+
+## Rules
+
+The rules below are the *minimum* set the first iteration aims to enforce.
+Each rule is local and synthesised from already-resolved types — no inference.
+
+- **Branch conditions.** The condition of `IfThenElse`, `While`, `Assert`,
+  and `Assume` must have type `TBool`.
+- **Loop annotations.** `While` invariants must be `TBool`; the optional
+  `decreases` measure must be `TInt`.
+- **Primitive operators.** Each `PrimitiveOp` constrains its operands by
+  category:
+  - `And`, `Or`, `Not`, `Implies`, `AndThen`, `OrElse` require `TBool`
+    operands.
+  - `Neg`, `Add`, `Sub`, `Mul`, `Div`, `Mod`, `DivT`, `ModT`, `Lt`, `Leq`,
+    `Gt`, `Geq` require numeric operands (`TInt`, `TReal`, `TFloat64`), with
+    both operands of the same numeric type.
+  - `StrConcat` requires `TString` operands.
+  - `Eq`, `Neq` require operands with compatible types; the diagnostic for
+    incompatible operands is symmetric (neither side is framed as "wrong").
+- **Calls.** `StaticCall` and `InstanceCall` must match the callee's arity,
+  and each argument's type must be assignable to the corresponding parameter
+  type. For `InstanceCall`, the receiver fills the `self` slot and is checked
+  separately.
+- **Assignment.** `Assign targets value`: the count of targets must match the
+  arity of `value` (1 for ordinary expressions, *n* for an *n*-output
+  procedure call), and each target's declared type must accept the value's
+  type.
+- **Local variables.** A `LocalVariable` with an initialiser checks the
+  initialiser's type against the declared type.
+- **Returns.** A `Return` value's type must be assignable to the enclosing
+  procedure's declared output type.
+- **Quantifiers.** The body of `Forall` / `Exists` must be `TBool`.
+- **Type tests.** `IsType` produces `TBool`; `AsType` produces the named
+  type. No check is performed that the cast is sound at compile time.
+- **Functional procedures.** A procedure marked `isFunctional` with a
+  `Transparent` body has its body type checked against its declared output
+  type.
+
+`TVoid` and `Unknown` are *cascade suppressors*: when any operand of a check
+has type `Unknown` no new diagnostic is emitted at the current level, and
+checks that don't apply to statement-shaped expressions silently accept
+`TVoid`. This keeps a single error from producing dozens of follow-on noise.
+
+## Roadmap
+
+Items deferred from the first iteration, in rough order of priority:
+
+1. **Constrained types in boolean / numeric position.** Today any
+   `UserDefined` is permissively accepted by the boolean and numeric checks;
+   only `ConstrainedType` whose base is `TBool` (resp. numeric) should pass.
+2. **Composite subtyping.** `var x: Dog := new Cat` is silently accepted.
+   Wiring `computeAncestors` (already used by `validateDiamondFieldAccesses`)
+   into the assignability check closes this gap. The associated regression
+   test lives as a "no diagnostic today" pin so that adding subtyping flips
+   it from passing to correctly rejecting.
+3. **Generic type arguments.** `Applied`, `TSet`, `TMap` payload types are
+   currently checked structurally without parameter substitution; extending
+   to a substitution-aware check unlocks polymorphic procedures.
+4. **Heap-relevant operations.** `New`, `Old`, `Fresh`, `ContractOf`,
+   `Assigned` currently pass through with no extra checks beyond their
+   children. Each has a small set of constraints (e.g. `Fresh` only on
+   impure composite types) worth enforcing.
+5. **Operator overload table.** Today numeric operators require homogenous
+   operands; once Laurel grows mixed-numeric coercions an overload table
+   replaces the per-operator `match`.
+
 # Translation Pipeline
 
 Laurel programs are verified by translating them to Strata Core and then invoking the Core
