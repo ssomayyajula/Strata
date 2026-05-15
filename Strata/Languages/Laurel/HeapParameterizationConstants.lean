@@ -16,20 +16,40 @@ namespace Strata.Laurel
 public section
 
 /--
-The Laurel Core prelude defines the heap model types and operations
-used by the Laurel-to-Core translator. These declarations are expressed
-in Laurel syntax via the `#strata program Laurel` macro and parsed into
-a `Laurel.Program` at compile time.
+The heap model runtime interface. These are the types and functions that
+elaboration relies on when translating field access, field write, and
+heap allocation.
 
-The heap model uses:
-- `Composite` - datatype with a reference (int) and a runtime type tag
-- `Field` - abstract type for field names (zero-constructor datatype)
-- `TypeTag` - abstract type for type tags (zero-constructor datatype)
-- `Heap` - datatype with a `data` map and a `nextReference` for allocation
-- `readField` / `updateField` / `increment` - heap access functions
+Types:
+```
+datatype Composite { MkComposite(ref: int) }
+datatype Heap { MkHeap(data: Map Composite (Map Field Box), nextReference: int) }
+datatype Field { ... }     (zero-arity constructors generated per class field)
+datatype TypeTag { ... }   (zero-arity constructors generated per class)
+datatype Box { ... }       (generated dynamically: BoxInt(intVal: int), BoxString(stringVal: string), etc.)
+```
 
-Note: The `Box` datatype is generated dynamically by `heapParameterization`
-based on which field types are actually used in the program.
+Functions (all pure, grade = pure):
+```
+readField     : (Heap, Composite, Field) → Box
+updateField   : (Heap, Composite, Field, Box) → Heap
+increment     : (Heap) → Heap
+MkComposite   : (int) → Composite
+MkHeap        : (Map …, int) → Heap
+Heap..data!   : (Heap) → Map Composite (Map Field Box)
+Heap..nextReference! : (Heap) → int
+```
+
+Datatype accessors/testers follow the DDM pattern:
+```
+$field.C.f       : () → Field      (zero-arity, one per class field)
+C_TypeTag        : () → TypeTag    (zero-arity, one per class)
+box_T            : (T) → Box       (e.g. BoxInt, BoxString, BoxComposite)
+unbox_T          : (Box) → T       (e.g. Box..intVal!, Box..stringVal!)
+```
+
+Note: `Box` and `Field` constructors are generated dynamically by the
+elaborator based on which field types and classes are actually used.
 -/
 
 private def laurelPreludeDDM :=
@@ -66,7 +86,20 @@ function increment(heap: Heap): Heap {
 
 #end
 
-/-- The Laurel Core prelude as a Laurel Program. -/
+/-- The heap model runtime as a Laurel Program. Elaboration looks up
+    these functions when translating field access, field write, and allocation.
+```
+readField     : (Heap, Composite, Field) → Box & pure
+updateField   : (Heap, Composite, Field, Box) → Heap & pure
+increment     : (Heap) → Heap & pure
+MkComposite   : (int, TypeTag) → Composite & pure
+Heap..nextReference! : (Heap) → int & pure
+$field.C.f    : () → Field & pure   (generated per class field)
+C_TypeTag     : () → TypeTag & pure (generated per class)
+box_T         : (T) → Box & pure    (generated per field type used)
+unbox_T       : (Box) → T & pure    (generated per field type used)
+```
+-/
 def heapConstants : Program :=
   match Laurel.TransM.run none (Laurel.parseProgram laurelPreludeDDM) with
   | .ok program => program
