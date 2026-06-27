@@ -28,6 +28,10 @@ structure LaurelTranslateOptions where
       rewritten term carrying the concrete box/unbox call. `none` = identity
       (native Laurel inserts no coercion). Threaded onto `TypeLattice`. -/
   realizeCoercion : Option (Coercion → StmtExprMd → StmtExprMd) := none
+  /-- Frontend-supplied bool-context coercion (truthiness): maps a non-bool SOURCE type + term to
+      a `bool`-producing term, applied only at bool-context check sites. `none` = native Laurel
+      (non-bool in bool context is a type error). Threaded onto `TypeLattice.toBool`. -/
+  toBool : Option (HighType → StmtExprMd → StmtExprMd) := none
 
 instance : Inhabited LaurelTranslateOptions where
   default := {}

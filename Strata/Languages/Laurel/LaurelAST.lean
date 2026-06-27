@@ -614,6 +614,15 @@ structure TypeLattice where
       vocabulary. This REALIZES an already-decided verdict; it makes no subtyping
       decision, so it can never disagree with `coerce`. -/
   realizeCoercion : Option (Coercion → StmtExprMd → StmtExprMd) := none
+  /-- Caller-supplied BOOL-CONTEXT coercion (truthiness). Maps the SOURCE type plus the term to a
+      rewritten term that produces a `bool`. Applied ONLY at bool-context check sites (if/while/
+      assert/assume/precondition) when generic `coerce actual TBool` finds no subtyping coercion —
+      it does NOT participate in the `coerce`/`isConsistentSubtype` decision, so `int ≤ bool` stays
+      false for native callers. `none` (default, native Laurel) means no truthiness: a non-bool in
+      bool context is the usual type error. The Python frontend sets it to map `str→str_to_bool`,
+      `int→int_to_bool`, `Any→Any_to_bool`, etc. This is the plan's separate `toBool` hook (truthiness
+      is a boolean-CONTEXT coercion, NOT subtyping), kept out of `coerce` deliberately. -/
+  toBool : Option (HighType → StmtExprMd → StmtExprMd) := none
   deriving Inhabited
 
 /-- Unfold aliases and constrained types to their underlying type.

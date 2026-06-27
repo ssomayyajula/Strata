@@ -555,6 +555,23 @@ public def pythonRealizeCoercion : Laurel.Coercion → Laurel.StmtExprMd → Lau
     | "Composite" => pyCoerceCall "Any..as_Composite!" e
     | _ => e
 
+/-- Python BOOL-CONTEXT coercion (truthiness), keyed on the SOURCE type. Applied at bool-context
+    check sites (`if`/`while`/`assert`/`assume`/precondition) when the value is a CONCRETE type
+    rather than `Any` — e.g. `if description:` with `description : str` → `str_to_bool(description)`.
+    This is the plan's separate `toBool` hook: truthiness is a boolean-CONTEXT coercion, NOT
+    subtyping, so it lives here and never enters generic `coerce` (keeping `int ≤ bool` false for
+    native Laurel). `bool` is already a bool (identity); `Any` uses `Any_to_bool`. Mirrors the
+    `T ≤ TBool` truthiness rows the elaborator's subtype table once carried. -/
+public def pythonToBool : Laurel.HighType → Laurel.StmtExprMd → Laurel.StmtExprMd := fun source e =>
+  match pyTypeKey source with
+  | "bool" => e
+  | "int" => pyCoerceCall "int_to_bool" e
+  | "str" => pyCoerceCall "str_to_bool" e
+  | "float" => pyCoerceCall "float_to_bool" e
+  | "ListAny" => pyCoerceCall "list_to_bool" e
+  | "DictStrAny" => pyCoerceCall "dict_to_bool" e
+  | _ => pyCoerceCall "Any_to_bool" e   -- Any / Composite / other: box-aware truthiness
+
 /-- V2 variant of `translateCombinedLaurel` that pre-registers Python's unmodeled
     external names so the Laurel resolver emits no "not defined" diagnostics for them.
     `extraExternalNames` adds program-specific unmodeled names (e.g. names imported from
@@ -568,7 +585,8 @@ private def translateCombinedLaurelV2 (combined : Laurel.Program)
       { inlineFunctionsWhenPossible := true
         externalNames := allExternal
         gradualTypes := pythonGradualTypes
-        realizeCoercion := some pythonRealizeCoercion }
+        realizeCoercion := some pythonRealizeCoercion
+        toBool := some pythonToBool }
       combined
   return (coreOption.map appendCorePartOfRuntime, errors)
 
