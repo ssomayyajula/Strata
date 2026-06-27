@@ -802,6 +802,8 @@ function PMul (v1: Any, v2: Any) : Any
 function PIs (v1: Any, v2: Any) : bool;
 function PIsNot (v1: Any, v2: Any) : bool;
 function PInvert (v1: Any) : Any;
+function PMatMul (v1: Any, v2: Any) : Any;
+function PPos (v1: Any) : Any;
 
 // Composite ↔ Any bridge stubs (uninterpreted, sound: the value round-trips).
 // The resolver's coercion realizer boxes a class instance into Any via the bare
