@@ -515,6 +515,47 @@ partial def collectGlobalNonlocalNames (s : PythonStmt) : List PythonIdentifier 
         | .mk_match_case _ _ _ caseBody => caseBody.val.toList.flatMap collectGlobalNonlocalNames
   | _ => []
 
+/-- Recursively collect `self.<field>` assignment targets (`self.x = …` and `self.x: T = …`)
+    anywhere in a statement, descending into nested control-flow blocks. Used to gather a class's
+    instance fields from its method bodies. The flat top-level-of-__init__ scan missed fields
+    assigned inside `if`/`try`/`for` (e.g. `self.client` set in an if/else) and fields set in
+    methods other than __init__ — leaving them unregistered, so `self.field` writes failed to
+    resolve and survived heap parameterization ("Field targets … should have been lowered"). -/
+partial def collectSelfFieldsFromStmt (s : PythonStmt) : List (PythonIdentifier × PythonType) :=
+  let anyTy : PythonType := .Name SourceRange.none ⟨SourceRange.none, "Any"⟩ (.Load SourceRange.none)
+  match s with
+  | .AnnAssign _ (.Attribute _ (.Name _ slf _) attr _) annotation _ _ =>
+      if slf.val == "self" then [(PythonIdentifier.fromAst attr, annotation)] else []
+  | .Assign _ targets _ _ =>
+      targets.val.toList.filterMap fun t => match t with
+        | .Attribute _ (.Name _ slf _) attr _ =>
+            if slf.val == "self" then some (PythonIdentifier.fromAst attr, anyTy) else none
+        | _ => none
+  | .If _ _ body orelse =>
+      body.val.toList.flatMap collectSelfFieldsFromStmt ++ orelse.val.toList.flatMap collectSelfFieldsFromStmt
+  | .For _ _ _ body orelse _ =>
+      body.val.toList.flatMap collectSelfFieldsFromStmt ++ orelse.val.toList.flatMap collectSelfFieldsFromStmt
+  | .AsyncFor _ _ _ body orelse _ =>
+      body.val.toList.flatMap collectSelfFieldsFromStmt ++ orelse.val.toList.flatMap collectSelfFieldsFromStmt
+  | .While _ _ body orelse =>
+      body.val.toList.flatMap collectSelfFieldsFromStmt ++ orelse.val.toList.flatMap collectSelfFieldsFromStmt
+  | .Try _ body handlers orelse finalbody =>
+      body.val.toList.flatMap collectSelfFieldsFromStmt ++
+      handlers.val.toList.flatMap (fun h => match h with
+        | .ExceptHandler _ _ _ hBody => hBody.val.toList.flatMap collectSelfFieldsFromStmt) ++
+      orelse.val.toList.flatMap collectSelfFieldsFromStmt ++ finalbody.val.toList.flatMap collectSelfFieldsFromStmt
+  | .TryStar _ body handlers orelse finalbody =>
+      body.val.toList.flatMap collectSelfFieldsFromStmt ++
+      handlers.val.toList.flatMap (fun h => match h with
+        | .ExceptHandler _ _ _ hBody => hBody.val.toList.flatMap collectSelfFieldsFromStmt) ++
+      orelse.val.toList.flatMap collectSelfFieldsFromStmt ++ finalbody.val.toList.flatMap collectSelfFieldsFromStmt
+  | .With _ _ body _ => body.val.toList.flatMap collectSelfFieldsFromStmt
+  | .AsyncWith _ _ body _ => body.val.toList.flatMap collectSelfFieldsFromStmt
+  | .Match _ _ cases =>
+      cases.val.toList.flatMap fun c => match c with
+        | .mk_match_case _ _ _ caseBody => caseBody.val.toList.flatMap collectSelfFieldsFromStmt
+  | _ => []
+
 /-- Python scoping: any assignment target in a function body is local to that function.
     Collects all such names (excluding params, globals, nonlocals, and nested def/class names),
     deduplicates preserving first-occurrence order. Used by `extractFuncSig` to populate `FuncSig.locals`. -/
@@ -1577,27 +1618,29 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
       let classLevelFields := body.val.toList.filterMap fun s => match s with
         | .AnnAssign _ (.Name _ n _) annotation _ _ => some (PythonIdentifier.fromAst n, annotation)
         | _ => Option.none
-      -- Also collect fields assigned in `__init__` as `self.<field>: T = ...` or
-      -- `self.<field> = ...`. Many classes declare fields ONLY in __init__ (no
-      -- class-level annotation); without this their composite has no fields, so
-      -- `self.field` / `obj.field` references fail to resolve ("'field' is not defined").
-      let anyTy : PythonType := .Name SourceRange.none ⟨SourceRange.none, "Any"⟩ (.Load SourceRange.none)
-      let initFields : List (PythonIdentifier × PythonType) :=
-        body.val.toList.flatMap fun s => match s with
-          | .FunctionDef _ mName _ ⟨_, mBody⟩ _ _ _ _ =>
-            if mName.val == "__init__" then
-              mBody.toList.filterMap fun st => match st with
-                | .AnnAssign _ (.Attribute _ (.Name _ slf _) attr _) annotation _ _ =>
-                  if slf.val == "self" then some (PythonIdentifier.fromAst attr, annotation) else none
-                | .Assign _ targets _ _ =>
-                  match targets.val.toList with
-                  | [.Attribute _ (.Name _ slf _) attr _] =>
-                    if slf.val == "self" then some (PythonIdentifier.fromAst attr, anyTy) else none
-                  | _ => none
-                | _ => none
-            else []
-          | _ => []
-      -- Merge: class-level first, then __init__ fields not already declared.
+      -- Also collect fields assigned as `self.<field> = ...` / `self.<field>: T = ...` in ANY
+      -- method body (not just __init__), RECURSING into nested control flow (if/try/for/with).
+      -- Many classes declare fields only via assignment (no class-level annotation), and often
+      -- inside an if/else (e.g. `self.client` set in a conditional) or in a method other than
+      -- __init__. The previous flat top-level-of-__init__ scan missed those, leaving the field
+      -- unregistered → `self.field` writes fail to resolve and survive heap parameterization
+      -- ("Field targets in assignment should have been lowered"). Dedup preserves first type seen.
+      let initFields : List (PythonIdentifier × PythonType) := Id.run do
+        let mut acc : List (PythonIdentifier × PythonType) := []
+        let mut seen : Std.HashSet String := {}
+        for s in body.val.toList do
+          match s with
+          | .FunctionDef _ _ _ ⟨_, mBody⟩ _ _ _ _ =>
+            for (fid, fty) in mBody.toList.flatMap collectSelfFieldsFromStmt do
+              unless seen.contains fid.val do
+                seen := seen.insert fid.val; acc := acc ++ [(fid, fty)]
+          | .AsyncFunctionDef _ _ _ ⟨_, mBody⟩ _ _ _ _ =>
+            for (fid, fty) in mBody.toList.flatMap collectSelfFieldsFromStmt do
+              unless seen.contains fid.val do
+                seen := seen.insert fid.val; acc := acc ++ [(fid, fty)]
+          | _ => pure ()
+        return acc
+      -- Merge: class-level first, then method-assigned fields not already declared.
       let fields := classLevelFields ++ initFields.filter fun (fid, _) =>
         !classLevelFields.any fun (cid, _) => cid.val == fid.val
       let mut methods : List (PythonIdentifier × FuncSig) := []
