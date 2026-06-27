@@ -343,7 +343,11 @@ partial def translateExpr (e : StrataPython.expr ResolvedAnn) : TransM StmtExprM
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (← initSig.matchArgs ([tmpRef] ++ posArgs) kwargPairs translateExpr (mkKwargs := (do return some (← mkExpr sr (.Hole (deterministic := false)))))))
+        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (← initSig.matchArgs ([tmpRef] ++ posArgs) kwargPairs translateExpr
+          (mkKwargs := (do return some (← mkExpr sr (.Hole (deterministic := false)))))
+          (mkVararg := fun leftover => do
+            let nil ← mkExpr sr (.StaticCall rtListAnyNil [])
+            return some (← leftover.foldrM (fun e acc => mkExpr sr (.StaticCall rtListAnyCons [e, acc])) nil))))
         tell [assignNew, initCall]
         pure tmpRef
     | .unresolved => mkExpr sr (.Hole (deterministic := false))
@@ -475,7 +479,11 @@ partial def translateAssign (sr : SourceRange) (target : StrataPython.expr Resol
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (← initSig.matchArgs ([targetExpr] ++ posArgs) kwargPairs translateExpr (mkKwargs := (do return some (← mkExpr sr (.Hole (deterministic := false)))))))
+        let initCall ← mkExpr sr (.StaticCall initSig.laurelName (← initSig.matchArgs ([targetExpr] ++ posArgs) kwargPairs translateExpr
+          (mkKwargs := (do return some (← mkExpr sr (.Hole (deterministic := false)))))
+          (mkVararg := fun leftover => do
+            let nil ← mkExpr sr (.StaticCall rtListAnyNil [])
+            return some (← leftover.foldrM (fun e acc => mkExpr sr (.StaticCall rtListAnyCons [e, acc])) nil))))
         tell [assignNew, initCall]
     | _ => tell [← mkExpr sr (.Assign [toVarTarget (← translateExpr target)] (← translateExpr value))]
   | _ => tell [← mkExpr sr (.Assign [toVarTarget (← translateExpr target)] (← translateExpr value))]
