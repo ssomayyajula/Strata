@@ -337,6 +337,13 @@ partial def translateExpr (e : StrataPython.expr ResolvedAnn) : TransM StmtExprM
     | .classNew cls initSig => do
         let tmp ← freshId "new"
         let tmpRef ← mkExpr sr (.Var (.Local tmp))
+        -- A `.New` in expression position (e.g. `return C()`) has no annotated target to
+        -- introduce `tmp`, so the elaborator's `lookupEnv tmp` (checkAssign `.Local` arm) fails.
+        -- Emit an explicit bare declaration `var tmp : C` FIRST so `tmp` is in scope, then the
+        -- `tmp := New C` assign goes through the elaborator's `.Local`+`.New` path
+        -- (`checkAssignNew`). (A `.Declare`-target init would instead route the `.New` through
+        -- `checkProducerVarDecl`, where a bare `.New` producer is unhandled and fails.)
+        let declTmp ← mkExpr sr (.Var (.Declare { name := tmp, type := mkTypeDefault (.UserDefined cls.toLaurel) }))
         let assignNew ← mkExpr sr (.Assign [toVarTarget tmpRef] (← mkExpr sr (.New cls.toLaurel)))
         let posArgs ← args.val.toList.mapM translateExpr
         let kwargPairs ← kwargs.val.toList.filterMapM fun kw => match kw with
@@ -348,7 +355,7 @@ partial def translateExpr (e : StrataPython.expr ResolvedAnn) : TransM StmtExprM
           (mkVararg := fun leftover => do
             let nil ← mkExpr sr (.StaticCall rtListAnyNil [])
             return some (← leftover.foldrM (fun e acc => mkExpr sr (.StaticCall rtListAnyCons [e, acc])) nil))))
-        tell [assignNew, initCall]
+        tell [declTmp, assignNew, initCall]
         pure tmpRef
     | .unresolved => mkExpr sr (.Hole (deterministic := false))
     | _ => mkExpr sr (.Hole (deterministic := false))
