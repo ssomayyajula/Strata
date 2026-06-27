@@ -192,6 +192,11 @@ def pythonTypeToHighType (aliases : Std.HashMap String HighType := {}) : PythonT
     | "float" => .TReal
     | "None" => .TVoid
     | "Any" | "object" => .TCore "Any"
+    -- `bytes` has no Core encoding and is in pythonUnmodeledNames (its values flow as `Any`).
+    -- Map the ANNOTATION to `Any` too, so a `bytes`-typed param/slot matches the Any-valued
+    -- expression instead of resolving to a phantom composite `bytes` (which caused
+    -- `expected 'Composite'/'bytes'` mismatches, e.g. a bytes value into a dict slot).
+    | "bytes" => .TCore "Any"
     -- Bare (unsubscripted) container aliases must normalize the SAME as the subscripted
     -- forms below (`dict`/`Dict` → DictStrAny, `list`/`List`/... → ListAny). Without the
     -- capitalized `typing` spellings here, a bare `Dict`/`List` annotation fell to the
