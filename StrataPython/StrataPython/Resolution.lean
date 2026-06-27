@@ -1753,12 +1753,9 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
       let rValue ← match value.val with
         | some v => pure (some (← resolveExpr ctx f v))
         | none => pure none
-      -- Prefer the RHS call's resolved return type (e.g. boto3.S3) over the bare
-      -- written annotation (e.g. S3), so method calls on the variable resolve
-      -- through the module and demand the class.
-      let varTy : PythonType := match rValue with
-        | some (.Call { info := .funcCall sig, .. } ..) => sig.returnType
-        | _ => ann
+      -- All assignments are annotated (input assumption), so the written annotation
+      -- is authoritative; do not override it with the RHS call's inferred return type.
+      let varTy : PythonType := ann
       let ctx' := newNames.foldl (fun c n => c.insert n (CtxEntry.variable varTy)) ctx
       return (ctx', .AnnAssign (f a) rTarget rAnn ⟨f value.ann, rValue⟩ (resolveInt f simple))
   | .AugAssign a target op value => do
