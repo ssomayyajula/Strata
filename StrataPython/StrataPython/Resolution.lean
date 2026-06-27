@@ -153,6 +153,12 @@ structure FuncSig where
   /-- The `**kwargs` parameter name, if present. A declared input (Any-typed) but not
       matched positionally by `matchArgs`. -/
   kwargName : Option PythonIdentifier := none
+  /-- The `*args` (vararg) parameter name, if present. A declared input (Any-typed, holds a
+      ListAny of the trailing positional args). `matchArgs` packs the positionals left after the
+      fixed slots into it. Without this the vararg was dropped from the proc's declared inputs, so
+      the elaborator's `lookupEnv` failed on uses of it (e.g. `for v in validators` where
+      `def ask_question(question, *validators)`). -/
+  varargName : Option PythonIdentifier := none
 
 /-- The resolution annotation on each Python AST node.
     Each variant carries exactly what Translation needs to emit Laurel. -/
@@ -733,9 +739,13 @@ def FuncSig.laurelDeclInputs (sig : FuncSig) : List (Identifier × PythonType) :
       ({ text := recv.val, uniqueId := none }, selfTy) :: pl.allParams.map fun (id, ty) => ({ text := id.val, uniqueId := none }, ty)
     | .static pl =>
       pl.allParams.map fun (id, ty) => ({ text := id.val, uniqueId := none }, ty)
+  -- `*args` then `**kwargs` (Python declaration order); both Any-typed declared inputs.
+  let withVararg := match sig.varargName with
+    | some va => base ++ [({ text := va.val, uniqueId := none }, anyTy)]
+    | none => base
   match sig.kwargName with
-  | some kw => base ++ [({ text := kw.val, uniqueId := none }, anyTy)]
-  | none => base
+  | some kw => withVararg ++ [({ text := kw.val, uniqueId := none }, anyTy)]
+  | none => withVararg
 
 /-- Zip-fold arg matching. Each param slot is filled in order:
     1. If a positional arg remains → consume it
@@ -746,7 +756,8 @@ def FuncSig.laurelDeclInputs (sig : FuncSig) : List (Identifier × PythonType) :
     Includes receiver slot for instance methods. Lives in Resolution
     because it accesses private `ParamList` fields and resolved defaults. -/
 def FuncSig.matchArgs [Monad m] [Inhabited (m α)] (sig : FuncSig) (posArgs : List α) (kwargs : List (String × α))
-    (translateDefault : ResolvedPythonExpr → m α) (mkKwargs : m (Option α) := pure none) : m (List α) := do
+    (translateDefault : ResolvedPythonExpr → m α) (mkKwargs : m (Option α) := pure none)
+    (mkVararg : List α → m (Option α) := fun _ => pure none) : m (List α) := do
   let (receiverSlot, pl) := match sig.params with
     | .instance recv pl => ([(recv.val, (none : Option ResolvedPythonExpr))], pl)
     | .static pl => ([], pl)
@@ -755,7 +766,7 @@ def FuncSig.matchArgs [Monad m] [Inhabited (m α)] (sig : FuncSig) (posArgs : Li
     pl.required.map (fun (id, _) => (id.val, none)) ++
     pl.optional.map (fun (id, _, dflt) => (id.val, some dflt)) ++
     pl.kwonly.map (fun (id, _, dflt) => (id.val, dflt))
-  let (result, _) ← slots.foldlM (fun (acc, pos) (pName, dflt) => do
+  let (result, leftoverPos) ← slots.foldlM (fun (acc, pos) (pName, dflt) => do
     match pos with
     | a :: rest => pure (acc ++ [a], rest)
     | [] =>
@@ -766,6 +777,14 @@ def FuncSig.matchArgs [Monad m] [Inhabited (m α)] (sig : FuncSig) (posArgs : Li
           | none => panic! "Resolution bug: required param without arg"
       pure (acc ++ [v], [])
   ) ([], posArgs)
+  -- `*args` declared input, if present: pack the positionals left after the fixed slots into it
+  -- (a ListAny value built by the caller's `mkVararg`). Consumes the leftover so they are not
+  -- silently dropped. When absent, leftover positionals are dropped as before.
+  let result ← if sig.varargName.isSome then
+      match ← mkVararg leftoverPos with
+      | some va => pure (result ++ [va])
+      | none => pure result
+    else pure result
   -- Append a value for the `**kwargs` declared input, if present.
   if sig.kwargName.isSome then
     let kwOpt ← mkKwargs
@@ -935,7 +954,11 @@ partial def extractFuncSig (ctx : Ctx) (f : SourceRange → ResolvedAnn)
     | .mk_arguments _ _ _ _ _ _ kwarg _ => match kwarg.val with
       | some (.mk_arg _ n _ _) => some (PythonIdentifier.fromAst n)
       | none => none
-  return { name := pythonName, className, params := funcParams, returnType := retTy, locals, kwargName }
+  let varargName := match args with
+    | .mk_arguments _ _ _ vararg _ _ _ _ => match vararg.val with
+      | some (.mk_arg _ n _ _) => some (PythonIdentifier.fromAst n)
+      | none => none
+  return { name := pythonName, className, params := funcParams, returnType := retTy, locals, kwargName, varargName }
 
 /-- Builds the body context for resolving statements inside a function. Extends ctx with
     all params (including vararg/kwarg) and locals. Used by `resolveFuncDef` to create the

@@ -328,7 +328,12 @@ partial def translateExpr (e : StrataPython.expr ResolvedAnn) : TransM StmtExprM
           | .mk_keyword _ kwName kwExpr => do
             let val ← translateExpr kwExpr
             match kwName.val with | some n => pure (some (n.val, val)) | none => pure none
-        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs (receiver ++ posArgs) kwargPairs translateExpr (mkKwargs := (do return some (← mkExpr sr (.Hole (deterministic := false)))))))
+        mkExpr sr (.StaticCall sig.laurelName (← sig.matchArgs (receiver ++ posArgs) kwargPairs translateExpr
+          (mkKwargs := (do return some (← mkExpr sr (.Hole (deterministic := false)))))
+          (mkVararg := fun leftover => do
+            -- pack trailing positionals into a ListAny (the *args value)
+            let nil ← mkExpr sr (.StaticCall rtListAnyNil [])
+            return some (← leftover.foldrM (fun e acc => mkExpr sr (.StaticCall rtListAnyCons [e, acc])) nil))))
     | .classNew cls initSig => do
         let tmp ← freshId "new"
         let tmpRef ← mkExpr sr (.Var (.Local tmp))
