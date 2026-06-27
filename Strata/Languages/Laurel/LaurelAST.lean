@@ -806,6 +806,13 @@ def coerce (ctx : TypeLattice) (sub sup : HighTypeMd) : Option Coercion :=
     else if supBoxable then some (.inject sub'.val)              -- concrete → Any (box)
     else if subBoxable then some (.project sup'.val)             -- Any → concrete (unbox)
     else if highEq sub' sup' then some .refl
+    -- A concrete non-bool value into a `bool` slot is NOT subtyping (a `ListAny`/`DictStrAny`/
+    -- `int`/… is not a `bool`): `coerce` must return `none` so the caller's bool-context
+    -- truthiness hook (`toBool`: `list_to_bool`/`dict_to_bool`/…) handles it. Without this, the
+    -- broad `isGradualTop` (every `.TCore`) below returns `.refl` for `ListAny → bool`, letting a
+    -- `ListAny` flow unchanged into a `bool` slot → Core "Impossible to unify bool with ListAny".
+    -- (`bool → bool` is already handled by `highEq` above; `Any → bool` by `subBoxable` → project.)
+    else if sup'.val matches .TBool then none
     else match sub'.val, sup'.val with
       | .UserDefined subName, .UserDefined supName =>
         if (ctx.ancestors subName.text).contains supName.text then some .upcast else none
