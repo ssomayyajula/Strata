@@ -1125,13 +1125,18 @@ partial def resolveExpr (ctx : Ctx) (f : SourceRange → ResolvedAnn) (e : Pytho
                 | none => pure ()
                 pure (.funcCall sig')
               | none => pure .unresolved
-          | some (.class_ cId _ methods _) =>
+          | some (.class_ cId fields methods methodAsts) =>
               let initId := PythonIdentifier.builtin "__init__"
               match methods.find? (fun (mName, _) => mName == initId) with
               | some (_, sig) => pure (.classNew cId sig)
               | none =>
-                let emptySig : FuncSig := { name := initId, className := some cId, params := .static {required := [], optional := [], kwonly := []}, returnType := anyType, locals := [] }
-                pure (.classNew cId emptySig)
+                match methodAsts.find? (fun (mName, _) => mName == initId) with
+                | some (_, mAst) => do
+                  let sig ← resolveMethodAstSig ctx f cId fields mAst
+                  pure (.classNew cId sig)
+                | none =>
+                  let emptySig : FuncSig := { name := initId, className := some cId, params := .static {required := [], optional := [], kwonly := []}, returnType := anyType, locals := [] }
+                  pure (.classNew cId emptySig)
           | _ => pure .unresolved
         | .Attribute _ receiver methodName _ =>
             resolveMethodCall ctx receiver methodName args.val
@@ -1567,13 +1572,33 @@ partial def resolveModuleComponent (name : String) (dir : System.FilePath) (f : 
             ctx := ctx.insert nameId (.function sig)
       | .ClassDef _ cname _ _ cbody _ _ =>
         let classId := PythonIdentifier.fromAst cname
-        let fields := cbody.val.toList.filterMap fun s => match s with
+        let classLevelFields := cbody.val.toList.filterMap fun s => match s with
           | .AnnAssign _ (.Name _ n _) annotation _ _ => some (PythonIdentifier.fromAst n, annotation)
           | _ => none
         let methodAsts := cbody.val.toList.filterMap fun s => match s with
           | .FunctionDef _ mName _ _ _ _ _ _ => some (PythonIdentifier.fromAst mName, s)
           | .AsyncFunctionDef _ mName _ _ _ _ _ _ => some (PythonIdentifier.fromAst mName, s)
           | _ => none
+        -- Also collect `self.<field>` fields from ALL method bodies (mirrors the user-class
+        -- ClassDef path) so an imported demanded class's Composite carries every instance field
+        -- the heap pass needs to lower `self.field` writes.
+        let initFields : List (PythonIdentifier × PythonType) := Id.run do
+          let mut acc : List (PythonIdentifier × PythonType) := []
+          let mut seen : Std.HashSet String := {}
+          for (_, mAst) in methodAsts do
+            match mAst with
+            | .FunctionDef _ _ _ ⟨_, mBody⟩ _ _ _ _ =>
+              for (fid, fty) in mBody.toList.flatMap collectSelfFieldsFromStmt do
+                unless seen.contains fid.val do
+                  seen := seen.insert fid.val; acc := acc ++ [(fid, fty)]
+            | .AsyncFunctionDef _ _ _ ⟨_, mBody⟩ _ _ _ _ =>
+              for (fid, fty) in mBody.toList.flatMap collectSelfFieldsFromStmt do
+                unless seen.contains fid.val do
+                  seen := seen.insert fid.val; acc := acc ++ [(fid, fty)]
+            | _ => pure ()
+          return acc
+        let fields := classLevelFields ++ initFields.filter fun (fid, _) =>
+          !classLevelFields.any fun (cid, _) => cid.val == fid.val
         ctx := ctx.insert classId (.class_ classId fields [] methodAsts)
       | _ => pure ()  -- TypedDicts, assignments, imports — not needed by callers
     modify fun s => { s with resolvedPaths := s.resolvedPaths.insert key ctx }
@@ -1721,13 +1746,26 @@ partial def resolveStmt (ctx : Ctx) (f : SourceRange → ResolvedAnn) (s : Pytho
             let registeredId := match asName.val with
               | some aliasName => PythonIdentifier.fromAst aliasName
               | none => PythonIdentifier.fromAst impName
-            match ctx'[registeredId]? with
-            | some _ => pure ()
-            | none =>
-              let impId := PythonIdentifier.fromAst impName
+            let impId := PythonIdentifier.fromAst impName
+            -- `computeLocals` seeds imported names into the initial ctx as a placeholder
+            -- `.variable`. For a type annotation `x : C` to resolve, an imported CLASS must beat
+            -- that placeholder (else `C` stays a variable → "resolves to variable, expected
+            -- composite"). Scope this override to `.class_` ONLY: binding imported functions /
+            -- modules over the placeholder has broad blast radius (it changes how their later
+            -- uses resolve and can newly-demand callees that then fail to elaborate), so for
+            -- non-class imports keep v2's original "skip if already present" behavior.
+            let priorIsPlaceholder := match ctx'[registeredId]? with
+              | some (.variable _) => true | none => true | some _ => false
+            let importedIsClass := match moduleCtx[impId]? with
+              | some (.class_ ..) => true | _ => false
+            let alreadyBound := (ctx'[registeredId]?).isSome
+            if (priorIsPlaceholder && importedIsClass) || !alreadyBound then
               match moduleCtx[impId]? with
               | some entry => ctx' := ctx'.insert registeredId entry
-              | none => ctx' := ctx'.insert registeredId CtxEntry.unresolved
+              | none =>
+                match ctx'[registeredId]? with
+                | some _ => pure ()
+                | none => ctx' := ctx'.insert registeredId CtxEntry.unresolved
       | none =>
         for imp in imports.val do
           match imp with

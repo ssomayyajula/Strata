@@ -650,7 +650,15 @@ public def pyAnalyzeV2ToCore (pythonIonPath : String) (sourcePath : Option Strin
     match Translation.runTranslation { stmts := resolveResult.demandedStmts, moduleLocals := [] } metadataPath with
     | .ok (prog, _) => prog
     | .error _ => default
-  let userLaurel ← match Translation.runTranslation resolveResult.program metadataPath with
+  -- Strip demanded-class names from `__main__` module locals so the demanded Composite is not
+  -- shadowed by a same-named value-local (computeLocals collects imported names as locals).
+  let demandedClassIds : Std.HashSet String :=
+    resolveResult.demandedClasses.foldl (fun s (clsId, _) => s.insert clsId.toLaurel.text) {}
+  let filteredProgram : Resolution.ResolvedPythonProgram :=
+    { resolveResult.program with
+      moduleLocals := resolveResult.program.moduleLocals.filter fun (lId, _) =>
+        !demandedClassIds.contains lId.toLaurel.text }
+  let userLaurel ← match Translation.runTranslation filteredProgram metadataPath with
     | .error e => return .error s!"translation: {repr e}"
     | .ok (prog, _) => pure prog
   -- Composite type declarations for demanded imported classes (v2 PySpecPipeline:495-498).
