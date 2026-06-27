@@ -192,8 +192,13 @@ def pythonTypeToHighType (aliases : Std.HashMap String HighType := {}) : PythonT
     | "float" => .TReal
     | "None" => .TVoid
     | "Any" | "object" => .TCore "Any"
-    | "dict" => .TCore "DictStrAny"
-    | "list" => .TCore "ListAny"
+    -- Bare (unsubscripted) container aliases must normalize the SAME as the subscripted
+    -- forms below (`dict`/`Dict` → DictStrAny, `list`/`List`/... → ListAny). Without the
+    -- capitalized `typing` spellings here, a bare `Dict`/`List` annotation fell to the
+    -- `UserDefined` arm → phantom composite `Dict`, causing `expected 'Dict', got
+    -- 'DictStrAny'` mismatches against dict-valued expressions.
+    | "dict" | "Dict" => .TCore "DictStrAny"
+    | "list" | "List" | "tuple" | "Tuple" | "set" | "Set" | "frozenset" => .TCore "ListAny"
     -- Module-level assignment type-alias (`MyInt = int`): resolve the name to the
     -- aliased type instead of a phantom `UserDefined` composite. (mypy-valid; v2/kbd
     -- only handle the 3.12 `.TypeAlias` node, not assignment-form aliases.)
