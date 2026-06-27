@@ -598,12 +598,18 @@ private def collectImportedNames (stmts : Array (StrataPython.stmt SourceRange))
     | _ => pure ()
   return names
 
-/-- Assemble the Laurel program to elaborate: merge user code and demanded imported stubs. -/
+/-- Assemble the Laurel program to elaborate: merge user code, demanded imported stubs,
+    and the Composite type definitions for demanded imported classes. v2's
+    `pyAnalyzeLaurelV2` threads these `demandedTypes` in (PySpecPipeline:495-498,512); the
+    original v4 port produced `demandedClasses` but never consumed them, so a demanded class
+    (e.g. botomoog's `S3Client`) lost its type definition and its methods' bodies (and their
+    `assert`s) never became checkable — the analysis came out vacuous. -/
 private def assembleElaborationInput
-    (userLaurel importedLaurel : Laurel.Program) : Laurel.Program :=
+    (userLaurel importedLaurel : Laurel.Program)
+    (demandedTypes : List Laurel.TypeDefinition := []) : Laurel.Program :=
   { staticProcedures := userLaurel.staticProcedures ++ importedLaurel.staticProcedures
     staticFields := userLaurel.staticFields
-    types := userLaurel.types ++ importedLaurel.types
+    types := userLaurel.types ++ importedLaurel.types ++ demandedTypes
     constants := userLaurel.constants }
 
 /-- V2 pipeline: Resolution → Translation → Elaboration → resolve → Core.
@@ -629,8 +635,15 @@ public def pyAnalyzeV2ToCore (pythonIonPath : String) (sourcePath : Option Strin
   let userLaurel ← match Translation.runTranslation resolveResult.program metadataPath with
     | .error e => return .error s!"translation: {repr e}"
     | .ok (prog, _) => pure prog
+  -- Composite type declarations for demanded imported classes (v2 PySpecPipeline:495-498).
+  -- Without these the demanded class's type is absent and its methods never elaborate.
+  let demandedTypes : List Laurel.TypeDefinition := resolveResult.demandedClasses.map fun (clsId, fields) =>
+    let laurelFields : List Laurel.Field := fields.map fun (fId, fTy) =>
+      { name := fId.toLaurel, isMutable := true,
+        type := Translation.mkTypeDefault (Translation.pythonTypeToHighType {} fTy) }
+    .Composite { name := clsId.toLaurel, extending := [], fields := laurelFields, instanceProcedures := [] }
   -- Step 3: Elaborate (exception threading)
-  let toElaborate  := assembleElaborationInput userLaurel importedLaurel
+  let toElaborate  := assembleElaborationInput userLaurel importedLaurel demandedTypes
   let fullRuntime  := pythonRuntimeLaurelPart
   -- Build runtime grade map: maps each proc name to its inferred grade.
   let runtimeGrades := fullRuntime.staticProcedures.foldl
@@ -648,7 +661,17 @@ public def pyAnalyzeV2ToCore (pythonIonPath : String) (sourcePath : Option Strin
   -- Names imported from unmodeled modules (e.g. `from botocore.config import Config`) are
   -- external: register them so the Laurel resolver treats their uses as sound-but-
   -- uninterpreted instead of "'Config' is not defined".
-  let importedNames := collectImportedNames stmts
+  -- A demanded imported CLASS (e.g. botomoog's `S3Client`) now has a real Composite type
+  -- definition (demandedTypes, threaded into elaboration above). It must NOT also be
+  -- pre-registered as an unresolved external NAME, or `resolveHighType`'s kind check sees an
+  -- annotation `x : S3Client` resolve to that variable and rejects it ("resolves to variable,
+  -- but expected composite type"). Subtract the demanded-class names from the external set so
+  -- the type wins. (v2 passes no externalNames at all; this keeps v4's external-name feature
+  -- for genuinely unmodeled imports while not shadowing demanded class types.)
+  let demandedClassNames : Std.HashSet String :=
+    resolveResult.demandedClasses.foldl (fun s (clsId, _) => s.insert clsId.toLaurel.text) {}
+  let importedNames := (collectImportedNames stmts).fold (init := ({} : Std.HashSet String))
+    fun s n => if demandedClassNames.contains n then s else s.insert n
   let (coreOpt, errs) ← translateCombinedLaurelV2 combined importedNames
   return .ok (coreOpt, errs)
 
