@@ -430,10 +430,15 @@ private def isVoidLikeHT (t : HighType) : Bool := match t with
     output) — equivalent to `Check.resolveStmtExpr e expected` but without re-synthesizing. -/
 private def checkSubtype (source : Option FileRange) (expected : HighTypeMd) (actual : HighTypeMd) : ResolveM Unit := do
   let ctx := (← get).typeLattice
+  -- Strip trailing `Error` outputs from BOTH sides: a multi-output proc `(T, Error)` used in a
+  -- single-output position coerces to `T`. Stripping only `actual` made `(T,Error) ⇐ (T,Error)`
+  -- fail (`expected '(T, Error)', got '(T, Error)'`) because `expected` kept its Error while
+  -- `actual` lost it. Symmetric stripping makes the trivial both-`(T,Error)` case succeed.
   let actual' := stripTrailingErrors actual
+  let expected' := stripTrailingErrors expected
   let compatible :=
-    (isVoidLikeHT actual'.val && isVoidLikeHT expected.val) ||
-    isConsistentSubtype ctx actual' expected
+    (isVoidLikeHT actual'.val && isVoidLikeHT expected'.val) ||
+    isConsistentSubtype ctx actual' expected'
   unless compatible do
     typeMismatch source none s!"expected '{formatType expected}'" actual
 
@@ -451,7 +456,10 @@ private def checkSubtype (source : Option FileRange) (expected : HighTypeMd) (ac
 private def coerceTo (source : Option FileRange) (expected : HighTypeMd) (actual : HighTypeMd)
     (e : StmtExprMd) : ResolveM StmtExprMd := do
   let ctx := (← get).typeLattice
+  -- Symmetric trailing-Error stripping (see checkSubtype): a `(T, Error)` actual into a `(T, Error)`
+  -- expected must compare as `T ≤ T`, not `T ≤ (T,Error)`.
   let actual' := stripTrailingErrors actual
+  let expected := stripTrailingErrors expected
   if isVoidLikeHT actual'.val && isVoidLikeHT expected.val then
     pure e
   else match coerce ctx actual' expected with
