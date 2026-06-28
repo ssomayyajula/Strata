@@ -123,6 +123,26 @@ def buildElabEnvFromProgram (program : Laurel.Program) (runtime : Laurel.Program
         names := names.insert ctor.name.text (.function { name := ctor.name.text, params := ctorParams, returnType := retTy })
     | .Constrained _ => pure ()
     | .Alias _ => pure ()
+  -- Python module-level globals are top-level `Declare`d locals in the synthesized `__main__`
+  -- procedure; Python scoping makes them visible to sibling functions, but the per-proc env only
+  -- sees a proc's own params/locals, so a function referencing one hits `lookupEnv | failure` and
+  -- the whole proc fails to elaborate. Seed `__main__`'s top-level `Declare` targets as global
+  -- `.variable` names (paired with the resolver's preRegisterTopLevel doing the same).
+  for proc in program.staticProcedures do
+    if proc.name.text == "__main__" then
+      let bodyOpt : Option StmtExprMd := match proc.body with
+        | .Transparent b => some b
+        | .Opaque _ (some b) _ => some b
+        | _ => none
+      if let some body := bodyOpt then
+        let stmts := match body.val with | .Block ss _ => ss | _ => [body]
+        for s in stmts do
+          match s.val with
+          | .Assign [⟨.Declare ⟨nm, ty⟩, _⟩] _ =>
+            unless names.contains nm.text do names := names.insert nm.text (.variable ty.val)
+          | .Var (.Declare ⟨nm, ty⟩) =>
+            unless names.contains nm.text do names := names.insert nm.text (.variable ty.val)
+          | _ => pure ()
   { names, classFields }
 
 def mkLaurel (md : Option FileRange) (e : StmtExpr) : StmtExprMd :=

@@ -3207,6 +3207,29 @@ private def preRegisterTopLevel (program : Program) : ResolveM Unit := do
   -- Pre-register static procedures
   for proc in program.staticProcedures do
     let _ ← defineNameCheckDup proc.name (.staticProcedure proc)
+  -- Pre-register Python module-level globals so sibling procedures can reference them. These are
+  -- translated as top-level `Declare`d locals in the synthesized `__main__` procedure; without a
+  -- top-level binding a function referencing one fails to resolve ("'X' is not defined"). Register
+  -- each as a typed `.var` (its declared type), so uses resolve correctly. Skip names already in
+  -- scope (don't clobber a real proc/type/etc.); `__main__`'s own body re-declares them in its
+  -- inner scope, which shadows this top-level binding harmlessly.
+  for proc in program.staticProcedures do
+    if proc.name.text == "__main__" then
+      let bodyOpt : Option StmtExprMd := match proc.body with
+        | .Transparent b => some b
+        | .Opaque _ (some b) _ => some b
+        | _ => none
+      if let some body := bodyOpt then
+        let stmts := match body.val with | .Block ss _ => ss | _ => [body]
+        for s in stmts do
+          let decl? : Option (Identifier × HighTypeMd) := match s.val with
+            | .Assign [⟨.Declare ⟨nm, ty⟩, _⟩] _ => some (nm, ty)
+            | .Var (.Declare ⟨nm, ty⟩) => some (nm, ty)
+            | _ => none
+          if let some (nm, ty) := decl? then
+            unless (← get).scope.get? nm.text |>.isSome do
+              let ty' ← resolveHighType ty
+              let _ ← defineNameCheckDup nm (.var nm ty')
 
 /-! ## Entry point -/
 
