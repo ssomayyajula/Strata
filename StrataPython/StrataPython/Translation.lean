@@ -707,11 +707,25 @@ private partial def wrapBodyWithErrorChecks (sr : SourceRange) (catchersLabel : 
     let ifCheck ← mkExpr sr (.IfThenElse check (← mkExpr sr (.Exit catchersLabel)) none)
     pure (acc ++ [stmt, ifCheck])) []
 
-/-- Translate exception handlers to their statement lists. -/
+/-- Translate exception handlers to their statement lists. When a handler binds the caught exception
+    (`except E as e:`), assign the in-flight exception (`$maybe_except`, typed `Error`) into `e` at
+    the top of the handler body, so references to `e` (incl. a re-raise `raise e`) see the current
+    exception rather than an uninitialized `Any`. `e` is already a declared local (collectLocalsFrom
+    Stmt collects the `as e` name), so ASSIGN (not declare). The Error↔Any impedance is reconciled by
+    the resolver's coercion (Error boxes into Any via the `exception` constructor). -/
 private partial def translateHandlers (handlers : List (StrataPython.excepthandler ResolvedAnn))
     : TransM (List StmtExprMd) := do
   let lists ← handlers.mapM fun handler => match handler with
-    | .ExceptHandler _ _ _ handlerBody => execWriter handlerBody.val.toList
+    | .ExceptHandler _ _ name handlerBody => do
+        let bodyStmts ← execWriter handlerBody.val.toList
+        match name.val with
+        | some n =>
+          let sr := SourceRange.none
+          let eRef ← mkExpr sr (.Var (.Local rtMaybeExcept))
+          let eId : PythonIdentifier := PythonIdentifier.builtin n.val
+          let bind ← mkExpr sr (.Assign [{ val := .Local eId.toLaurel, source := sourceRangeToMd (← get).filePath sr }] eRef)
+          pure (bind :: bodyStmts)
+        | none => pure bodyStmts
   pure lists.flatten
 
 partial def translateTryExcept (sr : SourceRange)

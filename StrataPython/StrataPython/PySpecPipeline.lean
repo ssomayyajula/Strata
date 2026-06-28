@@ -542,6 +542,10 @@ public def pythonRealizeCoercion : Laurel.Coercion → Laurel.StmtExprMd → Lau
     | "ListAny" => pyCoerceCall "from_ListAny" e
     | "DictStrAny" => pyCoerceCall "from_DictStrAny" e
     | "Composite" => pyCoerceCall "from_Composite" e
+    -- `Error` boxes into `Any` via the `exception(get_error: Error)` constructor of the `Any`
+    -- datatype. Lets a caught exception value (`except E as e:` binds `e : Error`) flow into an
+    -- `Any` slot, and a re-raise (`raise e`) round-trip cleanly.
+    | "Error" => pyCoerceCall "exception" e
     | "void" => { val := .StaticCall { text := "from_None", uniqueId := none } [], source := e.source }
     | _ => e   -- already Any or a type with no boxing witness: pass through
   | .project target, e =>
@@ -553,6 +557,8 @@ public def pythonRealizeCoercion : Laurel.Coercion → Laurel.StmtExprMd → Lau
     | "ListAny" => pyCoerceCall "Any..as_ListAny!" e
     | "DictStrAny" => pyCoerceCall "Any..as_Dict!" e
     | "Composite" => pyCoerceCall "Any..as_Composite!" e
+    -- `Any -> Error`: unbox via the `exception` constructor's accessor `Any..get_error!`.
+    | "Error" => pyCoerceCall "Any..get_error!" e
     | _ => e
 
 /-- Python BOOL-CONTEXT coercion (truthiness), keyed on the SOURCE type. Applied at bool-context
