@@ -197,7 +197,11 @@ def pythonTypeToHighType (aliases : Std.HashMap String HighType := {}) : PythonT
     -- expression instead of resolving to a phantom composite `bytes` (which caused
     -- `expected 'Composite'/'bytes'` mismatches, e.g. a bytes value into a dict slot).
     | "bytes" => .TCore "Any"
-    -- Bare (unsubscripted) container aliases must normalize the SAME as the subscripted
+    -- Unmodeled stdlib value types used as annotations: their values flow as `Any` (no Core
+    -- encoding), so map the annotation to `Any` too (same rationale as `bytes`). Without this a
+    -- bare `datetime`/`date`/… annotation falls to `UserDefined` → phantom composite → the var
+    -- "resolves to variable, expected composite type".
+    | "datetime" | "date" | "time" | "timedelta" | "Decimal" | "Callable" => .TCore "Any"
     -- forms below (`dict`/`Dict` → DictStrAny, `list`/`List`/... → ListAny). Without the
     -- capitalized `typing` spellings here, a bare `Dict`/`List` annotation fell to the
     -- `UserDefined` arm → phantom composite `Dict`, causing `expected 'Dict', got
@@ -216,7 +220,11 @@ def pythonTypeToHighType (aliases : Std.HashMap String HighType := {}) : PythonT
     | "dict" | "Dict" => .TCore "DictStrAny"
     | "list" | "List" | "tuple" | "Tuple" | "set" | "Set" | "frozenset" => .TCore "ListAny"
     | "Optional" | "Union" | "Type"
-    | "Literal" | "Unpack" | "NotRequired" | "Required" => .TCore "Any"
+    | "Literal" | "Unpack" | "NotRequired" | "Required"
+    -- `Callable[..., R]` is a function value; it flows as `Any` (no Core function type). Erase
+    -- the subscripted form to `Any` so `f: Callable[..., Any]` doesn't become phantom composite
+    -- `Callable` ("resolves to variable, expected composite type").
+    | "Callable" => .TCore "Any"
     | other => .UserDefined { text := other, uniqueId := none }
   | _ => .TCore "Any"
 
