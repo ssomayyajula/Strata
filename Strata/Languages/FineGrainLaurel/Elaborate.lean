@@ -98,6 +98,22 @@ structure ElabTypeEnv where
   classFields : Std.HashMap String (List (String × HighType)) := {}
   deriving Inhabited
 
+/-- Collect `(name, type)` for every `Declare` target in a statement tree, recursing through nested
+    blocks. Used to seed Python module globals (declared in the `__main__` proc) into the elaborator
+    env even after later passes wrap the body in additional blocks. -/
+partial def collectDeclTargets (s : StmtExprMd) : List (Identifier × HighTypeMd) :=
+  let here : List (Identifier × HighTypeMd) := match s.val with
+    | .Assign [⟨.Declare ⟨nm, ty⟩, _⟩] _ => [(nm, ty)]
+    | .Var (.Declare ⟨nm, ty⟩) => [(nm, ty)]
+    | _ => []
+  let nested : List (Identifier × HighTypeMd) := match s.val with
+    | .Block ss _ => ss.flatMap collectDeclTargets
+    | .IfThenElse _ t e => collectDeclTargets t ++ (e.map collectDeclTargets |>.getD [])
+    | .While _ _ _ b => collectDeclTargets b
+    | .Assign _ v => collectDeclTargets v
+    | _ => []
+  here ++ nested
+
 /-- Builds the type environment from a Laurel program's declarations. Scans all
     procedures (user + runtime) for signatures, all types for class fields. -/
 def buildElabEnvFromProgram (program : Laurel.Program) (runtime : Laurel.Program := default) : ElabTypeEnv := Id.run do
@@ -135,14 +151,10 @@ def buildElabEnvFromProgram (program : Laurel.Program) (runtime : Laurel.Program
         | .Opaque _ (some b) _ => some b
         | _ => none
       if let some body := bodyOpt then
-        let stmts := match body.val with | .Block ss _ => ss | _ => [body]
-        for s in stmts do
-          match s.val with
-          | .Assign [⟨.Declare ⟨nm, ty⟩, _⟩] _ =>
-            unless names.contains nm.text do names := names.insert nm.text (.variable ty.val)
-          | .Var (.Declare ⟨nm, ty⟩) =>
-            unless names.contains nm.text do names := names.insert nm.text (.variable ty.val)
-          | _ => pure ()
+        -- Recurse through nested blocks: later passes (e.g. ContractPass) wrap `__main__`'s body,
+        -- pushing the original top-level declares one or more blocks deep.
+        for (nm, ty) in collectDeclTargets body do
+          unless names.contains nm.text do names := names.insert nm.text (.variable ty.val)
   { names, classFields }
 
 def mkLaurel (md : Option FileRange) (e : StmtExpr) : StmtExprMd :=

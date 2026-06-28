@@ -3165,6 +3165,22 @@ def validateDiamondFieldAccesses (model: SemanticModel) (program : Program) : Li
     It will be overwritten with the real node when the definition is fully resolved. -/
 private def placeholderNode : ResolvedNode := .var "$placeholder" { val := .TVoid, source := none }
 
+/-- Collect `(name, type)` for every `Declare` target in a statement tree, recursing through nested
+    blocks (and the obvious nested-block carriers). Used to find Python module globals declared in the
+    synthesized `__main__` proc even after later passes wrap its body in additional blocks. -/
+partial def collectMainGlobalDecls (s : StmtExprMd) : List (Identifier × HighTypeMd) :=
+  let here : List (Identifier × HighTypeMd) := match s.val with
+    | .Assign [⟨.Declare ⟨nm, ty⟩, _⟩] _ => [(nm, ty)]
+    | .Var (.Declare ⟨nm, ty⟩) => [(nm, ty)]
+    | _ => []
+  let nested : List (Identifier × HighTypeMd) := match s.val with
+    | .Block ss _ => ss.flatMap collectMainGlobalDecls
+    | .IfThenElse _ t e => collectMainGlobalDecls t ++ (e.map collectMainGlobalDecls |>.getD [])
+    | .While _ _ _ b => collectMainGlobalDecls b
+    | .Assign _ v => collectMainGlobalDecls v
+    | _ => []
+  here ++ nested
+
 /-- Pre-register all top-level names into scope so that declaration order doesn't matter.
     This assigns fresh IDs and adds placeholder scope entries for:
     - Type names (composite, constrained, datatype) and their constructors/destructors/fields
@@ -3220,16 +3236,14 @@ private def preRegisterTopLevel (program : Program) : ResolveM Unit := do
         | .Opaque _ (some b) _ => some b
         | _ => none
       if let some body := bodyOpt then
-        let stmts := match body.val with | .Block ss _ => ss | _ => [body]
-        for s in stmts do
-          let decl? : Option (Identifier × HighTypeMd) := match s.val with
-            | .Assign [⟨.Declare ⟨nm, ty⟩, _⟩] _ => some (nm, ty)
-            | .Var (.Declare ⟨nm, ty⟩) => some (nm, ty)
-            | _ => none
-          if let some (nm, ty) := decl? then
-            unless (← get).scope.get? nm.text |>.isSome do
-              let ty' ← resolveHighType ty
-              let _ ← defineNameCheckDup nm (.var nm ty')
+        -- Collect module-global `Declare`s anywhere in `__main__`'s body, RECURSING through nested
+        -- blocks: later passes (e.g. ContractPass `assume pre; body; assert post`) wrap the body, so
+        -- the original top-level declares end up one or more blocks deep — a shallow scan would
+        -- miss them on re-resolve and reintroduce "'X' is not defined".
+        for (nm, ty) in collectMainGlobalDecls body do
+          unless (← get).scope.get? nm.text |>.isSome do
+            let ty' ← resolveHighType ty
+            let _ ← defineNameCheckDup nm (.var nm ty')
 
 /-! ## Entry point -/
 
