@@ -201,7 +201,7 @@ def pythonTypeToHighType (aliases : Std.HashMap String HighType := {}) : PythonT
     -- encoding), so map the annotation to `Any` too (same rationale as `bytes`). Without this a
     -- bare `datetime`/`date`/… annotation falls to `UserDefined` → phantom composite → the var
     -- "resolves to variable, expected composite type".
-    | "datetime" | "date" | "time" | "timedelta" | "Decimal" | "Callable" => .TCore "Any"
+    | "datetime" | "date" | "time" | "timedelta" | "Decimal" | "Callable" | "Path" => .TCore "Any"
     -- forms below (`dict`/`Dict` → DictStrAny, `list`/`List`/... → ListAny). Without the
     -- capitalized `typing` spellings here, a bare `Dict`/`List` annotation fell to the
     -- `UserDefined` arm → phantom composite `Dict`, causing `expected 'Dict', got
