@@ -513,6 +513,18 @@ partial def translateAssign (sr : SourceRange) (target : StrataPython.expr Resol
     | _ => tell [← mkExpr sr (.Assign [toVarTarget (← translateExpr target)] (← translateExpr value))]
   | _ => tell [← mkExpr sr (.Assign [toVarTarget (← translateExpr target)] (← translateExpr value))]
 
+/-- Translate an annotated assignment whose annotation is `float` (`TReal`). If the translated RHS is a
+    bare integer literal, widen it to a `LiteralDecimal` (Python: an `int` literal in a `float` slot is a
+    float) so its Core type is `real` and matches the slot — Core cannot unify `int` with `real`. Other
+    RHS shapes are assigned unchanged. -/
+partial def translateAnnAssignReal (sr : SourceRange) (target : StrataPython.expr ResolvedAnn)
+    (value : StrataPython.expr ResolvedAnn) : TransM Unit := do
+  let rhs ← translateExpr value
+  let rhs' := match rhs.val with
+    | .LiteralInt n => { rhs with val := .LiteralDecimal (Decimal.ofInt n) }
+    | _ => rhs
+  tell [← mkExpr sr (.Assign [toVarTarget (← translateExpr target)] rhs')]
+
 partial def translateStmt (s : StrataPython.stmt ResolvedAnn) : TransM Unit := do
   let sr := s.ann.sr
   match s with
@@ -537,9 +549,20 @@ partial def translateStmt (s : StrataPython.stmt ResolvedAnn) : TransM Unit := d
           subscriptWriteBack sr target (← translateExpr value)
       | _ => translateAssign sr target value
 
-  | .AnnAssign _ target _ value _ => do
+  | .AnnAssign _ target annotation value _ => do
       match value.val with
-      | some val => translateAssign sr target val
+      | some val =>
+          -- Python widens an integer literal in a `float`-annotated slot to a float
+          -- (`total: float = 0` means `0.0`). The annotation is authoritative (we assume all
+          -- assignments are annotated), so when it resolves to `TReal` and the translated RHS is an
+          -- integer literal, rewrite that literal as a `LiteralDecimal`. This keeps the value's Core
+          -- type (`real`) matching the slot without any int→real coercion — Core's typechecker cannot
+          -- unify `int` with `real`, so an un-widened `0` would otherwise abort ("Impossible to unify
+          -- real with int", e.g. cost_tracker's `total: float = 0`).
+          match annotation with
+          | .Name _ n _ => if n.val == "float" then translateAnnAssignReal sr target val
+                           else translateAssign sr target val
+          | _ => translateAssign sr target val
       | none => pure ()
 
   | .AugAssign ann target _ value => match ann.info with
