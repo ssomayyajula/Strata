@@ -348,24 +348,30 @@ where
         return [⟨ .Return v', source ⟩]
     | .Assign targets v =>
 
+      -- A write to an attribute of an UNMODELED receiver (e.g. `ssl_context.verify_mode =
+      -- CERT_REQUIRED` or `parser.print_usage = parser.print_help`, where the receiver is an external
+      -- object): the single target is a `.Field` whose field name is NOT in the type hierarchy, so
+      -- there is no `updateField` to emit and the write has no effect on any modeled heap state.
+      -- Match v2 (HeapParameterization.lean: the unresolved single-FieldSelect case returns a bare
+      -- `.Hole`): DROP the whole statement — including the RHS — replacing it with a hole. Dropping the
+      -- RHS is essential: keeping it (snapshotting into a throwaway local) would leave a reference like
+      -- `$tmp := CERT_REQUIRED` that lands in a functional context and trips Core's "No free variables
+      -- allowed here" check. A genuine resolution error on a MODELED field is reported by the resolver.
+      match targets with
+      | [⟨.Field _ fieldName, _⟩] =>
+        if (resolveQualifiedFieldName model fieldName).isNone then
+          return [⟨ .Hole, source ⟩]
+      | _ => pure ()
+
       -- Process field targets
       let (processedTargets, updateStatements) <-
         targets.attach.foldlM (init := ([], [])) fun (accTargets, accStmts) ⟨t, _⟩ =>
           match _htv : t.val with
           | .Field target fieldName => do
               let some qualifiedName := resolveQualifiedFieldName model fieldName
-                -- Field name did not resolve to a modeled field. This happens for a write to an
-                -- attribute of an UNMODELED receiver (e.g. `parser.print_usage = parser.print_help`
-                -- where `parser` is an external argparse object): the field isn't in the type
-                -- hierarchy, so there is no `updateField` to emit and the write has no effect on any
-                -- modeled heap state. Lower it to a throwaway `Declare` target (the RHS still flows in
-                -- for its value/effects, but the store is dropped) so NO unlowered `.Field` target
-                -- survives to Core — which would otherwise throw the "Field targets … should have been
-                -- lowered" StrataBug. (v2 reaches a verdict here; v4 must not hard-fail.) A genuine
-                -- resolution error on a MODELED field is reported separately by the resolution pass.
-                | do let freshVar ← freshVarName
-                     let valTy := (model.get fieldName).getType
-                     return (accTargets ++ [mkVarMd (.Declare ⟨freshVar, valTy⟩)], accStmts)
+                -- Multi-target assignment with an unresolved field (rare): keep the target as-is; the
+                -- single-target case above already handled the common unmodeled-receiver write.
+                | return (accTargets ++ [t], accStmts)
               let valTy := (model.get fieldName).getType
               recordBoxConstructor model valTy.val
               let freshVar ← freshVarName
