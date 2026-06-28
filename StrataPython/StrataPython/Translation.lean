@@ -202,6 +202,12 @@ def pythonTypeToHighType (aliases : Std.HashMap String HighType := {}) : PythonT
     -- bare `datetime`/`date`/… annotation falls to `UserDefined` → phantom composite → the var
     -- "resolves to variable, expected composite type".
     | "datetime" | "date" | "time" | "timedelta" | "Decimal" | "Callable" | "Path" => .TCore "Any"
+    -- botocore-internal model types (`from botocore.model import OperationModel, StructureShape`)
+    -- used as annotations on values obtained from `client._service_model...`. These are unmodeled
+    -- (no Core encoding; their values flow as `Any`), so map the annotation to `Any` too — otherwise
+    -- a bare `OperationModel`/`StructureShape` annotation falls to `UserDefined` → phantom composite →
+    -- "resolves to variable, expected composite type" (same rationale as `datetime`/`Path`/`client`).
+    | "OperationModel" | "StructureShape" | "ServiceModel" => .TCore "Any"
     -- `from boto3 import client` then `x: client` — `client` is the boto3 factory used as an
     -- (unmodeled) type annotation; its values flow as `Any`. Only hit in TYPE position (this fn
     -- runs on annotations), so a value variable named `client` is unaffected.
