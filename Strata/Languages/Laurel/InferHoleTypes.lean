@@ -100,11 +100,19 @@ private def inferExpr (expr : StmtExprMd) (expectedType : HighTypeMd) : InferHol
   match val with
   | .Hole det _ =>
       if expectedType.val == .Unknown then
+        -- The hole's context could not pin a concrete type (e.g. the RHS of
+        -- `x = obj.attr` where `obj` is an unmodeled external value). Annotate the
+        -- hole with the `Unknown` type anyway (matching v2) and record the
+        -- statistic, but DO NOT emit a diagnostic: an unresolved hole is sound
+        -- (downstream `translateType` maps `.Unknown` to the gradual `Any`, and
+        -- `EliminateDeterministicHoles` turns it into a fresh nondeterministic
+        -- value), so the program still produces valid Core. Emitting a `.UserError`
+        -- here made the whole pipeline abort with no Core, where v2 reaches a
+        -- verdict (e.g. `parser.print_usage = parser.print_help` in aws_service).
         modify fun s => { s with
           statistics := s.statistics.increment s!"{InferHoleTypesStats.holesLeftUnknown}"
-          diagnostics := s.diagnostics ++ [diagnosticFromSource source "could not infer type"]
         }
-        return expr
+        return ⟨.Hole det (some expectedType), source⟩
       else
         modify fun s => { s with statistics := s.statistics.increment s!"{InferHoleTypesStats.holesAnnotated}" }
         return ⟨.Hole det (some expectedType), source⟩

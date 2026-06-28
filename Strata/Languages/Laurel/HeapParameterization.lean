@@ -354,8 +354,18 @@ where
           match _htv : t.val with
           | .Field target fieldName => do
               let some qualifiedName := resolveQualifiedFieldName model fieldName
-                -- Field name did not resolve; a diagnostic will have been emitted by the resolution pass.
-                | return (accTargets ++ [t], accStmts)
+                -- Field name did not resolve to a modeled field. This happens for a write to an
+                -- attribute of an UNMODELED receiver (e.g. `parser.print_usage = parser.print_help`
+                -- where `parser` is an external argparse object): the field isn't in the type
+                -- hierarchy, so there is no `updateField` to emit and the write has no effect on any
+                -- modeled heap state. Lower it to a throwaway `Declare` target (the RHS still flows in
+                -- for its value/effects, but the store is dropped) so NO unlowered `.Field` target
+                -- survives to Core — which would otherwise throw the "Field targets … should have been
+                -- lowered" StrataBug. (v2 reaches a verdict here; v4 must not hard-fail.) A genuine
+                -- resolution error on a MODELED field is reported separately by the resolution pass.
+                | do let freshVar ← freshVarName
+                     let valTy := (model.get fieldName).getType
+                     return (accTargets ++ [mkVarMd (.Declare ⟨freshVar, valTy⟩)], accStmts)
               let valTy := (model.get fieldName).getType
               recordBoxConstructor model valTy.val
               let freshVar ← freshVarName
