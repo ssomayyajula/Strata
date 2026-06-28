@@ -202,6 +202,10 @@ def pythonTypeToHighType (aliases : Std.HashMap String HighType := {}) : PythonT
     -- bare `datetime`/`date`/… annotation falls to `UserDefined` → phantom composite → the var
     -- "resolves to variable, expected composite type".
     | "datetime" | "date" | "time" | "timedelta" | "Decimal" | "Callable" | "Path" => .TCore "Any"
+    -- `from boto3 import client` then `x: client` — `client` is the boto3 factory used as an
+    -- (unmodeled) type annotation; its values flow as `Any`. Only hit in TYPE position (this fn
+    -- runs on annotations), so a value variable named `client` is unaffected.
+    | "client" => .TCore "Any"
     -- forms below (`dict`/`Dict` → DictStrAny, `list`/`List`/... → ListAny). Without the
     -- capitalized `typing` spellings here, a bare `Dict`/`List` annotation fell to the
     -- `UserDefined` arm → phantom composite `Dict`, causing `expected 'Dict', got
